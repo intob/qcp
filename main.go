@@ -52,6 +52,9 @@ func main() {
 	}
 
 	match := func(src string) bool {
+		if path.Ext(src) == ".DS_Store" {
+			return false
+		}
 		base := strings.TrimPrefix(src, rootSrc)
 		for _, pattern := range patterns {
 			if strings.HasPrefix(base, pattern) {
