@@ -32,11 +32,9 @@ type result struct {
 func main() {
 	skipConf := flag.Bool("y", false, "skip confirmation")
 	flag.Parse()
-
 	if flag.NArg() < 2 {
 		exit(1, "specify src and dst path")
 	}
-
 	rootSrc, err := expandPath(flag.Arg(0))
 	if err != nil {
 		exit(2, "err expanding src path: %v", err)
@@ -45,35 +43,14 @@ func main() {
 	if err != nil {
 		exit(3, "err expanding dst path: %v", err)
 	}
-
-	patterns, err := readPatterns("/etc/qcpinclude")
-	if err != nil {
-		exit(5, "err reading globfile: %v", err)
-	}
-
-	match := func(src string) bool {
-		if path.Ext(src) == ".DS_Store" {
-			return false
-		}
-		base := strings.TrimPrefix(src, rootSrc)
-		for _, pattern := range patterns {
-			if strings.HasPrefix(base, pattern) {
-				return true
-			}
-		}
-		return false
-	}
-
 	ops := make([]*op, 0)
-	for op := range walk(rootSrc, rootDst, match) {
+	for op := range walk(rootSrc, rootDst) {
 		ops = append(ops, op)
 		fmt.Printf("plan: %s ->%s\n", op.src, op.dst)
 	}
-
 	if !*skipConf && !confirm() {
 		exit(4, "aborted by user")
 	}
-
 	pool := fnpool.NewPool(runtime.NumCPU())
 	var total atomic.Int64
 	var wg sync.WaitGroup
@@ -95,22 +72,26 @@ func main() {
 	fmt.Printf("copied %s from %s to %s\n", size, rootSrc, rootDst)
 }
 
-func walk(rootSrc, rootDst string, match func(src string) bool) <-chan *op {
+func walk(srcRoot, dstRoot string) <-chan *op {
+	patterns, err := readPatterns("/etc/qcpinclude")
+	if err != nil {
+		exit(5, "err reading globfile: %v", err)
+	}
 	ops := make(chan *op, 1)
 	go func(ops chan<- *op) {
 		defer close(ops)
-		filepath.WalkDir(rootSrc, func(src string, d fs.DirEntry, err error) error {
+		filepath.WalkDir(srcRoot, func(src string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
 			if d != nil && d.IsDir() {
 				return nil
 			}
-			if !match(src) {
+			if !match(srcRoot, src, patterns) {
 				return nil
 			}
-			srcNoRoot := strings.Replace(src, rootSrc, "", 1)
-			dst := path.Join(rootDst, srcNoRoot)
+			srcRel := strings.Replace(src, srcRoot, "", 1)
+			dst := path.Join(dstRoot, srcRel)
 			ops <- &op{
 				src: src,
 				dst: dst,
@@ -120,6 +101,19 @@ func walk(rootSrc, rootDst string, match func(src string) bool) <-chan *op {
 		})
 	}(ops)
 	return ops
+}
+
+func match(srcRoot, src string, patterns []string) bool {
+	if path.Ext(src) == ".DS_Store" {
+		return false
+	}
+	base := strings.TrimPrefix(src, srcRoot)
+	for _, pattern := range patterns {
+		if strings.HasPrefix(base, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 func prepJob(src, dst string) func() <-chan *result {
