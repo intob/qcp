@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"io"
@@ -11,27 +12,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/inneslabs/fnpool"
 	"github.com/inneslabs/jfmt"
 )
-
-var ignoreExts = []string{
-	".DS_Store",
-}
-
-var inc = []string{
-	".gitconfig",
-	".keys/",
-	".ssh/",
-	".zshrc",
-	"Documents/",
-	"Misc/",
-	"Music/",
-	"Pictures/",
-	"Video/",
-}
 
 type op struct {
 	src, dst string
@@ -48,7 +34,7 @@ func main() {
 	flag.Parse()
 
 	if flag.NArg() < 2 {
-		exit(1, "specify src and dst paths")
+		exit(1, "specify src and dst path")
 	}
 
 	rootSrc, err := expandPath(flag.Arg(0))
@@ -60,51 +46,57 @@ func main() {
 		exit(3, "err expanding dst path: %v", err)
 	}
 
+	patterns, err := readPatterns("/etc/qcpinclude")
+	if err != nil {
+		exit(5, "err reading globfile: %v", err)
+	}
+
 	match := func(src string) bool {
-		ext := path.Ext(src)
-		for _, ignoreExt := range ignoreExts {
-			if ext == ignoreExt {
-				return false
+		base := strings.Replace(src, rootSrc, "", 1)
+		for _, pattern := range patterns {
+			match, err := filepath.Match(pattern, base)
+			if err != nil {
+				exit(6, "malformed pattern: %v", err)
 			}
-		}
-		rel, err := filepath.Rel(rootSrc, src)
-		if err != nil {
-			exit(4, "err resolving path: %v", err)
-		}
-		for _, i := range inc {
-			if strings.HasPrefix(rel, i) {
+			if match {
 				return true
 			}
 		}
 		return false
 	}
 
-	if !*skipConf && !confirm(rootSrc, rootDst, match) {
+	ops := make([]*op, 0)
+	for op := range walk(rootSrc, rootDst, match) {
+		ops = append(ops, op)
+		fmt.Printf("plan: %s ->%s\n", op.src, op.dst)
+	}
+
+	if !*skipConf && !confirm() {
 		exit(4, "aborted by user")
 	}
 
 	pool := fnpool.NewPool(runtime.NumCPU())
 	var total atomic.Int64
-	for job := range walk(rootSrc, rootDst, match) {
+	var wg sync.WaitGroup
+	for _, op := range ops {
+		wg.Add(1)
 		pool.Dispatch(func() {
-			res := <-job.do()
+			defer wg.Done()
+			res := <-op.do()
 			if res.err != nil {
 				fmt.Printf("ERROR: %v\n", res.err)
 				return
 			}
-			fmt.Printf("done: %s\n", job.dst)
+			fmt.Printf("done: ->%s\n", op.dst)
 			total.Add(res.n)
 		})
 	}
-	pool.StopAndWait()
+	wg.Wait()
 	size := jfmt.FmtSize64(uint64(total.Load()))
 	fmt.Printf("copied %s from %s to %s\n", size, rootSrc, rootDst)
 }
 
-func confirm(rootSrc, rootDst string, match func(src string) bool) bool {
-	for job := range walk(rootSrc, rootDst, match) {
-		fmt.Printf("plan: %s -> %s\n", flag.Arg(0), job.dst)
-	}
+func confirm() bool {
 	fmt.Print("enter \"y\" to confirm: ")
 	var resp string
 	fmt.Scan(&resp)
@@ -122,14 +114,15 @@ func walk(rootSrc, rootDst string, match func(src string) bool) <-chan *op {
 			if d != nil && d.IsDir() {
 				return nil
 			}
-			if match(src) {
-				srcNoRoot := strings.Replace(src, rootSrc, "", 1)
-				dst := path.Join(rootDst, srcNoRoot)
-				ops <- &op{
-					src: src,
-					dst: dst,
-					do:  prepJob(src, dst),
-				}
+			if !match(src) {
+				return nil
+			}
+			srcNoRoot := strings.Replace(src, rootSrc, "", 1)
+			dst := path.Join(rootDst, srcNoRoot)
+			ops <- &op{
+				src: src,
+				dst: dst,
+				do:  prepJob(src, dst),
 			}
 			return nil
 		})
@@ -141,39 +134,38 @@ func prepJob(src, dst string) func() <-chan *result {
 	return func() <-chan *result {
 		done := make(chan *result)
 		go func() {
-			defer close(done)
-			rd, err := os.Open(src)
-			if err != nil {
-				done <- &result{err, 0}
-				return
-			}
-			defer rd.Close()
-			info, err := os.Stat(src)
-			if err != nil {
-				done <- &result{err, 0}
-				return
-			}
-			perm := info.Mode().Perm()
-			err = os.MkdirAll(path.Dir(dst), 0777)
-			if err != nil {
-				done <- &result{err, 0}
-				return
-			}
-			wr, err := os.Create(dst)
-			if err != nil {
-				done <- &result{err, 0}
-				return
-			}
-			defer wr.Close()
-			n, err := io.Copy(wr, rd)
-			if err != nil {
-				done <- &result{err, 0}
-				return
-			}
-			done <- &result{os.Chmod(dst, perm), n}
+			done <- job(src, dst)
+			close(done)
 		}()
 		return done
 	}
+}
+
+func job(src, dst string) *result {
+	rd, err := os.Open(src)
+	if err != nil {
+		return &result{err, 0}
+	}
+	defer rd.Close()
+	info, err := os.Stat(src)
+	if err != nil {
+		return &result{err, 0}
+	}
+	perm := info.Mode().Perm()
+	err = os.MkdirAll(path.Dir(dst), 0777)
+	if err != nil {
+		return &result{err, 0}
+	}
+	wr, err := os.Create(dst)
+	if err != nil {
+		return &result{err, 0}
+	}
+	defer wr.Close()
+	n, err := io.Copy(wr, rd)
+	if err != nil {
+		return &result{err, 0}
+	}
+	return &result{os.Chmod(dst, perm), n}
 }
 
 func expandPath(path string) (string, error) {
@@ -191,4 +183,22 @@ func expandPath(path string) (string, error) {
 func exit(code int, msg string, args ...any) {
 	fmt.Printf(msg+"\n", args...)
 	os.Exit(code)
+}
+
+func readPatterns(filename string) ([]string, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	var patterns []string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		patterns = append(patterns, line)
+	}
+	return patterns, scanner.Err()
 }
