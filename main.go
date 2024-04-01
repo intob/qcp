@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"io"
 	"io/fs"
@@ -12,8 +13,8 @@ import (
 )
 
 type job struct {
-	srcFname string
-	do       func(rootDst string) <-chan error
+	src, dst string
+	do       func() <-chan error
 }
 
 func main() {
@@ -28,31 +29,54 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	match := func(srcFname string, err error) bool {
-		return filepath.Ext(srcFname) == ".txt"
+	match := func(src string) bool {
+		return filepath.Ext(src) == ".txt"
 	}
-	for job := range walk(rootSrc, match) {
-		err := <-job.do(rootDst)
+
+	skipConf := flag.Bool("y", false, "skip confirmation")
+	flag.Parse()
+	if !*skipConf && !confirm(rootSrc, rootDst, match) {
+		panic("aborted")
+	}
+
+	for job := range walk(rootSrc, rootDst, match) {
+		err := <-job.do()
 		if err != nil {
-			fmt.Printf("ERROR: copy %s: %s", job.srcFname, err)
+			fmt.Printf("ERROR: copy %s: %s", job.src, err)
 		} else {
-			fmt.Println("done:", job.srcFname)
+			fmt.Println("done:", job.src)
 		}
 	}
 }
 
-func walk(rootSrc string, match func(srcFname string, err error) bool) <-chan *job {
+func confirm(rootSrc, rootDst string, match func(src string) bool) bool {
+	for job := range walk(rootSrc, rootDst, match) {
+		fmt.Printf("%s -> %s\n", job.src, job.dst)
+	}
+	fmt.Print("enter \"y\" to confirm: ")
+	var resp string
+	fmt.Scan(&resp)
+	return resp == "y"
+}
+
+func walk(rootSrc, rootDst string, match func(src string) bool) <-chan *job {
 	ops := make(chan *job, 1)
 	go func() {
 		defer close(ops)
-		filepath.WalkDir(rootSrc, func(srcFname string, d fs.DirEntry, err error) error {
+		filepath.WalkDir(rootSrc, func(src string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
 			if d != nil && d.IsDir() {
 				return nil
 			}
-			if match(srcFname, err) {
+			if match(src) {
+				srcNoRoot := strings.Replace(src, rootSrc, "", 1)
+				dst := path.Join(rootDst, srcNoRoot)
 				ops <- &job{
-					srcFname: srcFname,
-					do:       prepJob(rootSrc, srcFname),
+					src: src,
+					dst: dst,
+					do:  prepJob(src, dst),
 				}
 			}
 			return err
@@ -61,42 +85,40 @@ func walk(rootSrc string, match func(srcFname string, err error) bool) <-chan *j
 	return ops
 }
 
-func prepJob(rootSrc, srcFname string) func(rootDst string) <-chan error {
-	return func(rootDst string) <-chan error {
+func prepJob(src, dst string) func() <-chan error {
+	return func() <-chan error {
 		done := make(chan error)
 		go func() {
 			defer close(done)
-			src, err := os.Open(srcFname)
+			rd, err := os.Open(src)
 			if err != nil {
 				done <- err
 				return
 			}
-			defer src.Close()
-			srcInfo, err := os.Stat(srcFname)
+			defer rd.Close()
+			info, err := os.Stat(src)
 			if err != nil {
 				done <- err
 				return
 			}
-			srcPerm := srcInfo.Mode().Perm()
-			srcNoRoot := strings.Replace(srcFname, rootSrc, "", 1)
-			dstFname := path.Join(rootDst, srcNoRoot)
-			err = os.MkdirAll(path.Dir(dstFname), 0777)
+			perm := info.Mode().Perm()
+			err = os.MkdirAll(path.Dir(dst), 0777)
 			if err != nil {
 				done <- err
 				return
 			}
-			dst, err := os.Create(dstFname)
+			wr, err := os.Create(dst)
 			if err != nil {
 				done <- err
 				return
 			}
-			defer dst.Close()
-			_, err = io.Copy(dst, src)
+			defer wr.Close()
+			_, err = io.Copy(wr, rd)
 			if err != nil {
 				done <- err
 				return
 			}
-			err = os.Chmod(dstFname, srcPerm)
+			err = os.Chmod(dst, perm)
 			if err != nil {
 				done <- err
 			}
