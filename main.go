@@ -52,13 +52,9 @@ func main() {
 	}
 
 	match := func(src string) bool {
-		base := strings.Replace(src, rootSrc, "", 1)
+		base := strings.TrimPrefix(src, rootSrc)
 		for _, pattern := range patterns {
-			match, err := filepath.Match(pattern, base)
-			if err != nil {
-				exit(6, "malformed pattern: %v", err)
-			}
-			if match {
+			if strings.HasPrefix(base, pattern) {
 				return true
 			}
 		}
@@ -96,16 +92,9 @@ func main() {
 	fmt.Printf("copied %s from %s to %s\n", size, rootSrc, rootDst)
 }
 
-func confirm() bool {
-	fmt.Print("enter \"y\" to confirm: ")
-	var resp string
-	fmt.Scan(&resp)
-	return resp == "y"
-}
-
 func walk(rootSrc, rootDst string, match func(src string) bool) <-chan *op {
 	ops := make(chan *op, 1)
-	go func() {
+	go func(ops chan<- *op) {
 		defer close(ops)
 		filepath.WalkDir(rootSrc, func(src string, d fs.DirEntry, err error) error {
 			if err != nil {
@@ -126,7 +115,7 @@ func walk(rootSrc, rootDst string, match func(src string) bool) <-chan *op {
 			}
 			return nil
 		})
-	}()
+	}(ops)
 	return ops
 }
 
@@ -168,23 +157,6 @@ func job(src, dst string) *result {
 	return &result{os.Chmod(dst, perm), n}
 }
 
-func expandPath(path string) (string, error) {
-	if strings.HasPrefix(path, "~/") {
-		usr, err := user.Current()
-		if err != nil {
-			return "", err
-		}
-		homeDir := usr.HomeDir
-		return filepath.Join(homeDir, path[2:]), nil
-	}
-	return filepath.Abs(path)
-}
-
-func exit(code int, msg string, args ...any) {
-	fmt.Printf(msg+"\n", args...)
-	os.Exit(code)
-}
-
 func readPatterns(filename string) ([]string, error) {
 	file, err := os.Open(filename)
 	if err != nil {
@@ -201,4 +173,28 @@ func readPatterns(filename string) ([]string, error) {
 		patterns = append(patterns, line)
 	}
 	return patterns, scanner.Err()
+}
+
+func expandPath(path string) (string, error) {
+	if strings.HasPrefix(path, "~/") {
+		usr, err := user.Current()
+		if err != nil {
+			return "", err
+		}
+		homeDir := usr.HomeDir
+		return filepath.Join(homeDir, path[2:]), nil
+	}
+	return filepath.Abs(path)
+}
+
+func confirm() bool {
+	fmt.Print("enter \"y\" to confirm: ")
+	var resp string
+	fmt.Scan(&resp)
+	return resp == "y"
+}
+
+func exit(code int, msg string, args ...any) {
+	fmt.Printf(msg+"\n", args...)
+	os.Exit(code)
 }
