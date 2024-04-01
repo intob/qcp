@@ -50,6 +50,7 @@ func main() {
 	if flag.NArg() < 2 {
 		exit(1, "specify src and dst paths")
 	}
+
 	rootSrc, err := expandPath(flag.Arg(0))
 	if err != nil {
 		exit(2, "err expanding src path: %v", err)
@@ -91,13 +92,13 @@ func main() {
 				fmt.Printf("ERROR: %v\n", res.err)
 				return
 			}
-			fmt.Printf("done: %s -> %s\n", flag.Arg(0), job.dst)
+			fmt.Printf("done: %s\n", job.dst)
 			total.Add(res.n)
 		})
 	}
 	pool.StopAndWait()
 	size := jfmt.FmtSize64(uint64(total.Load()))
-	fmt.Printf("copied %s to %s\n", size, rootDst)
+	fmt.Printf("copied %s from %s to %s\n", size, rootSrc, rootDst)
 }
 
 func confirm(rootSrc, rootDst string, match func(src string) bool) bool {
