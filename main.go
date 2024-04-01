@@ -91,11 +91,7 @@ func main() {
 				fmt.Printf("ERROR: %v\n", res.err)
 				return
 			}
-			relDst, err := filepath.Rel(rootDst, job.dst)
-			if err != nil {
-				panic(err)
-			}
-			fmt.Printf("done: %s -> %s\n", flag.Arg(0), relDst)
+			fmt.Printf("done: %s -> %s\n", flag.Arg(0), job.dst)
 			total.Add(res.n)
 		})
 	}
@@ -106,7 +102,7 @@ func main() {
 
 func confirm(rootSrc, rootDst string, match func(src string) bool) bool {
 	for job := range walk(rootSrc, rootDst, match) {
-		fmt.Printf("%s -> %s\n", job.src, job.dst)
+		fmt.Printf("plan: %s -> %s\n", flag.Arg(0), job.dst)
 	}
 	fmt.Print("enter \"y\" to confirm: ")
 	var resp string
