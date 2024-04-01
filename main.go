@@ -12,6 +12,18 @@ import (
 	"strings"
 )
 
+var inc = []string{
+	".gitconfig",
+	".keys/",
+	".ssh/",
+	".zshrc",
+	"Documents/",
+	"Misc/",
+	"Music/",
+	"Pictures/",
+	"Video/",
+}
+
 type job struct {
 	src, dst string
 	do       func() <-chan error
@@ -29,8 +41,18 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
 	match := func(src string) bool {
-		return filepath.Ext(src) == ".txt"
+		rel, err := filepath.Rel(rootSrc, src)
+		if err != nil {
+			panic(err)
+		}
+		for _, i := range inc {
+			if strings.HasPrefix(rel, i) {
+				return true
+			}
+		}
+		return false
 	}
 
 	skipConf := flag.Bool("y", false, "skip confirmation")
