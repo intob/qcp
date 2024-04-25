@@ -30,21 +30,22 @@ type result struct {
 }
 
 func main() {
+	const includeFile = "/etc/qcpinclude"
 	skipConf := flag.Bool("y", false, "skip confirmation")
 	flag.Parse()
 	if flag.NArg() < 2 {
 		exit(1, "specify src and dst path")
 	}
-	rootSrc, err := expandPath(flag.Arg(0))
+	srcRoot, err := expandPath(flag.Arg(0))
 	if err != nil {
 		exit(2, "err expanding src path: %v", err)
 	}
-	rootDst, err := expandPath(flag.Arg(1))
+	dstRoot, err := expandPath(flag.Arg(1))
 	if err != nil {
 		exit(3, "err expanding dst path: %v", err)
 	}
 	ops := make([]*op, 0)
-	for op := range walk(rootSrc, rootDst) {
+	for op := range walk(includeFile, srcRoot, dstRoot) {
 		ops = append(ops, op)
 		fmt.Printf("plan: %s ->%s\n", op.src, op.dst)
 	}
@@ -69,13 +70,13 @@ func main() {
 	}
 	wg.Wait()
 	size := jfmt.FmtSize64(uint64(total.Load()))
-	fmt.Printf("copied %s from %s to %s\n", size, rootSrc, rootDst)
+	fmt.Printf("copied %s from %s to %s\n", size, srcRoot, dstRoot)
 }
 
-func walk(srcRoot, dstRoot string) <-chan *op {
-	patterns, err := readPatterns("/etc/qcpinclude")
+func walk(includeFile, srcRoot, dstRoot string) <-chan *op {
+	patterns, err := readPatterns(includeFile)
 	if err != nil {
-		exit(5, "err reading globfile: %v", err)
+		exit(5, "err reading %q: %v", includeFile, err)
 	}
 	ops := make(chan *op, 1)
 	go func(ops chan<- *op) {
@@ -90,7 +91,7 @@ func walk(srcRoot, dstRoot string) <-chan *op {
 			if !match(srcRoot, src, patterns) {
 				return nil
 			}
-			srcRel := strings.Replace(src, srcRoot, "", 1)
+			srcRel := strings.TrimPrefix(src, srcRoot)
 			dst := path.Join(dstRoot, srcRel)
 			ops <- &op{
 				src: src,
@@ -173,13 +174,13 @@ func readPatterns(filename string) ([]string, error) {
 }
 
 func expandPath(path string) (string, error) {
-	if strings.HasPrefix(path, "~/") {
+	if strings.HasPrefix(path, "~") {
 		usr, err := user.Current()
 		if err != nil {
 			return "", err
 		}
 		homeDir := usr.HomeDir
-		return filepath.Join(homeDir, path[2:]), nil
+		return filepath.Join(homeDir, path[1:]), nil
 	}
 	return filepath.Abs(path)
 }
