@@ -44,7 +44,7 @@ type CardConfig struct {
 type DriveConfig struct {
 	Volume string `json:"volume"`
 	Root   string `json:"root"`
-	Role   string `json:"role"` // "primary" or "archive"
+	Role   string `json:"role"` // "hot" or "cold"
 }
 
 type mountedCard struct {
@@ -146,8 +146,8 @@ func main() {
 	toMission := flag.Int("to", 0, "append to existing mission number")
 	verifyMission := flag.Int("verify", 0, "re-verify mission number across all mounted drives")
 	checksumMission := flag.Int("checksum", 0, "generate checksums.b3 for a mission by cross-verifying all mounted drives")
-	updateMission := flag.Int("update", 0, "copy files missing from archive drives for an existing mission")
-	doSync := flag.Bool("sync", false, "sync missions from primary drive to other mounted drives")
+	updateMission := flag.Int("update", 0, "copy files missing from cold drives for an existing mission")
+	doSync := flag.Bool("sync", false, "sync missions from hot drives to cold drives")
 	flag.Parse()
 
 	cfg := loadConfig()
@@ -492,14 +492,14 @@ func runSync(cfg Config, year int, skipConf bool) {
 	var archives []driveState
 	for _, d := range cfg.Drives {
 		switch d.Role {
-		case "primary":
+		case "hot":
 			if !dirExists(filepath.Join("/Volumes", d.Volume)) {
 				fmt.Printf("warning: primary %s not mounted, skipping\n", d.Volume)
 				continue
 			}
 			state, _ := scanDrive(d)
 			primaries = append(primaries, state)
-		case "archive":
+		case "cold":
 			state, ok := scanDrive(d)
 			if !ok {
 				fmt.Printf("warning: archive %s not mounted, skipping\n", d.Volume)
@@ -509,10 +509,10 @@ func runSync(cfg Config, year int, skipConf bool) {
 		}
 	}
 	if len(primaries) == 0 {
-		exit(1, "no primary drives mounted")
+		exit(1, "no hot drives mounted")
 	}
 	if len(archives) == 0 {
-		exit(1, "no archive drives mounted")
+		exit(1, "no cold drives mounted")
 	}
 
 	// build mission → source map across all primaries.
@@ -966,9 +966,9 @@ func runUpdate(cfg Config, missionNum int, year int, skipConf bool) {
 			continue
 		}
 		dir := filepath.Join(vol, d.Root, yearStr, slug)
-		if d.Role == "primary" {
+		if d.Role == "hot" {
 			if !dirExists(dir) {
-				exit(1, "mission %03d not found on primary drive %s", missionNum, d.Volume)
+				exit(1, "mission %03d not found on hot drive %s", missionNum, d.Volume)
 			}
 			primaryDir = dir
 		} else {
@@ -980,10 +980,10 @@ func runUpdate(cfg Config, missionNum int, year int, skipConf bool) {
 		}
 	}
 	if primaryDir == "" {
-		exit(1, "primary drive not mounted")
+		exit(1, "no hot drive mounted")
 	}
 	if len(archives) == 0 {
-		exit(1, "no archive drives mounted with this mission")
+		exit(1, "no cold drives mounted with this mission")
 	}
 
 	// index all files on primary
