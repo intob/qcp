@@ -96,15 +96,15 @@ func main() {
 	missionFlag := flag.String("mission", "", "mission name (e.g. \"Altissimo with Anton\")")
 	year := flag.Int("year", time.Now().Year(), "year override")
 	toMission := flag.Int("to", 0, "append to existing mission number")
-	verifyDir := flag.String("verify", "", "re-verify checksums in a mission dir")
+	verifyMission := flag.Int("verify", 0, "re-verify mission number across all mounted drives")
 	flag.Parse()
 
-	if *verifyDir != "" {
-		runVerify(*verifyDir)
+	cfg := loadConfig()
+
+	if *verifyMission > 0 {
+		runVerify(cfg, *verifyMission)
 		return
 	}
-
-	cfg := loadConfig()
 
 	cards := mountedCards(cfg.Cards)
 	if len(cards) == 0 {
@@ -324,55 +324,90 @@ func buildOps(scanned []scannedCard, dstRoots []string) []*op {
 	return ops
 }
 
-func runVerify(dir string) {
-	cPath := filepath.Join(dir, "checksums.b3")
-	f, err := os.Open(cPath)
-	if err != nil {
-		exit(1, "cannot open %s: %v", cPath, err)
+func runVerify(cfg Config, missionNum int) {
+	yearStr := strconv.Itoa(time.Now().Year())
+
+	type dirEntry struct {
+		vol string
+		dir string
 	}
-	defer f.Close()
+	var dirs []dirEntry
+	for _, d := range cfg.Drives {
+		vol := filepath.Join("/Volumes", d.Volume)
+		if !dirExists(vol) {
+			continue
+		}
+		slug, err := findMissionSlug(cfg.Drives, yearStr, missionNum)
+		if err != nil {
+			fmt.Printf("warning: mission %03d not found on %s\n", missionNum, d.Volume)
+			continue
+		}
+		dirs = append(dirs, dirEntry{d.Volume, filepath.Join(vol, d.Root, yearStr, slug)})
+	}
+	if len(dirs) == 0 {
+		exit(1, "mission %03d not found on any mounted drive", missionNum)
+	}
 
 	type entry struct{ hash, rel string }
-	var entries []entry
-	var totalSize int64
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		parts := strings.SplitN(scanner.Text(), "  ", 2)
-		if len(parts) == 2 {
-			entries = append(entries, entry{parts[0], parts[1]})
-			if info, err := os.Stat(filepath.Join(dir, parts[1])); err == nil {
-				totalSize += info.Size()
+	type dirJob struct {
+		dirEntry
+		entries   []entry
+		totalSize int64
+	}
+
+	var jobs []dirJob
+	for _, de := range dirs {
+		cPath := filepath.Join(de.dir, "checksums.b3")
+		var entries []entry
+		var totalSize int64
+		f, err := os.Open(cPath)
+		if err != nil {
+			fmt.Printf("warning: cannot open %s: %v\n", cPath, err)
+			continue
+		}
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			parts := strings.SplitN(scanner.Text(), "  ", 2)
+			if len(parts) == 2 {
+				entries = append(entries, entry{parts[0], parts[1]})
+				if info, err := os.Stat(filepath.Join(de.dir, parts[1])); err == nil {
+					totalSize += info.Size()
+				}
 			}
 		}
+		f.Close()
+		jobs = append(jobs, dirJob{de, entries, totalSize})
 	}
-	if err := scanner.Err(); err != nil {
-		exit(1, "err reading checksums: %v", err)
+	if len(jobs) == 0 {
+		exit(1, "no checksums.b3 found for mission %03d", missionNum)
 	}
 
-	fmt.Printf("verifying %d files in %s\n\n", len(entries), dir)
+	fmt.Printf("verifying mission %03d on %d drive(s)\n\n", missionNum, len(jobs))
 
 	p := mpb.New(mpb.WithWidth(64))
-	bar := addBar(p, filepath.Base(filepath.Dir(dir)), totalSize)
-
-	pool := fnpool.NewPool(runtime.NumCPU())
 	var failed atomic.Int64
 	var wg sync.WaitGroup
-	for _, e := range entries {
-		wg.Add(1)
-		e := e
-		pool.Dispatch(func() {
-			defer wg.Done()
-			got, err := hashFile(filepath.Join(dir, e.rel), bar)
-			if err != nil {
-				fmt.Printf("\nERROR: %v\n", err)
-				failed.Add(1)
-				return
-			}
-			if got != e.hash {
-				fmt.Printf("\nFAIL: %s\n", e.rel)
-				failed.Add(1)
-			}
-		})
+	pool := fnpool.NewPool(runtime.NumCPU())
+
+	for _, job := range jobs {
+		bar := addBar(p, job.vol, job.totalSize)
+		for _, e := range job.entries {
+			wg.Add(1)
+			e, dir, b := e, job.dir, bar
+			pool.Dispatch(func() {
+				defer wg.Done()
+				got, err := hashFile(filepath.Join(dir, e.rel), b)
+				if err != nil {
+					fmt.Printf("\nERROR: %v\n", err)
+					failed.Add(1)
+					return
+				}
+				if got != e.hash {
+					fmt.Printf("\nFAIL [%s]: %s\n", filepath.Base(dir), e.rel)
+					failed.Add(1)
+				}
+			})
+		}
 	}
 	wg.Wait()
 	p.Wait()
@@ -380,7 +415,11 @@ func runVerify(dir string) {
 	if n := failed.Load(); n > 0 {
 		exit(1, "%d file(s) failed", n)
 	}
-	fmt.Printf("\nall %d files ok\n", len(entries))
+	total := 0
+	for _, j := range jobs {
+		total += len(j.entries)
+	}
+	fmt.Printf("\nall %d files ok across %d drive(s)\n", total, len(jobs))
 }
 
 func findFiles(root string) ([]fileEntry, error) {
