@@ -73,60 +73,70 @@ type result struct {
 
 const ewmaWindow = 250 * time.Millisecond
 
+// barTracker aggregates increments from concurrent goroutines and feeds the
+// EWMA with a single coherent elapsed-time stream. Each bar gets one tracker;
+// all goroutines writing to that bar share it via incr().
+type barTracker struct {
+	bar     *mpb.Bar
+	mu      sync.Mutex
+	pending int64
+	last    time.Time
+}
+
+func (t *barTracker) incr(n int) {
+	if n <= 0 {
+		return
+	}
+	t.mu.Lock()
+	t.pending += int64(n)
+	now := time.Now()
+	if t.last.IsZero() {
+		t.last = now
+		t.mu.Unlock()
+		return
+	}
+	if elapsed := now.Sub(t.last); elapsed >= ewmaWindow {
+		t.bar.EwmaIncrBy(int(t.pending), elapsed)
+		t.pending = 0
+		t.last = now
+	}
+	t.mu.Unlock()
+}
+
+// flush sends any remaining pending bytes after all goroutines have finished.
+func (t *barTracker) flush() {
+	t.mu.Lock()
+	if t.pending > 0 && !t.last.IsZero() {
+		t.bar.EwmaIncrBy(int(t.pending), time.Since(t.last))
+		t.pending = 0
+	}
+	t.mu.Unlock()
+}
+
 type progressWriter struct {
-	w            io.Writer
-	bar          *mpb.Bar
-	pending      int
-	windowStart  time.Time
+	w       io.Writer
+	tracker *barTracker
 }
 
 func (pw *progressWriter) Write(p []byte) (int, error) {
-	if pw.windowStart.IsZero() {
-		pw.windowStart = time.Now()
-	}
 	n, err := pw.w.Write(p)
-	pw.pending += n
-	if elapsed := time.Since(pw.windowStart); elapsed >= ewmaWindow {
-		pw.bar.EwmaIncrBy(pw.pending, elapsed)
-		pw.pending = 0
-		pw.windowStart = time.Now()
+	if pw.tracker != nil {
+		pw.tracker.incr(n)
 	}
 	return n, err
-}
-
-func (pw *progressWriter) flush() {
-	if pw.pending > 0 {
-		pw.bar.EwmaIncrBy(pw.pending, time.Since(pw.windowStart))
-		pw.pending = 0
-	}
 }
 
 type progressReader struct {
-	r           io.Reader
-	bar         *mpb.Bar
-	pending     int
-	windowStart time.Time
+	r       io.Reader
+	tracker *barTracker
 }
 
 func (pr *progressReader) Read(p []byte) (int, error) {
-	if pr.windowStart.IsZero() {
-		pr.windowStart = time.Now()
-	}
 	n, err := pr.r.Read(p)
-	pr.pending += n
-	if elapsed := time.Since(pr.windowStart); elapsed >= ewmaWindow {
-		pr.bar.EwmaIncrBy(pr.pending, elapsed)
-		pr.pending = 0
-		pr.windowStart = time.Now()
+	if pr.tracker != nil {
+		pr.tracker.incr(n)
 	}
 	return n, err
-}
-
-func (pr *progressReader) flush() {
-	if pr.pending > 0 {
-		pr.bar.EwmaIncrBy(pr.pending, time.Since(pr.windowStart))
-		pr.pending = 0
-	}
 }
 
 func main() {
@@ -277,7 +287,7 @@ func main() {
 
 	// Phase 1: copy
 	p1 := mpb.NewWithContext(ctx, mpb.WithWidth(64))
-	copyBars := make(map[string]*mpb.Bar)
+	copyBars := make(map[string]*barTracker)
 	for _, dstRoot := range dstRoots {
 		copyBars[dstRoot] = addBar(p1, volName(dstRoot), totalSize)
 	}
@@ -305,6 +315,9 @@ func main() {
 		})
 	}
 	wg.Wait()
+	for _, t := range copyBars {
+		t.flush()
+	}
 	p1.Wait()
 
 	var copyFailed int
@@ -320,7 +333,7 @@ func main() {
 	// Phase 2: verify
 	fmt.Printf("\nverifying...\n\n")
 	p2 := mpb.NewWithContext(ctx, mpb.WithWidth(64))
-	verifyBars := make(map[string]*mpb.Bar)
+	verifyBars := make(map[string]*barTracker)
 	for _, dstRoot := range dstRoots {
 		verifyBars[dstRoot] = addBar(p2, volName(dstRoot), totalSize)
 	}
@@ -359,6 +372,9 @@ func main() {
 		})
 	}
 	wg2.Wait()
+	for _, t := range verifyBars {
+		t.flush()
+	}
 	p2.Wait()
 
 	if verifyFailed.Load() > 0 {
@@ -380,8 +396,8 @@ func main() {
 	fmt.Printf("\n%s copied and verified → %s\n", perDrive, missionSlug)
 }
 
-func addBar(p *mpb.Progress, name string, total int64) *mpb.Bar {
-	return p.AddBar(total,
+func addBar(p *mpb.Progress, name string, total int64) *barTracker {
+	bar := p.AddBar(total,
 		mpb.PrependDecorators(
 			decor.Name(fmt.Sprintf("%-12s", name)),
 			decor.CountersKibiByte("% .1f / % .1f  "),
@@ -391,6 +407,7 @@ func addBar(p *mpb.Progress, name string, total int64) *mpb.Bar {
 			decor.OnComplete(decor.EwmaETA(decor.ET_STYLE_GO, 150), "✓"),
 		),
 	)
+	return &barTracker{bar: bar}
 }
 
 type driveInfo struct {
@@ -587,7 +604,7 @@ func runSync(cfg Config, year int, skipConf bool) {
 	// Phase 1: copy — one bar per archive, all missions in parallel
 	fmt.Printf("\ncopying...\n\n")
 	p1 := mpb.NewWithContext(ctx, mpb.WithWidth(64))
-	copyBars := make(map[string]*mpb.Bar)
+	copyBars := make(map[string]*barTracker)
 	for vol, size := range archiveSize {
 		copyBars[vol] = addBar(p1, vol, size)
 	}
@@ -625,6 +642,9 @@ func runSync(cfg Config, year int, skipConf bool) {
 		}
 	}
 	wg.Wait()
+	for _, t := range copyBars {
+		t.flush()
+	}
 	p1.Wait()
 	if ctx.Err() != nil {
 		select {} // interrupt handler will os.Exit after user responds
@@ -643,7 +663,7 @@ func runSync(cfg Config, year int, skipConf bool) {
 	// Phase 2: verify — one bar per archive
 	fmt.Printf("\nverifying...\n\n")
 	p2 := mpb.NewWithContext(ctx, mpb.WithWidth(64))
-	verifyBars := make(map[string]*mpb.Bar)
+	verifyBars := make(map[string]*barTracker)
 	for vol, size := range archiveSize {
 		verifyBars[vol] = addBar(p2, vol, size)
 	}
@@ -687,6 +707,9 @@ func runSync(cfg Config, year int, skipConf bool) {
 		}
 	}
 	wg2.Wait()
+	for _, t := range verifyBars {
+		t.flush()
+	}
 	p2.Wait()
 
 	if verifyFailed.Load() > 0 {
@@ -703,7 +726,7 @@ func runSync(cfg Config, year int, skipConf bool) {
 	fmt.Printf("\n%s synced to %d archive(s)\n", perArchive, len(archiveSize))
 }
 
-func buildSyncOps(files []fileEntry, srcDir, dstDir string, bar *mpb.Bar) []*op {
+func buildSyncOps(files []fileEntry, srcDir, dstDir string, bar *barTracker) []*op {
 	var ops []*op
 	for _, f := range files {
 		src := filepath.Join(srcDir, f.rel)
@@ -755,7 +778,7 @@ type scannedCard struct {
 	files []fileEntry
 }
 
-func buildOps(scanned []scannedCard, dstRoots []string, bars map[string]*mpb.Bar) []*op {
+func buildOps(scanned []scannedCard, dstRoots []string, bars map[string]*barTracker) []*op {
 	var ops []*op
 	for _, sc := range scanned {
 		for _, f := range sc.files {
@@ -840,9 +863,11 @@ func runVerify(cfg Config, missionNum int) {
 	p := mpb.New(mpb.WithWidth(64))
 	var failed atomic.Int64
 	var wg sync.WaitGroup
+	var trackers []*barTracker
 
 	for _, job := range jobs {
 		bar := addBar(p, job.vol, job.totalSize)
+		trackers = append(trackers, bar)
 		pool := fnpool.NewPool(volInfos[job.vol].concurrency)
 		for _, e := range job.entries {
 			wg.Add(1)
@@ -863,6 +888,9 @@ func runVerify(cfg Config, missionNum int) {
 		}
 	}
 	wg.Wait()
+	for _, t := range trackers {
+		t.flush()
+	}
 	p.Wait()
 
 	if n := failed.Load(); n > 0 {
@@ -930,10 +958,12 @@ func runChecksum(cfg Config, missionNum int, year int) {
 	var mu sync.Mutex
 	var failed atomic.Int64
 	var wg sync.WaitGroup
+	var trackers []*barTracker
 
 	for i := range drives {
 		d := &drives[i]
 		bar := addBar(p, d.vol, totalSize)
+		trackers = append(trackers, bar)
 		pool := fnpool.NewPool(driveInfos[d.vol].concurrency)
 		for _, f := range files {
 			wg.Add(1)
@@ -953,6 +983,9 @@ func runChecksum(cfg Config, missionNum int, year int) {
 		}
 	}
 	wg.Wait()
+	for _, t := range trackers {
+		t.flush()
+	}
 	p.Wait()
 
 	if failed.Load() > 0 {
@@ -1016,7 +1049,7 @@ func findFiles(root string) ([]fileEntry, error) {
 	return files, err
 }
 
-func prepJob(src, dst, rel, dstRoot string, bar *mpb.Bar) func() <-chan *result {
+func prepJob(src, dst, rel, dstRoot string, bar *barTracker) func() <-chan *result {
 	return func() <-chan *result {
 		done := make(chan *result)
 		go func() {
@@ -1031,7 +1064,7 @@ func prepJob(src, dst, rel, dstRoot string, bar *mpb.Bar) func() <-chan *result 
 	}
 }
 
-func job(src, dst string, bar *mpb.Bar) *result {
+func job(src, dst string, bar *barTracker) *result {
 	rd, err := os.Open(src)
 	if err != nil {
 		return &result{err: err}
@@ -1053,14 +1086,12 @@ func job(src, dst string, bar *mpb.Bar) *result {
 	}
 
 	h := blake3.New(32, nil)
-	pw := &progressWriter{w: wr, bar: bar}
 	var w io.Writer = wr
 	if bar != nil {
-		w = pw
+		w = &progressWriter{w: wr, tracker: bar}
 	}
 	buf := make([]byte, 4*1024*1024)
 	n, err := io.CopyBuffer(w, io.TeeReader(rd, h), buf)
-	pw.flush()
 	wr.Sync()
 	wr.Close()
 	if err != nil {
@@ -1074,23 +1105,21 @@ func job(src, dst string, bar *mpb.Bar) *result {
 	return &result{n: n, srcHash: hex.EncodeToString(h.Sum(nil))}
 }
 
-func hashFile(path string, bar *mpb.Bar) (string, error) {
+func hashFile(path string, bar *barTracker) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
 	h := blake3.New(32, nil)
-	pr := &progressReader{r: f, bar: bar}
 	var r io.Reader = f
 	if bar != nil {
-		r = pr
+		r = &progressReader{r: f, tracker: bar}
 	}
 	buf := make([]byte, 4*1024*1024)
 	if _, err := io.CopyBuffer(h, r, buf); err != nil {
 		return "", err
 	}
-	pr.flush()
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
