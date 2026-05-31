@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -9,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/signal"
 	"os/user"
 	"path/filepath"
 	"runtime"
@@ -167,10 +169,15 @@ func main() {
 		exit(7, "no files found on mounted cards")
 	}
 
-	// build ops + print plan
-	ops := buildOps(scanned, dstRoots)
-	for _, op := range ops {
-		fmt.Printf("plan: %s\n      -> %s\n", op.src, op.dst)
+	// print plan from scanned data
+	for _, sc := range scanned {
+		for _, f := range sc.files {
+			src := filepath.Join(sc.src, f.rel)
+			for _, dstRoot := range dstRoots {
+				dst := filepath.Join(dstRoot, sc.Volume, f.rel)
+				fmt.Printf("plan: %s\n      -> %s\n", src, dst)
+			}
+		}
 	}
 
 	fmt.Printf("\nmission:      %s\n", missionSlug)
@@ -185,15 +192,46 @@ func main() {
 		}
 	}
 
+	// set up interrupt handler — from this point we have created dirs / committed seq
+	ctx, cancel := context.WithCancel(context.Background())
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt)
+	go func() {
+		<-sigCh
+		cancel()
+		signal.Stop(sigCh)
+	}()
+
+	cleanup := func() {
+		fmt.Print("\n\ninterrupted — delete partial mission and revert counter? (y/n): ")
+		var resp string
+		fmt.Scan(&resp)
+		if resp == "y" {
+			for _, d := range dstRoots {
+				os.RemoveAll(d)
+				fmt.Printf("removed: %s\n", d)
+			}
+			if !isAppend {
+				if err := revertMission(*year); err != nil {
+					fmt.Printf("err reverting counter: %v\n", err)
+				} else {
+					fmt.Println("mission counter reverted")
+				}
+			}
+		}
+		os.Exit(130)
+	}
+
 	sizeStr := jfmt.FmtSize64(uint64(totalSize))
 	fmt.Printf("\ncopying %d files (%s) to %d drive(s)\n\n", totalFiles, sizeStr, len(dstRoots))
 
 	// Phase 1: copy
-	p1 := mpb.New(mpb.WithWidth(64))
+	p1 := mpb.NewWithContext(ctx, mpb.WithWidth(64))
 	copyBars := make(map[string]*mpb.Bar)
 	for _, dstRoot := range dstRoots {
 		copyBars[dstRoot] = addBar(p1, volName(dstRoot), totalSize)
 	}
+	ops := buildOps(scanned, dstRoots, copyBars)
 
 	results := make([]*result, len(ops))
 	pool := fnpool.NewPool(runtime.NumCPU())
@@ -204,6 +242,9 @@ func main() {
 		i, op := i, op
 		pool.Dispatch(func() {
 			defer wg.Done()
+			if ctx.Err() != nil {
+				return
+			}
 			r := <-op.do()
 			results[i] = r
 			if r.err != nil {
@@ -215,6 +256,10 @@ func main() {
 	}
 	wg.Wait()
 	p1.Wait()
+
+	if ctx.Err() != nil {
+		cleanup()
+	}
 
 	var copyFailed int
 	for _, r := range results {
@@ -228,7 +273,7 @@ func main() {
 
 	// Phase 2: verify
 	fmt.Printf("\nverifying...\n\n")
-	p2 := mpb.New(mpb.WithWidth(64))
+	p2 := mpb.NewWithContext(ctx, mpb.WithWidth(64))
 	verifyBars := make(map[string]*mpb.Bar)
 	for _, dstRoot := range dstRoots {
 		verifyBars[dstRoot] = addBar(p2, volName(dstRoot), totalSize)
@@ -240,10 +285,16 @@ func main() {
 	var wg2 sync.WaitGroup
 	pool2 := fnpool.NewPool(runtime.NumCPU())
 	for _, r := range results {
+		if r == nil {
+			continue
+		}
 		wg2.Add(1)
 		r := r
 		pool2.Dispatch(func() {
 			defer wg2.Done()
+			if ctx.Err() != nil {
+				return
+			}
 			got, err := hashFile(r.dst, verifyBars[r.dstRoot])
 			if err != nil {
 				fmt.Printf("\nERROR verify: %v\n", err)
@@ -263,6 +314,10 @@ func main() {
 	}
 	wg2.Wait()
 	p2.Wait()
+
+	if ctx.Err() != nil {
+		cleanup()
+	}
 
 	if verifyFailed.Load() > 0 {
 		exit(11, "%d file(s) failed verification", verifyFailed.Load())
@@ -309,7 +364,7 @@ type scannedCard struct {
 	files []fileEntry
 }
 
-func buildOps(scanned []scannedCard, dstRoots []string) []*op {
+func buildOps(scanned []scannedCard, dstRoots []string, bars map[string]*mpb.Bar) []*op {
 	var ops []*op
 	for _, sc := range scanned {
 		for _, f := range sc.files {
@@ -317,7 +372,7 @@ func buildOps(scanned []scannedCard, dstRoots []string) []*op {
 			dstRel := filepath.Join(sc.Volume, f.rel)
 			for _, dstRoot := range dstRoots {
 				dst := filepath.Join(dstRoot, dstRel)
-				ops = append(ops, &op{src: src, dst: dst, do: prepJob(src, dst, dstRel, dstRoot)})
+				ops = append(ops, &op{src: src, dst: dst, do: prepJob(src, dst, dstRel, dstRoot, bars[dstRoot])})
 			}
 		}
 	}
@@ -447,11 +502,11 @@ func findFiles(root string) ([]fileEntry, error) {
 	return files, err
 }
 
-func prepJob(src, dst, rel, dstRoot string) func() <-chan *result {
+func prepJob(src, dst, rel, dstRoot string, bar *mpb.Bar) func() <-chan *result {
 	return func() <-chan *result {
 		done := make(chan *result)
 		go func() {
-			r := job(src, dst)
+			r := job(src, dst, bar)
 			r.dst = dst
 			r.rel = rel
 			r.dstRoot = dstRoot
@@ -462,7 +517,7 @@ func prepJob(src, dst, rel, dstRoot string) func() <-chan *result {
 	}
 }
 
-func job(src, dst string) *result {
+func job(src, dst string, bar *mpb.Bar) *result {
 	rd, err := os.Open(src)
 	if err != nil {
 		return &result{err: err}
@@ -484,7 +539,11 @@ func job(src, dst string) *result {
 	}
 
 	h := blake3.New(32, nil)
-	n, err := io.Copy(wr, io.TeeReader(rd, h))
+	var w io.Writer = wr
+	if bar != nil {
+		w = &progressWriter{w: wr, bar: bar}
+	}
+	n, err := io.Copy(w, io.TeeReader(rd, h))
 	wr.Sync()
 	wr.Close()
 	if err != nil {
@@ -581,6 +640,17 @@ func peekMission(year int) (int, error) {
 		return 0, err
 	}
 	return seq[year] + 1, nil
+}
+
+func revertMission(year int) error {
+	seq, err := readSeq()
+	if err != nil {
+		return err
+	}
+	if seq[year] > 0 {
+		seq[year]--
+	}
+	return writeSeq(seq)
 }
 
 func commitMission(year, num int) error {
