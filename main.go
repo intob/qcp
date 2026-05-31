@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"os/signal"
 	"os/user"
 	"path/filepath"
@@ -70,27 +71,47 @@ type result struct {
 	dstRoot string
 }
 
+const ewmaWindow = 250 * time.Millisecond
+
 type progressWriter struct {
-	w   io.Writer
-	bar *mpb.Bar
+	w            io.Writer
+	bar          *mpb.Bar
+	pending      int
+	windowStart  time.Time
 }
 
 func (pw *progressWriter) Write(p []byte) (int, error) {
-	start := time.Now()
+	if pw.windowStart.IsZero() {
+		pw.windowStart = time.Now()
+	}
 	n, err := pw.w.Write(p)
-	pw.bar.EwmaIncrBy(n, time.Since(start))
+	pw.pending += n
+	if elapsed := time.Since(pw.windowStart); elapsed >= ewmaWindow {
+		pw.bar.EwmaIncrBy(pw.pending, elapsed)
+		pw.pending = 0
+		pw.windowStart = time.Now()
+	}
 	return n, err
 }
 
 type progressReader struct {
-	r   io.Reader
-	bar *mpb.Bar
+	r           io.Reader
+	bar         *mpb.Bar
+	pending     int
+	windowStart time.Time
 }
 
 func (pr *progressReader) Read(p []byte) (int, error) {
-	start := time.Now()
+	if pr.windowStart.IsZero() {
+		pr.windowStart = time.Now()
+	}
 	n, err := pr.r.Read(p)
-	pr.bar.EwmaIncrBy(n, time.Since(start))
+	pr.pending += n
+	if elapsed := time.Since(pr.windowStart); elapsed >= ewmaWindow {
+		pr.bar.EwmaIncrBy(pr.pending, elapsed)
+		pr.pending = 0
+		pr.windowStart = time.Now()
+	}
 	return n, err
 }
 
@@ -347,9 +368,19 @@ func addBar(p *mpb.Progress, name string, total int64) *mpb.Bar {
 		),
 		mpb.AppendDecorators(
 			decor.EwmaSpeed(decor.SizeB1024(0), "% .1f  ", 30),
-			decor.OnComplete(decor.EwmaETA(decor.ET_STYLE_GO, 30), "✓"),
+			decor.OnComplete(decor.EwmaETA(decor.ET_STYLE_GO, 150), "✓"),
 		),
 	)
+}
+
+// driveConcurrency returns the ideal number of concurrent file operations for
+// the given volume path. SSDs benefit from queue depth; HDDs need sequential I/O.
+func driveConcurrency(volPath string) int {
+	out, err := exec.Command("diskutil", "info", volPath).Output()
+	if err == nil && strings.Contains(string(out), "Solid State:               Yes") {
+		return 4
+	}
+	return 1
 }
 
 func volName(dstRoot string) string {
@@ -505,31 +536,38 @@ func runSync(cfg Config, year int, skipConf bool) {
 		copyBars[vol] = addBar(p1, vol, size)
 	}
 
-	var allOps []*op
+	// group ops by destination volume; each volume gets its own pool sized by drive type
+	opsByVol := make(map[string][]*op)
 	for _, j := range jobs {
-		allOps = append(allOps, buildSyncOps(j.files, j.srcDir, j.dstDir, copyBars[j.dstVol])...)
+		opsByVol[j.dstVol] = append(opsByVol[j.dstVol], buildSyncOps(j.files, j.srcDir, j.dstDir, copyBars[j.dstVol])...)
 	}
 
-	results := make([]*result, len(allOps))
-	pool := fnpool.NewPool(runtime.NumCPU())
+	var results []*result
+	var resultsMu sync.Mutex
 	var total atomic.Int64
 	var wg sync.WaitGroup
-	for i, op := range allOps {
-		wg.Add(1)
-		i, op := i, op
-		pool.Dispatch(func() {
-			defer wg.Done()
-			if ctx.Err() != nil {
-				return
-			}
-			r := <-op.do()
-			results[i] = r
-			if r.err != nil {
-				fmt.Printf("\nERROR: %v\n", r.err)
-			} else {
-				total.Add(r.n)
-			}
-		})
+	for vol, ops := range opsByVol {
+		concurrency := driveConcurrency("/Volumes/" + vol)
+		pool := fnpool.NewPool(concurrency)
+		for _, op := range ops {
+			wg.Add(1)
+			op := op
+			pool.Dispatch(func() {
+				defer wg.Done()
+				if ctx.Err() != nil {
+					return
+				}
+				r := <-op.do()
+				resultsMu.Lock()
+				results = append(results, r)
+				resultsMu.Unlock()
+				if r.err != nil {
+					fmt.Printf("\nERROR: %v\n", r.err)
+				} else {
+					total.Add(r.n)
+				}
+			})
+		}
 	}
 	wg.Wait()
 	p1.Wait()
@@ -553,33 +591,43 @@ func runSync(cfg Config, year int, skipConf bool) {
 	}
 
 	var mu sync.Mutex
-	// checksums grouped by dstDir (mission dir)
 	checksums := make(map[string][]string)
 	var verifyFailed atomic.Int64
-	var wg2 sync.WaitGroup
-	pool2 := fnpool.NewPool(runtime.NumCPU())
+
+	// group results by destination volume for per-drive concurrency
+	resultsByVol := make(map[string][]*result)
 	for _, r := range results {
 		if r == nil || r.err != nil {
 			continue
 		}
-		wg2.Add(1)
-		r := r
-		pool2.Dispatch(func() {
-			defer wg2.Done()
-			if ctx.Err() != nil {
-				return
-			}
-			got, err := hashFile(r.dst, verifyBars[volName(r.dstRoot)])
-			if err != nil || got != r.srcHash {
-				fmt.Printf("\nFAIL: %s\n", r.dst)
-				verifyFailed.Add(1)
-				return
-			}
-			mu.Lock()
-			checksums[r.dstRoot] = append(checksums[r.dstRoot],
-				fmt.Sprintf("%s  %s", got, r.rel))
-			mu.Unlock()
-		})
+		vol := volName(r.dstRoot)
+		resultsByVol[vol] = append(resultsByVol[vol], r)
+	}
+
+	var wg2 sync.WaitGroup
+	for vol, rs := range resultsByVol {
+		concurrency := driveConcurrency("/Volumes/" + vol)
+		pool2 := fnpool.NewPool(concurrency)
+		for _, r := range rs {
+			wg2.Add(1)
+			r := r
+			pool2.Dispatch(func() {
+				defer wg2.Done()
+				if ctx.Err() != nil {
+					return
+				}
+				got, err := hashFile(r.dst, verifyBars[volName(r.dstRoot)])
+				if err != nil || got != r.srcHash {
+					fmt.Printf("\nFAIL: %s\n", r.dst)
+					verifyFailed.Add(1)
+					return
+				}
+				mu.Lock()
+				checksums[r.dstRoot] = append(checksums[r.dstRoot],
+					fmt.Sprintf("%s  %s", got, r.rel))
+				mu.Unlock()
+			})
+		}
 	}
 	wg2.Wait()
 	p2.Wait()
@@ -829,7 +877,8 @@ func job(src, dst string, bar *mpb.Bar) *result {
 	if bar != nil {
 		w = &progressWriter{w: wr, bar: bar}
 	}
-	n, err := io.Copy(w, io.TeeReader(rd, h))
+	buf := make([]byte, 4*1024*1024)
+	n, err := io.CopyBuffer(w, io.TeeReader(rd, h), buf)
 	wr.Sync()
 	wr.Close()
 	if err != nil {
@@ -854,7 +903,8 @@ func hashFile(path string, bar *mpb.Bar) (string, error) {
 	if bar != nil {
 		r = &progressReader{r: f, bar: bar}
 	}
-	if _, err := io.Copy(h, r); err != nil {
+	buf := make([]byte, 4*1024*1024)
+	if _, err := io.CopyBuffer(h, r, buf); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
