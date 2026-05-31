@@ -828,15 +828,22 @@ func runVerify(cfg Config, missionNum int) {
 		exit(1, "no checksums.b3 found for mission %03d", missionNum)
 	}
 
-	fmt.Printf("verifying mission %03d on %d drive(s)\n\n", missionNum, len(jobs))
+	fmt.Printf("verifying mission %03d on %d drive(s)\n", missionNum, len(jobs))
+	volInfos := make(map[string]driveInfo)
+	for _, job := range jobs {
+		info := probeDrive("/Volumes/" + job.vol)
+		volInfos[job.vol] = info
+		fmt.Printf("  %s: %s\n", job.vol, info)
+	}
+	fmt.Println()
 
 	p := mpb.New(mpb.WithWidth(64))
 	var failed atomic.Int64
 	var wg sync.WaitGroup
-	pool := fnpool.NewPool(runtime.NumCPU())
 
 	for _, job := range jobs {
 		bar := addBar(p, job.vol, job.totalSize)
+		pool := fnpool.NewPool(volInfos[job.vol].concurrency)
 		for _, e := range job.entries {
 			wg.Add(1)
 			e, dir, b := e, job.dir, bar
