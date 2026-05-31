@@ -1,23 +1,41 @@
 package main
 
 import (
-	"bufio"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"os/user"
-	"path"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/inneslabs/fnpool"
 	"github.com/inneslabs/jfmt"
 )
+
+const seqPath = "~/.qcp_seq"
+
+type Config struct {
+	Card   CardConfig    `json:"card"`
+	Drives []DriveConfig `json:"drives"`
+}
+
+type CardConfig struct {
+	Volume string `json:"volume"`
+	Sub    string `json:"sub"`
+}
+
+type DriveConfig struct {
+	Volume string `json:"volume"`
+	Root   string `json:"root"`
+}
 
 type op struct {
 	src, dst string
@@ -30,28 +48,73 @@ type result struct {
 }
 
 func main() {
-	const includeFile = "/etc/qcpinclude"
 	skipConf := flag.Bool("y", false, "skip confirmation")
+	missionFlag := flag.String("mission", "", "mission name (e.g. \"Altissimo with Anton\")")
+	year := flag.Int("year", time.Now().Year(), "year override")
 	flag.Parse()
-	if flag.NArg() < 2 {
-		exit(1, "specify src and dst path")
+
+	if *missionFlag == "" {
+		exit(1, "-mission is required")
 	}
-	srcRoot, err := expandPath(flag.Arg(0))
+
+	cfg := loadConfig()
+
+	cardSrc := filepath.Join("/Volumes", cfg.Card.Volume, cfg.Card.Sub)
+	if !dirExists(cardSrc) {
+		exit(2, "card not mounted at %s", cardSrc)
+	}
+
+	missionName := sanitizeMission(*missionFlag)
+	yearStr := strconv.Itoa(*year)
+
+	num, err := peekMission(*year)
 	if err != nil {
-		exit(2, "err expanding src path: %v", err)
+		exit(3, "err reading mission counter: %v", err)
 	}
-	dstRoot, err := expandPath(flag.Arg(1))
+	missionSlug := fmt.Sprintf("%03d_%s", num, missionName)
+
+	files, err := findFiles(cardSrc)
 	if err != nil {
-		exit(3, "err expanding dst path: %v", err)
+		exit(6, "err scanning card: %v", err)
 	}
-	ops := make([]*op, 0)
-	for op := range walk(includeFile, srcRoot, dstRoot) {
-		ops = append(ops, op)
-		fmt.Printf("plan: %s ->%s\n", op.src, op.dst)
+	if len(files) == 0 {
+		exit(7, "no files found on card at %s", cardSrc)
 	}
+
+	var dstRoots []string
+	for _, d := range cfg.Drives {
+		vol := filepath.Join("/Volumes", d.Volume)
+		if !dirExists(vol) {
+			fmt.Printf("warning: %s not mounted, skipping\n", d.Volume)
+			continue
+		}
+		dstRoots = append(dstRoots, filepath.Join(vol, d.Root, yearStr, missionSlug))
+	}
+
+	if len(dstRoots) == 0 {
+		exit(8, "no destination drives mounted")
+	}
+
+	ops := make([]*op, 0, len(files)*len(dstRoots))
+	for _, rel := range files {
+		src := filepath.Join(cardSrc, rel)
+		for _, dstRoot := range dstRoots {
+			dst := filepath.Join(dstRoot, rel)
+			fmt.Printf("plan: %s\n      -> %s\n", src, dst)
+			ops = append(ops, &op{src: src, dst: dst, do: prepJob(src, dst)})
+		}
+	}
+
+	fmt.Printf("\nmission:      %s\n", missionSlug)
+	fmt.Printf("destinations: %s\n", strings.Join(dstRoots, "\n              "))
 	if !*skipConf && !confirm() {
-		exit(4, "aborted by user")
+		exit(9, "aborted by user")
 	}
+
+	if err := commitMission(*year, num); err != nil {
+		exit(10, "err updating mission counter: %v", err)
+	}
+
 	pool := fnpool.NewPool(runtime.NumCPU())
 	var total atomic.Int64
 	var wg sync.WaitGroup
@@ -64,57 +127,35 @@ func main() {
 				fmt.Printf("ERROR: %v\n", res.err)
 				return
 			}
-			fmt.Printf("done: ->%s\n", op.dst)
+			fmt.Printf("done: %s\n", op.dst)
 			total.Add(res.n)
 		})
 	}
 	wg.Wait()
-	size := jfmt.FmtSize64(uint64(total.Load()))
-	fmt.Printf("copied %s from %s to %s\n", size, srcRoot, dstRoot)
+
+	perDrive := jfmt.FmtSize64(uint64(total.Load()) / uint64(len(dstRoots)))
+	fmt.Printf("copied %s to %d drive(s) → %s\n", perDrive, len(dstRoots), missionSlug)
 }
 
-func walk(includeFile, srcRoot, dstRoot string) <-chan *op {
-	patterns, err := readPatterns(includeFile)
-	if err != nil {
-		exit(5, "err reading %q: %v", includeFile, err)
-	}
-	ops := make(chan *op, 1)
-	go func(ops chan<- *op) {
-		defer close(ops)
-		filepath.WalkDir(srcRoot, func(src string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if d != nil && d.IsDir() {
-				return nil
-			}
-			if !match(srcRoot, src, patterns) {
-				return nil
-			}
-			srcRel := strings.TrimPrefix(src, srcRoot)
-			dst := path.Join(dstRoot, srcRel)
-			ops <- &op{
-				src: src,
-				dst: dst,
-				do:  prepJob(src, dst),
-			}
-			return nil
-		})
-	}(ops)
-	return ops
-}
-
-func match(srcRoot, src string, patterns []string) bool {
-	if path.Ext(src) == ".DS_Store" {
-		return false
-	}
-	base := strings.TrimPrefix(src, srcRoot)
-	for _, pattern := range patterns {
-		if strings.HasPrefix(base, pattern) {
-			return true
+func findFiles(root string) ([]string, error) {
+	var files []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-	}
-	return false
+		if d == nil || d.IsDir() {
+			return nil
+		}
+		rel := strings.TrimPrefix(path, root)
+		for _, part := range strings.Split(rel, string(os.PathSeparator)) {
+			if strings.HasPrefix(part, ".") {
+				return nil
+			}
+		}
+		files = append(files, rel)
+		return nil
+	})
+	return files, err
 }
 
 func prepJob(src, dst string) func() <-chan *result {
@@ -139,8 +180,7 @@ func job(src, dst string) *result {
 		return &result{err, 0}
 	}
 	perm := info.Mode().Perm()
-	err = os.MkdirAll(path.Dir(dst), 0777)
-	if err != nil {
+	if err := os.MkdirAll(filepath.Dir(dst), 0777); err != nil {
 		return &result{err, 0}
 	}
 	wr, err := os.Create(dst)
@@ -155,34 +195,103 @@ func job(src, dst string) *result {
 	return &result{os.Chmod(dst, perm), n}
 }
 
-func readPatterns(filename string) ([]string, error) {
-	file, err := os.Open(filename)
+func peekMission(year int) (int, error) {
+	seq, err := readSeq()
+	if err != nil {
+		return 0, err
+	}
+	return seq[year] + 1, nil
+}
+
+func commitMission(year, num int) error {
+	seq, err := readSeq()
+	if err != nil {
+		return err
+	}
+	seq[year] = num
+	return writeSeq(seq)
+}
+
+func readSeq() (map[int]int, error) {
+	p, err := expandPath(seqPath)
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
-	var patterns []string
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		patterns = append(patterns, line)
+	data, err := os.ReadFile(p)
+	if os.IsNotExist(err) {
+		return map[int]int{}, nil
 	}
-	return patterns, scanner.Err()
+	if err != nil {
+		return nil, err
+	}
+	var raw map[string]int
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("corrupt %s: %w", p, err)
+	}
+	seq := make(map[int]int, len(raw))
+	for k, v := range raw {
+		year, err := strconv.Atoi(k)
+		if err != nil {
+			return nil, fmt.Errorf("corrupt year key %q in %s", k, p)
+		}
+		seq[year] = v
+	}
+	return seq, nil
 }
 
-func expandPath(path string) (string, error) {
-	if strings.HasPrefix(path, "~") {
+func writeSeq(seq map[int]int) error {
+	p, err := expandPath(seqPath)
+	if err != nil {
+		return err
+	}
+	raw := make(map[string]int, len(seq))
+	for k, v := range seq {
+		raw[strconv.Itoa(k)] = v
+	}
+	data, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(p, data, 0644)
+}
+
+func loadConfig() Config {
+	p, err := expandPath("~/.qcp")
+	if err != nil {
+		exit(1, "err resolving config path: %v", err)
+	}
+	data, err := os.ReadFile(p)
+	if os.IsNotExist(err) {
+		exit(1, "config not found — create %s with your drive settings", p)
+	}
+	if err != nil {
+		exit(1, "err reading config: %v", err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		exit(1, "err parsing config: %v", err)
+	}
+	return cfg
+}
+
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+func sanitizeMission(name string) string {
+	return strings.ReplaceAll(strings.TrimSpace(name), " ", "_")
+}
+
+func expandPath(p string) (string, error) {
+	if strings.HasPrefix(p, "~") {
 		usr, err := user.Current()
 		if err != nil {
 			return "", err
 		}
-		homeDir := usr.HomeDir
-		return filepath.Join(homeDir, path[1:]), nil
+		return filepath.Join(usr.HomeDir, p[1:]), nil
 	}
-	return filepath.Abs(path)
+	return filepath.Abs(p)
 }
 
 func confirm() bool {
