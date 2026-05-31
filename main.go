@@ -27,11 +27,12 @@ import (
 const seqPath = "~/.qcp_seq"
 
 type Config struct {
-	Card   CardConfig    `json:"card"`
+	Cards  []CardConfig  `json:"cards"`
 	Drives []DriveConfig `json:"drives"`
 }
 
 type CardConfig struct {
+	Name   string `json:"name"`
 	Volume string `json:"volume"`
 	Sub    string `json:"sub"`
 }
@@ -39,6 +40,11 @@ type CardConfig struct {
 type DriveConfig struct {
 	Volume string `json:"volume"`
 	Root   string `json:"root"`
+}
+
+type mountedCard struct {
+	CardConfig
+	src string // full path to card sub dir
 }
 
 type op struct {
@@ -59,6 +65,7 @@ func main() {
 	skipConf := flag.Bool("y", false, "skip confirmation")
 	missionFlag := flag.String("mission", "", "mission name (e.g. \"Altissimo with Anton\")")
 	year := flag.Int("year", time.Now().Year(), "year override")
+	toMission := flag.Int("to", 0, "append to existing mission number")
 	verifyDir := flag.String("verify", "", "re-verify checksums in a mission dir")
 	flag.Parse()
 
@@ -67,35 +74,38 @@ func main() {
 		return
 	}
 
-	if *missionFlag == "" {
-		exit(1, "-mission is required")
-	}
-
 	cfg := loadConfig()
 
-	cardSrc := filepath.Join("/Volumes", cfg.Card.Volume, cfg.Card.Sub)
-	if !dirExists(cardSrc) {
-		exit(2, "card not mounted at %s", cardSrc)
+	cards := mountedCards(cfg.Cards)
+	if len(cards) == 0 {
+		exit(1, "no configured cards mounted")
 	}
 
-	missionName := sanitizeMission(*missionFlag)
 	yearStr := strconv.Itoa(*year)
+	var missionSlug string
+	var isAppend bool
+	var missionNum int
 
-	num, err := peekMission(*year)
-	if err != nil {
-		exit(3, "err reading mission counter: %v", err)
+	if *toMission > 0 {
+		isAppend = true
+		slug, err := findMissionSlug(cfg.Drives, yearStr, *toMission)
+		if err != nil {
+			exit(2, "mission %03d not found: %v", *toMission, err)
+		}
+		missionSlug = slug
+	} else {
+		if *missionFlag == "" {
+			exit(3, "-mission is required")
+		}
+		num, err := peekMission(*year)
+		if err != nil {
+			exit(4, "err reading mission counter: %v", err)
+		}
+		missionNum = num
+		missionSlug = fmt.Sprintf("%03d_%s", num, sanitizeMission(*missionFlag))
 	}
-	missionSlug := fmt.Sprintf("%03d_%s", num, missionName)
 
-	files, err := findFiles(cardSrc)
-	if err != nil {
-		exit(4, "err scanning card: %v", err)
-	}
-	if len(files) == 0 {
-		exit(5, "no files found on card at %s", cardSrc)
-	}
-
-	var dstRoots []string
+	dstRoots := []string{}
 	for _, d := range cfg.Drives {
 		vol := filepath.Join("/Volumes", d.Volume)
 		if !dirExists(vol) {
@@ -104,29 +114,34 @@ func main() {
 		}
 		dstRoots = append(dstRoots, filepath.Join(vol, d.Root, yearStr, missionSlug))
 	}
-
 	if len(dstRoots) == 0 {
-		exit(6, "no destination drives mounted")
+		exit(5, "no destination drives mounted")
 	}
 
-	ops := make([]*op, 0, len(files)*len(dstRoots))
-	for _, rel := range files {
-		src := filepath.Join(cardSrc, rel)
-		for _, dstRoot := range dstRoots {
-			dst := filepath.Join(dstRoot, rel)
-			fmt.Printf("plan: %s\n      -> %s\n", src, dst)
-			ops = append(ops, &op{src: src, dst: dst, do: prepJob(src, dst, rel, dstRoot)})
-		}
+	// Use per-card subdirs when multiple cards are mounted or appending to an existing mission.
+	useSubdir := len(cards) > 1 || isAppend
+
+	ops, err := buildOps(cards, dstRoots, useSubdir)
+	if err != nil {
+		exit(6, "err scanning cards: %v", err)
+	}
+	if len(ops) == 0 {
+		exit(7, "no files found on mounted cards")
 	}
 
+	for _, op := range ops {
+		fmt.Printf("plan: %s\n      -> %s\n", op.src, op.dst)
+	}
 	fmt.Printf("\nmission:      %s\n", missionSlug)
 	fmt.Printf("destinations: %s\n", strings.Join(dstRoots, "\n              "))
 	if !*skipConf && !confirm() {
-		exit(7, "aborted by user")
+		exit(8, "aborted by user")
 	}
 
-	if err := commitMission(*year, num); err != nil {
-		exit(8, "err updating mission counter: %v", err)
+	if !isAppend {
+		if err := commitMission(*year, missionNum); err != nil {
+			exit(9, "err updating mission counter: %v", err)
+		}
 	}
 
 	// Phase 1: copy
@@ -154,19 +169,19 @@ func main() {
 
 	var copyFailed int
 	for _, r := range results {
-		if r.err != nil {
+		if r != nil && r.err != nil {
 			copyFailed++
 		}
 	}
 	if copyFailed > 0 {
-		exit(9, "%d file(s) failed to copy", copyFailed)
+		exit(10, "%d file(s) failed to copy", copyFailed)
 	}
 
 	// Phase 2: verify
 	fmt.Println("\nverifying...")
 	pool2 := fnpool.NewPool(runtime.NumCPU())
 	var mu sync.Mutex
-	checksums := make(map[string][]string)
+	newChecksums := make(map[string][]string) // dstRoot → lines
 	var verifyFailed atomic.Int64
 	var wg2 sync.WaitGroup
 	for _, r := range results {
@@ -187,7 +202,7 @@ func main() {
 			}
 			fmt.Printf("ok: %s\n", r.dst)
 			mu.Lock()
-			checksums[r.dstRoot] = append(checksums[r.dstRoot],
+			newChecksums[r.dstRoot] = append(newChecksums[r.dstRoot],
 				fmt.Sprintf("%s  %s", got, r.rel))
 			mu.Unlock()
 		})
@@ -195,12 +210,15 @@ func main() {
 	wg2.Wait()
 
 	if verifyFailed.Load() > 0 {
-		exit(10, "%d file(s) failed verification", verifyFailed.Load())
+		exit(11, "%d file(s) failed verification", verifyFailed.Load())
 	}
 
-	for dstRoot, lines := range checksums {
-		sort.Strings(lines)
+	for dstRoot, lines := range newChecksums {
 		cPath := filepath.Join(dstRoot, "checksums.b3")
+		if isAppend {
+			lines = mergeChecksums(cPath, lines)
+		}
+		sort.Strings(lines)
 		if err := os.WriteFile(cPath, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
 			fmt.Printf("ERROR writing checksums: %v\n", err)
 		} else {
@@ -210,6 +228,90 @@ func main() {
 
 	perDrive := jfmt.FmtSize64(uint64(total.Load()) / uint64(len(dstRoots)))
 	fmt.Printf("\ncopied %s to %d drive(s) → %s\n", perDrive, len(dstRoots), missionSlug)
+}
+
+func buildOps(cards []mountedCard, dstRoots []string, useSubdir bool) ([]*op, error) {
+	var ops []*op
+	for _, card := range cards {
+		files, err := findFiles(card.src)
+		if err != nil {
+			return nil, fmt.Errorf("card %s: %w", card.Name, err)
+		}
+		for _, rel := range files {
+			src := filepath.Join(card.src, rel)
+			dstRel := rel
+			if useSubdir {
+				dstRel = filepath.Join(card.Name, rel)
+			}
+			for _, dstRoot := range dstRoots {
+				dst := filepath.Join(dstRoot, dstRel)
+				ops = append(ops, &op{src: src, dst: dst, do: prepJob(src, dst, dstRel, dstRoot)})
+			}
+		}
+	}
+	return ops, nil
+}
+
+func mountedCards(cfgs []CardConfig) []mountedCard {
+	var out []mountedCard
+	for _, c := range cfgs {
+		src := filepath.Join("/Volumes", c.Volume, c.Sub)
+		if dirExists(src) {
+			out = append(out, mountedCard{c, src})
+		}
+	}
+	return out
+}
+
+// findMissionSlug looks for an existing NNN_ directory across mounted drives.
+func findMissionSlug(drives []DriveConfig, yearStr string, num int) (string, error) {
+	prefix := fmt.Sprintf("%03d_", num)
+	for _, d := range drives {
+		yearDir := filepath.Join("/Volumes", d.Volume, d.Root, yearStr)
+		entries, err := os.ReadDir(yearDir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() && strings.HasPrefix(e.Name(), prefix) {
+				return e.Name(), nil
+			}
+		}
+	}
+	return "", fmt.Errorf("no mission %s found on any mounted drive", prefix)
+}
+
+// mergeChecksums reads existing checksums.b3 and merges with new lines (new wins on collision).
+func mergeChecksums(path string, newLines []string) []string {
+	existing := readChecksumFile(path)
+	for _, line := range newLines {
+		parts := strings.SplitN(line, "  ", 2)
+		if len(parts) == 2 {
+			existing[parts[1]] = parts[0]
+		}
+	}
+	merged := make([]string, 0, len(existing))
+	for rel, hash := range existing {
+		merged = append(merged, fmt.Sprintf("%s  %s", hash, rel))
+	}
+	return merged
+}
+
+func readChecksumFile(path string) map[string]string { // rel → hash
+	out := make(map[string]string)
+	f, err := os.Open(path)
+	if err != nil {
+		return out
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		parts := strings.SplitN(scanner.Text(), "  ", 2)
+		if len(parts) == 2 {
+			out[parts[1]] = parts[0]
+		}
+	}
+	return out
 }
 
 func runVerify(dir string) {
@@ -280,14 +382,13 @@ func findFiles(root string) ([]string, error) {
 				return nil
 			}
 		}
-		files = append(files, rel)
+		files = append(files, strings.TrimPrefix(rel, string(os.PathSeparator)))
 		return nil
 	})
 	return files, err
 }
 
 func prepJob(src, dst, rel, dstRoot string) func() <-chan *result {
-	rel = strings.TrimPrefix(rel, string(os.PathSeparator))
 	return func() <-chan *result {
 		done := make(chan *result)
 		go func() {
