@@ -146,6 +146,7 @@ func main() {
 	toMission := flag.Int("to", 0, "append to existing mission number")
 	verifyMission := flag.Int("verify", 0, "re-verify mission number across all mounted drives")
 	checksumMission := flag.Int("checksum", 0, "generate checksums.b3 for a mission by cross-verifying all mounted drives")
+	updateMission := flag.Int("update", 0, "copy files missing from archive drives for an existing mission")
 	doSync := flag.Bool("sync", false, "sync missions from primary drive to other mounted drives")
 	flag.Parse()
 
@@ -153,6 +154,11 @@ func main() {
 
 	if *doSync {
 		runSync(cfg, *year, *skipConf)
+		return
+	}
+
+	if *updateMission > 0 {
+		runUpdate(cfg, *updateMission, *year, *skipConf)
 		return
 	}
 
@@ -901,6 +907,243 @@ func runVerify(cfg Config, missionNum int) {
 		total += len(j.entries)
 	}
 	fmt.Printf("\nall %d files ok across %d drive(s)\n", total, len(jobs))
+}
+
+func runUpdate(cfg Config, missionNum int, year int, skipConf bool) {
+	yearStr := strconv.Itoa(year)
+	slug, err := findMissionSlug(cfg.Drives, yearStr, missionNum)
+	if err != nil {
+		exit(1, "mission %03d not found: %v", missionNum, err)
+	}
+
+	// find primary and archive drives
+	var primaryDir string
+	type archiveDrive struct {
+		vol string
+		dir string
+	}
+	var archives []archiveDrive
+	for _, d := range cfg.Drives {
+		vol := filepath.Join("/Volumes", d.Volume)
+		if !dirExists(vol) {
+			continue
+		}
+		dir := filepath.Join(vol, d.Root, yearStr, slug)
+		if d.Role == "primary" {
+			if !dirExists(dir) {
+				exit(1, "mission %03d not found on primary drive %s", missionNum, d.Volume)
+			}
+			primaryDir = dir
+		} else {
+			if dirExists(dir) {
+				archives = append(archives, archiveDrive{d.Volume, dir})
+			} else {
+				fmt.Printf("warning: mission not found on %s, skipping\n", d.Volume)
+			}
+		}
+	}
+	if primaryDir == "" {
+		exit(1, "primary drive not mounted")
+	}
+	if len(archives) == 0 {
+		exit(1, "no archive drives mounted with this mission")
+	}
+
+	// index all files on primary
+	primaryFiles, err := findFiles(primaryDir)
+	if err != nil {
+		exit(1, "error scanning primary: %v", err)
+	}
+	primarySet := make(map[string]int64, len(primaryFiles))
+	for _, f := range primaryFiles {
+		primarySet[f.rel] = f.size
+	}
+
+	// find missing files per archive
+	type archiveJob struct {
+		archiveDrive
+		missing []fileEntry
+		size    int64
+	}
+	var jobs []archiveJob
+	for _, a := range archives {
+		existing, err := findFiles(a.dir)
+		if err != nil {
+			fmt.Printf("warning: error scanning %s: %v\n", a.vol, err)
+			continue
+		}
+		existingSet := make(map[string]bool, len(existing))
+		for _, f := range existing {
+			existingSet[f.rel] = true
+		}
+		var missing []fileEntry
+		var size int64
+		for _, f := range primaryFiles {
+			if !existingSet[f.rel] {
+				missing = append(missing, f)
+				size += f.size
+			}
+		}
+		if len(missing) > 0 {
+			jobs = append(jobs, archiveJob{a, missing, size})
+		} else {
+			fmt.Printf("%s: already up to date\n", a.vol)
+		}
+	}
+	if len(jobs) == 0 {
+		fmt.Println("all archive drives are up to date")
+		return
+	}
+
+	for _, j := range jobs {
+		fmt.Printf("update: %d file(s) (%s) → %s\n", len(j.missing), jfmt.FmtSize64(uint64(j.size)), j.vol)
+	}
+	if !skipConf && !confirm() {
+		exit(0, "aborted")
+	}
+
+	// copy missing files per archive drive
+	fmt.Printf("\ncopying...\n\n")
+	p1 := mpb.New(mpb.WithWidth(64))
+	var copyResults []struct {
+		dst     string
+		rel     string
+		dstRoot string
+		vol     string
+		srcHash string
+		err     error
+	}
+	var resultsMu sync.Mutex
+	var wg sync.WaitGroup
+	var trackers []*barTracker
+
+	for _, j := range jobs {
+		info := probeDrive("/Volumes/" + j.vol)
+		bar := addBar(p1, j.vol, j.size)
+		trackers = append(trackers, bar)
+		pool := fnpool.NewPool(info.concurrency)
+		for _, f := range j.missing {
+			wg.Add(1)
+			f, dstRoot := f, j.dir
+			src := filepath.Join(primaryDir, f.rel)
+			dst := filepath.Join(dstRoot, f.rel)
+			pool.Dispatch(func() {
+				defer wg.Done()
+				r := job(src, dst, bar)
+				resultsMu.Lock()
+				copyResults = append(copyResults, struct {
+					dst     string
+					rel     string
+					dstRoot string
+					vol     string
+					srcHash string
+					err     error
+				}{dst, f.rel, dstRoot, j.vol, r.srcHash, r.err})
+				resultsMu.Unlock()
+				if r.err != nil {
+					fmt.Printf("\nERROR: %v\n", r.err)
+				}
+			})
+		}
+	}
+	wg.Wait()
+	for _, t := range trackers {
+		t.flush()
+	}
+	p1.Wait()
+
+	var copyFailed int
+	for _, r := range copyResults {
+		if r.err != nil {
+			copyFailed++
+		}
+	}
+	if copyFailed > 0 {
+		exit(1, "%d file(s) failed to copy", copyFailed)
+	}
+
+	// verify copied files
+	fmt.Printf("\nverifying...\n\n")
+	p2 := mpb.New(mpb.WithWidth(64))
+	verifyTrackers := make(map[string]*barTracker)
+	verifySize := make(map[string]int64)
+	for _, r := range copyResults {
+		if r.err == nil {
+			verifySize[r.vol] += primarySet[r.rel]
+		}
+	}
+	for vol, size := range verifySize {
+		verifyTrackers[vol] = addBar(p2, vol, size)
+	}
+
+	var verifyFailed atomic.Int64
+	var wg2 sync.WaitGroup
+	newHashes := make(map[string][]string) // dstRoot → "hash  rel" lines
+	var newHashesMu sync.Mutex
+
+	for vol, rs := range func() map[string][]struct {
+		dst, rel, dstRoot, srcHash string
+	} {
+		m := make(map[string][]struct{ dst, rel, dstRoot, srcHash string })
+		for _, r := range copyResults {
+			if r.err == nil {
+				m[r.vol] = append(m[r.vol], struct{ dst, rel, dstRoot, srcHash string }{r.dst, r.rel, r.dstRoot, r.srcHash})
+			}
+		}
+		return m
+	}() {
+		info := probeDrive("/Volumes/" + vol)
+		pool2 := fnpool.NewPool(info.concurrency)
+		for _, r := range rs {
+			wg2.Add(1)
+			r := r
+			pool2.Dispatch(func() {
+				defer wg2.Done()
+				got, err := hashFile(r.dst, verifyTrackers[vol])
+				if err != nil || got != r.srcHash {
+					fmt.Printf("\nFAIL: %s\n", r.dst)
+					verifyFailed.Add(1)
+					return
+				}
+				newHashesMu.Lock()
+				newHashes[r.dstRoot] = append(newHashes[r.dstRoot], fmt.Sprintf("%s  %s", got, r.rel))
+				newHashesMu.Unlock()
+			})
+		}
+	}
+	wg2.Wait()
+	for _, t := range verifyTrackers {
+		t.flush()
+	}
+	p2.Wait()
+
+	if verifyFailed.Load() > 0 {
+		exit(1, "%d file(s) failed verification", verifyFailed.Load())
+	}
+
+	// append new entries to checksums.b3 on each archive drive
+	for dstRoot, lines := range newHashes {
+		cPath := filepath.Join(dstRoot, "checksums.b3")
+		existing, _ := os.ReadFile(cPath)
+		all := append(strings.Split(strings.TrimRight(string(existing), "\n"), "\n"), lines...)
+		// remove empty entries that may result from empty file
+		var clean []string
+		for _, l := range all {
+			if l != "" {
+				clean = append(clean, l)
+			}
+		}
+		sort.Strings(clean)
+		if err := os.WriteFile(cPath, []byte(strings.Join(clean, "\n")+"\n"), 0644); err != nil {
+			fmt.Printf("ERROR writing checksums: %v\n", err)
+		}
+	}
+
+	total := 0
+	for _, j := range jobs {
+		total += len(j.missing)
+	}
+	fmt.Printf("\n%d file(s) copied and verified\n", total)
 }
 
 func runChecksum(cfg Config, missionNum int, year int) {
