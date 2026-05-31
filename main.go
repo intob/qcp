@@ -121,6 +121,7 @@ func main() {
 	year := flag.Int("year", time.Now().Year(), "year override")
 	toMission := flag.Int("to", 0, "append to existing mission number")
 	verifyMission := flag.Int("verify", 0, "re-verify mission number across all mounted drives")
+	checksumMission := flag.Int("checksum", 0, "generate checksums.b3 for a mission by cross-verifying all mounted drives")
 	doSync := flag.Bool("sync", false, "sync missions from primary drive to other mounted drives")
 	flag.Parse()
 
@@ -133,6 +134,11 @@ func main() {
 
 	if *verifyMission > 0 {
 		runVerify(cfg, *verifyMission)
+		return
+	}
+
+	if *checksumMission > 0 {
+		runChecksum(cfg, *checksumMission, *year)
 		return
 	}
 
@@ -846,6 +852,116 @@ func runVerify(cfg Config, missionNum int) {
 		total += len(j.entries)
 	}
 	fmt.Printf("\nall %d files ok across %d drive(s)\n", total, len(jobs))
+}
+
+func runChecksum(cfg Config, missionNum int, year int) {
+	yearStr := strconv.Itoa(year)
+	slug, err := findMissionSlug(cfg.Drives, yearStr, missionNum)
+	if err != nil {
+		exit(1, "mission %03d not found: %v", missionNum, err)
+	}
+
+	type driveHashes struct {
+		vol  string
+		dir  string
+		hashes map[string]string // rel → hash
+	}
+
+	// find mission on all mounted drives
+	var drives []driveHashes
+	for _, d := range cfg.Drives {
+		vol := filepath.Join("/Volumes", d.Volume)
+		if !dirExists(vol) {
+			continue
+		}
+		dir := filepath.Join(vol, d.Root, yearStr, slug)
+		if !dirExists(dir) {
+			fmt.Printf("warning: mission not found on %s, skipping\n", d.Volume)
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(dir, "checksums.b3")); err == nil {
+			fmt.Printf("warning: %s already has checksums.b3, skipping\n", d.Volume)
+			continue
+		}
+		drives = append(drives, driveHashes{vol: d.Volume, dir: dir, hashes: make(map[string]string)})
+	}
+	if len(drives) == 0 {
+		exit(1, "no drives to checksum (all missing or already have checksums.b3)")
+	}
+
+	// collect file list from first drive (all should be identical post-sync)
+	files, totalSize, err := missionFiles(drives[0].dir)
+	if err != nil {
+		exit(1, "error scanning %s: %v", drives[0].vol, err)
+	}
+
+	fmt.Printf("checksumming mission %03d (%s) on %d drive(s)\n\n", missionNum, slug, len(drives))
+
+	// hash all files on all drives in parallel, per-drive concurrency
+	p := mpb.New(mpb.WithWidth(64))
+	var mu sync.Mutex
+	var failed atomic.Int64
+	var wg sync.WaitGroup
+
+	for i := range drives {
+		d := &drives[i]
+		bar := addBar(p, d.vol, totalSize)
+		concurrency := probeDrive("/Volumes/" + d.vol).concurrency
+		pool := fnpool.NewPool(concurrency)
+		for _, f := range files {
+			wg.Add(1)
+			f := f
+			pool.Dispatch(func() {
+				defer wg.Done()
+				hash, err := hashFile(filepath.Join(d.dir, f.rel), bar)
+				if err != nil {
+					fmt.Printf("\nERROR [%s]: %v\n", d.vol, err)
+					failed.Add(1)
+					return
+				}
+				mu.Lock()
+				d.hashes[f.rel] = hash
+				mu.Unlock()
+			})
+		}
+	}
+	wg.Wait()
+	p.Wait()
+
+	if failed.Load() > 0 {
+		exit(1, "%d file(s) could not be hashed", failed.Load())
+	}
+
+	// cross-check: every drive must agree on every file
+	var conflicts int
+	for _, f := range files {
+		ref := drives[0].hashes[f.rel]
+		for _, d := range drives[1:] {
+			if d.hashes[f.rel] != ref {
+				fmt.Printf("CONFLICT: %s — %s=%s  %s=%s\n",
+					f.rel, drives[0].vol, ref[:8], d.vol, d.hashes[f.rel][:8])
+				conflicts++
+			}
+		}
+	}
+	if conflicts > 0 {
+		exit(1, "%d conflict(s) found — checksums.b3 not written", conflicts)
+	}
+
+	// all drives agree — write checksums.b3 to each
+	for _, d := range drives {
+		var lines []string
+		for _, f := range files {
+			lines = append(lines, fmt.Sprintf("%s  %s", d.hashes[f.rel], f.rel))
+		}
+		sort.Strings(lines)
+		cPath := filepath.Join(d.dir, "checksums.b3")
+		if err := os.WriteFile(cPath, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
+			fmt.Printf("ERROR writing %s: %v\n", cPath, err)
+		} else {
+			fmt.Printf("wrote %s (%d files)\n", cPath, len(lines))
+		}
+	}
 }
 
 func findFiles(root string) ([]fileEntry, error) {
