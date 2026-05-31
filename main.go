@@ -14,7 +14,6 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -291,34 +290,74 @@ func main() {
 	sizeStr := jfmt.FmtSize64(uint64(totalSize))
 	fmt.Printf("\ncopying %d files (%s) to %d drive(s)\n\n", totalFiles, sizeStr, len(dstRoots))
 
-	// Phase 1: copy
+	// probe destination drives once
+	dstInfos := make(map[string]driveInfo)
+	for _, dstRoot := range dstRoots {
+		dstInfos[dstRoot] = probeDrive("/Volumes/" + volName(dstRoot))
+	}
+
+	// Phase 1: copy — per-drive pool, skipping files that already exist
+	// First pass: stat-check per destination to get accurate bar totals.
+	type fileJob struct {
+		src, dst, rel, dstRoot string
+		size                   int64
+	}
+	missingByDst := make(map[string][]fileJob)
+	for _, sc := range scanned {
+		for _, f := range sc.files {
+			dstRel := filepath.Join(sc.Volume, f.rel)
+			src := filepath.Join(sc.src, f.rel)
+			for _, dstRoot := range dstRoots {
+				dst := filepath.Join(dstRoot, dstRel)
+				if _, err := os.Stat(dst); err != nil {
+					missingByDst[dstRoot] = append(missingByDst[dstRoot],
+						fileJob{src, dst, dstRel, dstRoot, f.size})
+				}
+			}
+		}
+	}
+
 	p1 := mpb.NewWithContext(ctx, mpb.WithWidth(64))
 	copyBars := make(map[string]*barTracker)
 	for _, dstRoot := range dstRoots {
-		copyBars[dstRoot] = addBar(p1, volName(dstRoot), totalSize)
+		var size int64
+		for _, fj := range missingByDst[dstRoot] {
+			size += fj.size
+		}
+		copyBars[dstRoot] = addBar(p1, volName(dstRoot), size)
 	}
-	ops := buildOps(scanned, dstRoots, copyBars)
 
-	results := make([]*result, len(ops))
-	pool := fnpool.NewPool(runtime.NumCPU())
+	var results []*result
+	var resultsMu sync.Mutex
 	var total atomic.Int64
 	var wg sync.WaitGroup
-	for i, op := range ops {
-		wg.Add(1)
-		i, op := i, op
-		pool.Dispatch(func() {
-			defer wg.Done()
-			if ctx.Err() != nil {
-				return
-			}
-			r := <-op.do()
-			results[i] = r
-			if r.err != nil {
-				fmt.Printf("\nERROR copy: %v\n", r.err)
-				return
-			}
-			total.Add(r.n)
-		})
+	for _, dstRoot := range dstRoots {
+		missing := missingByDst[dstRoot]
+		if len(missing) == 0 {
+			fmt.Printf("%s: already up to date\n", volName(dstRoot))
+			continue
+		}
+		pool := fnpool.NewPool(dstInfos[dstRoot].concurrency)
+		for _, fj := range missing {
+			wg.Add(1)
+			fj := fj
+			op := prepJob(fj.src, fj.dst, fj.rel, fj.dstRoot, copyBars[fj.dstRoot])
+			pool.Dispatch(func() {
+				defer wg.Done()
+				if ctx.Err() != nil {
+					return
+				}
+				r := <-op()
+				resultsMu.Lock()
+				results = append(results, r)
+				resultsMu.Unlock()
+				if r.err != nil {
+					fmt.Printf("\nERROR copy: %v\n", r.err)
+					return
+				}
+				total.Add(r.n)
+			})
+		}
 	}
 	wg.Wait()
 	for _, t := range copyBars {
@@ -336,7 +375,7 @@ func main() {
 		exit(10, "%d file(s) failed to copy", copyFailed)
 	}
 
-	// Phase 2: verify
+	// Phase 2: verify — per-drive pool
 	fmt.Printf("\nverifying...\n\n")
 	p2 := mpb.NewWithContext(ctx, mpb.WithWidth(64))
 	verifyBars := make(map[string]*barTracker)
@@ -348,34 +387,39 @@ func main() {
 	newChecksums := make(map[string][]string)
 	var verifyFailed atomic.Int64
 	var wg2 sync.WaitGroup
-	pool2 := fnpool.NewPool(runtime.NumCPU())
+	resultsByDst := make(map[string][]*result)
 	for _, r := range results {
-		if r == nil {
-			continue
+		if r != nil && r.err == nil {
+			resultsByDst[r.dstRoot] = append(resultsByDst[r.dstRoot], r)
 		}
-		wg2.Add(1)
-		r := r
-		pool2.Dispatch(func() {
-			defer wg2.Done()
-			if ctx.Err() != nil {
-				return
-			}
-			got, err := hashFile(r.dst, verifyBars[r.dstRoot])
-			if err != nil {
-				fmt.Printf("\nERROR verify: %v\n", err)
-				verifyFailed.Add(1)
-				return
-			}
-			if got != r.srcHash {
-				fmt.Printf("\nMISMATCH: %s\n", r.dst)
-				verifyFailed.Add(1)
-				return
-			}
-			mu.Lock()
-			newChecksums[r.dstRoot] = append(newChecksums[r.dstRoot],
-				fmt.Sprintf("%s  %s", got, r.rel))
-			mu.Unlock()
-		})
+	}
+	for dstRoot, rs := range resultsByDst {
+		pool2 := fnpool.NewPool(dstInfos[dstRoot].concurrency)
+		for _, r := range rs {
+			wg2.Add(1)
+			r := r
+			pool2.Dispatch(func() {
+				defer wg2.Done()
+				if ctx.Err() != nil {
+					return
+				}
+				got, err := hashFile(r.dst, verifyBars[r.dstRoot])
+				if err != nil {
+					fmt.Printf("\nERROR verify: %v\n", err)
+					verifyFailed.Add(1)
+					return
+				}
+				if got != r.srcHash {
+					fmt.Printf("\nMISMATCH: %s\n", r.dst)
+					verifyFailed.Add(1)
+					return
+				}
+				mu.Lock()
+				newChecksums[r.dstRoot] = append(newChecksums[r.dstRoot],
+					fmt.Sprintf("%s  %s", got, r.rel))
+				mu.Unlock()
+			})
+		}
 	}
 	wg2.Wait()
 	for _, t := range verifyBars {
@@ -821,20 +865,6 @@ type scannedCard struct {
 	files []fileEntry
 }
 
-func buildOps(scanned []scannedCard, dstRoots []string, bars map[string]*barTracker) []*op {
-	var ops []*op
-	for _, sc := range scanned {
-		for _, f := range sc.files {
-			src := filepath.Join(sc.src, f.rel)
-			dstRel := filepath.Join(sc.Volume, f.rel)
-			for _, dstRoot := range dstRoots {
-				dst := filepath.Join(dstRoot, dstRel)
-				ops = append(ops, &op{src: src, dst: dst, do: prepJob(src, dst, dstRel, dstRoot, bars[dstRoot])})
-			}
-		}
-	}
-	return ops
-}
 
 func runVerify(cfg Config, missionNum int) {
 	yearStr := strconv.Itoa(time.Now().Year())
