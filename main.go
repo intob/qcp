@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +20,7 @@ import (
 
 	"github.com/inneslabs/fnpool"
 	"github.com/inneslabs/jfmt"
+	"lukechampine.com/blake3"
 )
 
 const seqPath = "~/.qcp_seq"
@@ -43,8 +46,11 @@ type op struct {
 }
 
 type result struct {
-	err error
-	n   int64
+	err     error
+	n       int64
+	hash    string
+	rel     string
+	dstRoot string
 }
 
 func main() {
@@ -101,7 +107,7 @@ func main() {
 		for _, dstRoot := range dstRoots {
 			dst := filepath.Join(dstRoot, rel)
 			fmt.Printf("plan: %s\n      -> %s\n", src, dst)
-			ops = append(ops, &op{src: src, dst: dst, do: prepJob(src, dst)})
+			ops = append(ops, &op{src: src, dst: dst, do: prepJob(src, dst, rel, dstRoot)})
 		}
 	}
 
@@ -118,6 +124,9 @@ func main() {
 	pool := fnpool.NewPool(runtime.NumCPU())
 	var total atomic.Int64
 	var wg sync.WaitGroup
+	var mu sync.Mutex
+	checksums := make(map[string][]string) // dstRoot → "hash  rel" lines
+
 	for _, op := range ops {
 		wg.Add(1)
 		pool.Dispatch(func() {
@@ -129,9 +138,24 @@ func main() {
 			}
 			fmt.Printf("done: %s\n", op.dst)
 			total.Add(res.n)
+			mu.Lock()
+			checksums[res.dstRoot] = append(checksums[res.dstRoot],
+				fmt.Sprintf("%s  %s", res.hash, res.rel))
+			mu.Unlock()
 		})
 	}
 	wg.Wait()
+
+	for dstRoot, lines := range checksums {
+		sort.Strings(lines)
+		content := strings.Join(lines, "\n") + "\n"
+		cPath := filepath.Join(dstRoot, "checksums.b3")
+		if err := os.WriteFile(cPath, []byte(content), 0644); err != nil {
+			fmt.Printf("ERROR writing checksums: %v\n", err)
+		} else {
+			fmt.Printf("checksums: %s\n", cPath)
+		}
+	}
 
 	perDrive := jfmt.FmtSize64(uint64(total.Load()) / uint64(len(dstRoots)))
 	fmt.Printf("copied %s to %d drive(s) → %s\n", perDrive, len(dstRoots), missionSlug)
@@ -158,11 +182,15 @@ func findFiles(root string) ([]string, error) {
 	return files, err
 }
 
-func prepJob(src, dst string) func() <-chan *result {
+func prepJob(src, dst, rel, dstRoot string) func() <-chan *result {
+	rel = strings.TrimPrefix(rel, string(os.PathSeparator))
 	return func() <-chan *result {
 		done := make(chan *result)
 		go func() {
-			done <- job(src, dst)
+			r := job(src, dst)
+			r.rel = rel
+			r.dstRoot = dstRoot
+			done <- r
 			close(done)
 		}()
 		return done
@@ -172,27 +200,53 @@ func prepJob(src, dst string) func() <-chan *result {
 func job(src, dst string) *result {
 	rd, err := os.Open(src)
 	if err != nil {
-		return &result{err, 0}
+		return &result{err: err}
 	}
 	defer rd.Close()
+
 	info, err := os.Stat(src)
 	if err != nil {
-		return &result{err, 0}
+		return &result{err: err}
 	}
 	perm := info.Mode().Perm()
+
 	if err := os.MkdirAll(filepath.Dir(dst), 0777); err != nil {
-		return &result{err, 0}
+		return &result{err: err}
 	}
 	wr, err := os.Create(dst)
 	if err != nil {
-		return &result{err, 0}
+		return &result{err: err}
 	}
-	defer wr.Close()
-	n, err := io.Copy(wr, rd)
+
+	srcH := blake3.New(32, nil)
+	n, err := io.Copy(wr, io.TeeReader(rd, srcH))
+	wr.Close()
 	if err != nil {
-		return &result{err, 0}
+		return &result{err: err}
 	}
-	return &result{os.Chmod(dst, perm), n}
+
+	if err := os.Chmod(dst, perm); err != nil {
+		return &result{err: err}
+	}
+
+	// verify destination
+	dstRd, err := os.Open(dst)
+	if err != nil {
+		return &result{err: fmt.Errorf("verify open: %w", err)}
+	}
+	defer dstRd.Close()
+	dstH := blake3.New(32, nil)
+	if _, err := io.Copy(dstH, dstRd); err != nil {
+		return &result{err: fmt.Errorf("verify read: %w", err)}
+	}
+
+	srcHash := hex.EncodeToString(srcH.Sum(nil))
+	dstHash := hex.EncodeToString(dstH.Sum(nil))
+	if srcHash != dstHash {
+		return &result{err: fmt.Errorf("checksum mismatch: %s", dst)}
+	}
+
+	return &result{n: n, hash: srcHash}
 }
 
 func peekMission(year int) (int, error) {
