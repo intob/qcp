@@ -413,24 +413,39 @@ func runSync(cfg Config, year int, skipConf bool) {
 		exit(1, "no archive drives mounted")
 	}
 
-	// find what primary has that others don't
+	// find what primary has that archives don't, pre-scan file lists
 	type syncJob struct {
-		slug    string
-		srcDir  string
-		dstDir  string
-		dstVol  string
+		slug   string
+		srcDir string
+		dstDir string
+		dstVol string
+		files  []fileEntry
+		size   int64
 	}
 	var jobs []syncJob
 	for _, dst := range archives {
+		slugs := make([]string, 0)
 		for slug := range primary.missions {
 			if !dst.missions[slug] {
-				jobs = append(jobs, syncJob{
-					slug:   slug,
-					srcDir: filepath.Join(primary.yearDir, slug),
-					dstDir: filepath.Join(dst.yearDir, slug),
-					dstVol: dst.Volume,
-				})
+				slugs = append(slugs, slug)
 			}
+		}
+		sort.Strings(slugs)
+		for _, slug := range slugs {
+			srcDir := filepath.Join(primary.yearDir, slug)
+			files, size, err := missionFiles(srcDir)
+			if err != nil {
+				fmt.Printf("ERROR scanning %s: %v\n", slug, err)
+				continue
+			}
+			jobs = append(jobs, syncJob{
+				slug:   slug,
+				srcDir: srcDir,
+				dstDir: filepath.Join(dst.yearDir, slug),
+				dstVol: dst.Volume,
+				files:  files,
+				size:   size,
+			})
 		}
 	}
 
@@ -439,93 +454,148 @@ func runSync(cfg Config, year int, skipConf bool) {
 		return
 	}
 
-	// sort for deterministic output
-	sort.Slice(jobs, func(i, j int) bool {
-		return jobs[i].slug < jobs[j].slug
-	})
-
 	for _, j := range jobs {
-		fmt.Printf("sync: %s → %s/%s\n", j.slug, j.dstVol, j.slug)
+		fmt.Printf("sync: %s → %s\n", j.slug, j.dstVol)
 	}
 	fmt.Printf("\n%d mission(s) to sync from %s\n", len(jobs), primary.Volume)
 	if !skipConf && !confirm() {
 		exit(0, "aborted")
 	}
 
+	// interrupt handler — clean up any dstDirs we create
+	ctx, cancel := context.WithCancel(context.Background())
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt)
+	var dstDirs []string
 	for _, j := range jobs {
-		fmt.Printf("\nsyncing %s → %s\n\n", j.slug, j.dstVol)
-		files, totalSize, err := missionFiles(j.srcDir)
-		if err != nil {
-			fmt.Printf("ERROR scanning %s: %v\n", j.slug, err)
-			continue
-		}
-
-		p1 := mpb.New(mpb.WithWidth(64))
-		bar := addBar(p1, j.dstVol, totalSize)
-		ops := buildSyncOps(files, j.srcDir, j.dstDir, bar)
-
-		results := make([]*result, len(ops))
-		pool := fnpool.NewPool(runtime.NumCPU())
-		var wg sync.WaitGroup
-		var total atomic.Int64
-		for i, op := range ops {
-			wg.Add(1)
-			i, op := i, op
-			pool.Dispatch(func() {
-				defer wg.Done()
-				r := <-op.do()
-				results[i] = r
-				if r.err != nil {
-					fmt.Printf("\nERROR: %v\n", r.err)
-				} else {
-					total.Add(r.n)
-				}
-			})
-		}
-		wg.Wait()
-		p1.Wait()
-
-		fmt.Printf("\nverifying...\n\n")
-		p2 := mpb.New(mpb.WithWidth(64))
-		vbar := addBar(p2, j.dstVol, totalSize)
-		var verifyFailed atomic.Int64
-		var mu sync.Mutex
-		var checksumLines []string
-		var wg2 sync.WaitGroup
-		pool2 := fnpool.NewPool(runtime.NumCPU())
-		for _, r := range results {
-			if r == nil || r.err != nil {
-				continue
-			}
-			wg2.Add(1)
-			r := r
-			pool2.Dispatch(func() {
-				defer wg2.Done()
-				got, err := hashFile(r.dst, vbar)
-				if err != nil || got != r.srcHash {
-					fmt.Printf("\nFAIL: %s\n", r.dst)
-					verifyFailed.Add(1)
-					return
-				}
-				mu.Lock()
-				checksumLines = append(checksumLines, fmt.Sprintf("%s  %s", got, r.rel))
-				mu.Unlock()
-			})
-		}
-		wg2.Wait()
-		p2.Wait()
-
-		if verifyFailed.Load() > 0 {
-			fmt.Printf("ERROR: %d file(s) failed verification for %s\n", verifyFailed.Load(), j.slug)
-			continue
-		}
-
-		// write or merge checksums.b3
-		cPath := filepath.Join(j.dstDir, "checksums.b3")
-		sort.Strings(checksumLines)
-		os.WriteFile(cPath, []byte(strings.Join(checksumLines, "\n")+"\n"), 0644)
-		fmt.Printf("%s → %s: %s\n", j.slug, j.dstVol, jfmt.FmtSize64(uint64(total.Load())))
+		dstDirs = append(dstDirs, j.dstDir)
 	}
+	go func() {
+		<-sigCh
+		signal.Stop(sigCh)
+		cancel()
+		time.Sleep(150 * time.Millisecond)
+		fmt.Print("\r\033[2K\ninterrupted — delete partial sync dirs? (y/n): ")
+		reader := bufio.NewReader(os.Stdin)
+		var resp string
+		for resp != "y" && resp != "n" {
+			line, _ := reader.ReadString('\n')
+			resp = strings.TrimSpace(line)
+		}
+		if resp == "y" {
+			for _, d := range dstDirs {
+				os.RemoveAll(d)
+				fmt.Printf("removed: %s\n", d)
+			}
+		}
+		os.Exit(130)
+	}()
+
+	// total bytes per archive drive (for bar totals)
+	archiveSize := make(map[string]int64)
+	for _, j := range jobs {
+		archiveSize[j.dstVol] += j.size
+	}
+
+	// Phase 1: copy — one bar per archive, all missions in parallel
+	fmt.Printf("\ncopying...\n\n")
+	p1 := mpb.NewWithContext(ctx, mpb.WithWidth(64))
+	copyBars := make(map[string]*mpb.Bar)
+	for vol, size := range archiveSize {
+		copyBars[vol] = addBar(p1, vol, size)
+	}
+
+	var allOps []*op
+	for _, j := range jobs {
+		allOps = append(allOps, buildSyncOps(j.files, j.srcDir, j.dstDir, copyBars[j.dstVol])...)
+	}
+
+	results := make([]*result, len(allOps))
+	pool := fnpool.NewPool(runtime.NumCPU())
+	var total atomic.Int64
+	var wg sync.WaitGroup
+	for i, op := range allOps {
+		wg.Add(1)
+		i, op := i, op
+		pool.Dispatch(func() {
+			defer wg.Done()
+			if ctx.Err() != nil {
+				return
+			}
+			r := <-op.do()
+			results[i] = r
+			if r.err != nil {
+				fmt.Printf("\nERROR: %v\n", r.err)
+			} else {
+				total.Add(r.n)
+			}
+		})
+	}
+	wg.Wait()
+	p1.Wait()
+
+	var copyFailed int
+	for _, r := range results {
+		if r != nil && r.err != nil {
+			copyFailed++
+		}
+	}
+	if copyFailed > 0 {
+		exit(1, "%d file(s) failed to copy", copyFailed)
+	}
+
+	// Phase 2: verify — one bar per archive
+	fmt.Printf("\nverifying...\n\n")
+	p2 := mpb.NewWithContext(ctx, mpb.WithWidth(64))
+	verifyBars := make(map[string]*mpb.Bar)
+	for vol, size := range archiveSize {
+		verifyBars[vol] = addBar(p2, vol, size)
+	}
+
+	var mu sync.Mutex
+	// checksums grouped by dstDir (mission dir)
+	checksums := make(map[string][]string)
+	var verifyFailed atomic.Int64
+	var wg2 sync.WaitGroup
+	pool2 := fnpool.NewPool(runtime.NumCPU())
+	for _, r := range results {
+		if r == nil || r.err != nil {
+			continue
+		}
+		wg2.Add(1)
+		r := r
+		pool2.Dispatch(func() {
+			defer wg2.Done()
+			if ctx.Err() != nil {
+				return
+			}
+			got, err := hashFile(r.dst, verifyBars[volName(r.dstRoot)])
+			if err != nil || got != r.srcHash {
+				fmt.Printf("\nFAIL: %s\n", r.dst)
+				verifyFailed.Add(1)
+				return
+			}
+			mu.Lock()
+			checksums[r.dstRoot] = append(checksums[r.dstRoot],
+				fmt.Sprintf("%s  %s", got, r.rel))
+			mu.Unlock()
+		})
+	}
+	wg2.Wait()
+	p2.Wait()
+
+	if verifyFailed.Load() > 0 {
+		exit(1, "%d file(s) failed verification", verifyFailed.Load())
+	}
+
+	for dstRoot, lines := range checksums {
+		sort.Strings(lines)
+		os.WriteFile(filepath.Join(dstRoot, "checksums.b3"),
+			[]byte(strings.Join(lines, "\n")+"\n"), 0644)
+	}
+
+	perArchive := jfmt.FmtSize64(uint64(total.Load()) / uint64(len(archiveSize)))
+	fmt.Printf("\n%s synced to %d archive(s)\n", perArchive, len(archiveSize))
 }
 
 func buildSyncOps(files []fileEntry, srcDir, dstDir string, bar *mpb.Bar) []*op {
