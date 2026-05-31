@@ -21,6 +21,8 @@ import (
 
 	"github.com/inneslabs/fnpool"
 	"github.com/inneslabs/jfmt"
+	"github.com/vbauerster/mpb/v8"
+	"github.com/vbauerster/mpb/v8/decor"
 	"lukechampine.com/blake3"
 )
 
@@ -43,7 +45,12 @@ type DriveConfig struct {
 
 type mountedCard struct {
 	CardConfig
-	src string // full path to card sub dir
+	src string
+}
+
+type fileEntry struct {
+	rel  string
+	size int64
 }
 
 type op struct {
@@ -58,6 +65,30 @@ type result struct {
 	dst     string
 	rel     string
 	dstRoot string
+}
+
+type progressWriter struct {
+	w   io.Writer
+	bar *mpb.Bar
+}
+
+func (pw *progressWriter) Write(p []byte) (int, error) {
+	start := time.Now()
+	n, err := pw.w.Write(p)
+	pw.bar.EwmaIncrBy(n, time.Since(start))
+	return n, err
+}
+
+type progressReader struct {
+	r   io.Reader
+	bar *mpb.Bar
+}
+
+func (pr *progressReader) Read(p []byte) (int, error) {
+	start := time.Now()
+	n, err := pr.r.Read(p)
+	pr.bar.EwmaIncrBy(n, time.Since(start))
+	return n, err
 }
 
 func main() {
@@ -104,7 +135,7 @@ func main() {
 		missionSlug = fmt.Sprintf("%03d_%s", num, sanitizeMission(*missionFlag))
 	}
 
-	dstRoots := []string{}
+	var dstRoots []string
 	for _, d := range cfg.Drives {
 		vol := filepath.Join("/Volumes", d.Volume)
 		if !dirExists(vol) {
@@ -117,17 +148,31 @@ func main() {
 		exit(5, "no destination drives mounted")
 	}
 
-	ops, err := buildOps(cards, dstRoots)
-	if err != nil {
-		exit(6, "err scanning cards: %v", err)
+	// scan cards for file lists + sizes
+	var scanned []scannedCard
+	var totalSize int64
+	var totalFiles int
+	for _, card := range cards {
+		files, err := findFiles(card.src)
+		if err != nil {
+			exit(6, "err scanning %s: %v", card.Volume, err)
+		}
+		scanned = append(scanned, scannedCard{card, files})
+		for _, f := range files {
+			totalSize += f.size
+		}
+		totalFiles += len(files)
 	}
-	if len(ops) == 0 {
+	if totalFiles == 0 {
 		exit(7, "no files found on mounted cards")
 	}
 
+	// build ops + print plan
+	ops := buildOps(scanned, dstRoots)
 	for _, op := range ops {
 		fmt.Printf("plan: %s\n      -> %s\n", op.src, op.dst)
 	}
+
 	fmt.Printf("\nmission:      %s\n", missionSlug)
 	fmt.Printf("destinations: %s\n", strings.Join(dstRoots, "\n              "))
 	if !*skipConf && !confirm() {
@@ -140,8 +185,16 @@ func main() {
 		}
 	}
 
+	sizeStr := jfmt.FmtSize64(uint64(totalSize))
+	fmt.Printf("\ncopying %d files (%s) to %d drive(s)\n\n", totalFiles, sizeStr, len(dstRoots))
+
 	// Phase 1: copy
-	fmt.Println("\ncopying...")
+	p1 := mpb.New(mpb.WithWidth(64))
+	copyBars := make(map[string]*mpb.Bar)
+	for _, dstRoot := range dstRoots {
+		copyBars[dstRoot] = addBar(p1, volName(dstRoot), totalSize)
+	}
+
 	results := make([]*result, len(ops))
 	pool := fnpool.NewPool(runtime.NumCPU())
 	var total atomic.Int64
@@ -154,14 +207,14 @@ func main() {
 			r := <-op.do()
 			results[i] = r
 			if r.err != nil {
-				fmt.Printf("ERROR copy: %v\n", r.err)
+				fmt.Printf("\nERROR copy: %v\n", r.err)
 				return
 			}
-			fmt.Printf("copied: %s\n", op.dst)
 			total.Add(r.n)
 		})
 	}
 	wg.Wait()
+	p1.Wait()
 
 	var copyFailed int
 	for _, r := range results {
@@ -174,29 +227,34 @@ func main() {
 	}
 
 	// Phase 2: verify
-	fmt.Println("\nverifying...")
-	pool2 := fnpool.NewPool(runtime.NumCPU())
+	fmt.Printf("\nverifying...\n\n")
+	p2 := mpb.New(mpb.WithWidth(64))
+	verifyBars := make(map[string]*mpb.Bar)
+	for _, dstRoot := range dstRoots {
+		verifyBars[dstRoot] = addBar(p2, volName(dstRoot), totalSize)
+	}
+
 	var mu sync.Mutex
-	newChecksums := make(map[string][]string) // dstRoot → lines
+	newChecksums := make(map[string][]string)
 	var verifyFailed atomic.Int64
 	var wg2 sync.WaitGroup
+	pool2 := fnpool.NewPool(runtime.NumCPU())
 	for _, r := range results {
 		wg2.Add(1)
 		r := r
 		pool2.Dispatch(func() {
 			defer wg2.Done()
-			got, err := hashFile(r.dst)
+			got, err := hashFile(r.dst, verifyBars[r.dstRoot])
 			if err != nil {
-				fmt.Printf("ERROR verify: %v\n", err)
+				fmt.Printf("\nERROR verify: %v\n", err)
 				verifyFailed.Add(1)
 				return
 			}
 			if got != r.srcHash {
-				fmt.Printf("MISMATCH: %s\n", r.dst)
+				fmt.Printf("\nMISMATCH: %s\n", r.dst)
 				verifyFailed.Add(1)
 				return
 			}
-			fmt.Printf("ok: %s\n", r.dst)
 			mu.Lock()
 			newChecksums[r.dstRoot] = append(newChecksums[r.dstRoot],
 				fmt.Sprintf("%s  %s", got, r.rel))
@@ -204,6 +262,7 @@ func main() {
 		})
 	}
 	wg2.Wait()
+	p2.Wait()
 
 	if verifyFailed.Load() > 0 {
 		exit(11, "%d file(s) failed verification", verifyFailed.Load())
@@ -217,94 +276,52 @@ func main() {
 		sort.Strings(lines)
 		if err := os.WriteFile(cPath, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
 			fmt.Printf("ERROR writing checksums: %v\n", err)
-		} else {
-			fmt.Printf("checksums: %s\n", cPath)
 		}
 	}
 
 	perDrive := jfmt.FmtSize64(uint64(total.Load()) / uint64(len(dstRoots)))
-	fmt.Printf("\ncopied %s to %d drive(s) → %s\n", perDrive, len(dstRoots), missionSlug)
+	fmt.Printf("\n%s copied and verified → %s\n", perDrive, missionSlug)
 }
 
-func buildOps(cards []mountedCard, dstRoots []string) ([]*op, error) {
+func addBar(p *mpb.Progress, name string, total int64) *mpb.Bar {
+	return p.AddBar(total,
+		mpb.PrependDecorators(
+			decor.Name(fmt.Sprintf("%-12s", name)),
+			decor.CountersKibiByte("% .1f / % .1f  "),
+		),
+		mpb.AppendDecorators(
+			decor.EwmaSpeed(decor.SizeB1024(0), "% .1f  ", 30),
+			decor.OnComplete(decor.EwmaETA(decor.ET_STYLE_GO, 30), "✓"),
+		),
+	)
+}
+
+func volName(dstRoot string) string {
+	parts := strings.SplitN(dstRoot, string(os.PathSeparator), 4)
+	if len(parts) >= 3 {
+		return parts[2]
+	}
+	return dstRoot
+}
+
+type scannedCard struct {
+	mountedCard
+	files []fileEntry
+}
+
+func buildOps(scanned []scannedCard, dstRoots []string) []*op {
 	var ops []*op
-	for _, card := range cards {
-		files, err := findFiles(card.src)
-		if err != nil {
-			return nil, fmt.Errorf("card %s: %w", card.Volume, err)
-		}
-		for _, rel := range files {
-			src := filepath.Join(card.src, rel)
-			dstRel := filepath.Join(card.Volume, rel)
+	for _, sc := range scanned {
+		for _, f := range sc.files {
+			src := filepath.Join(sc.src, f.rel)
+			dstRel := filepath.Join(sc.Volume, f.rel)
 			for _, dstRoot := range dstRoots {
 				dst := filepath.Join(dstRoot, dstRel)
 				ops = append(ops, &op{src: src, dst: dst, do: prepJob(src, dst, dstRel, dstRoot)})
 			}
 		}
 	}
-	return ops, nil
-}
-
-func mountedCards(cfgs []CardConfig) []mountedCard {
-	var out []mountedCard
-	for _, c := range cfgs {
-		src := filepath.Join("/Volumes", c.Volume, c.Sub)
-		if dirExists(src) {
-			out = append(out, mountedCard{c, src})
-		}
-	}
-	return out
-}
-
-// findMissionSlug looks for an existing NNN_ directory across mounted drives.
-func findMissionSlug(drives []DriveConfig, yearStr string, num int) (string, error) {
-	prefix := fmt.Sprintf("%03d_", num)
-	for _, d := range drives {
-		yearDir := filepath.Join("/Volumes", d.Volume, d.Root, yearStr)
-		entries, err := os.ReadDir(yearDir)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if e.IsDir() && strings.HasPrefix(e.Name(), prefix) {
-				return e.Name(), nil
-			}
-		}
-	}
-	return "", fmt.Errorf("no mission %s found on any mounted drive", prefix)
-}
-
-// mergeChecksums reads existing checksums.b3 and merges with new lines (new wins on collision).
-func mergeChecksums(path string, newLines []string) []string {
-	existing := readChecksumFile(path)
-	for _, line := range newLines {
-		parts := strings.SplitN(line, "  ", 2)
-		if len(parts) == 2 {
-			existing[parts[1]] = parts[0]
-		}
-	}
-	merged := make([]string, 0, len(existing))
-	for rel, hash := range existing {
-		merged = append(merged, fmt.Sprintf("%s  %s", hash, rel))
-	}
-	return merged
-}
-
-func readChecksumFile(path string) map[string]string { // rel → hash
-	out := make(map[string]string)
-	f, err := os.Open(path)
-	if err != nil {
-		return out
-	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		parts := strings.SplitN(scanner.Text(), "  ", 2)
-		if len(parts) == 2 {
-			out[parts[1]] = parts[0]
-		}
-	}
-	return out
+	return ops
 }
 
 func runVerify(dir string) {
@@ -317,18 +334,25 @@ func runVerify(dir string) {
 
 	type entry struct{ hash, rel string }
 	var entries []entry
+	var totalSize int64
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		parts := strings.SplitN(scanner.Text(), "  ", 2)
 		if len(parts) == 2 {
 			entries = append(entries, entry{parts[0], parts[1]})
+			if info, err := os.Stat(filepath.Join(dir, parts[1])); err == nil {
+				totalSize += info.Size()
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		exit(1, "err reading checksums: %v", err)
 	}
 
-	fmt.Printf("verifying %d files in %s\n", len(entries), dir)
+	fmt.Printf("verifying %d files in %s\n\n", len(entries), dir)
+
+	p := mpb.New(mpb.WithWidth(64))
+	bar := addBar(p, filepath.Base(filepath.Dir(dir)), totalSize)
 
 	pool := fnpool.NewPool(runtime.NumCPU())
 	var failed atomic.Int64
@@ -338,30 +362,29 @@ func runVerify(dir string) {
 		e := e
 		pool.Dispatch(func() {
 			defer wg.Done()
-			got, err := hashFile(filepath.Join(dir, e.rel))
+			got, err := hashFile(filepath.Join(dir, e.rel), bar)
 			if err != nil {
-				fmt.Printf("ERROR: %v\n", err)
+				fmt.Printf("\nERROR: %v\n", err)
 				failed.Add(1)
 				return
 			}
 			if got != e.hash {
-				fmt.Printf("FAIL: %s\n", e.rel)
+				fmt.Printf("\nFAIL: %s\n", e.rel)
 				failed.Add(1)
-				return
 			}
-			fmt.Printf("ok: %s\n", e.rel)
 		})
 	}
 	wg.Wait()
+	p.Wait()
 
 	if n := failed.Load(); n > 0 {
 		exit(1, "%d file(s) failed", n)
 	}
-	fmt.Printf("all %d files ok\n", len(entries))
+	fmt.Printf("\nall %d files ok\n", len(entries))
 }
 
-func findFiles(root string) ([]string, error) {
-	var files []string
+func findFiles(root string) ([]fileEntry, error) {
+	var files []fileEntry
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -369,13 +392,17 @@ func findFiles(root string) ([]string, error) {
 		if d == nil || d.IsDir() {
 			return nil
 		}
-		rel := strings.TrimPrefix(path, root)
+		rel := strings.TrimPrefix(path, root+string(os.PathSeparator))
 		for _, part := range strings.Split(rel, string(os.PathSeparator)) {
 			if strings.HasPrefix(part, ".") {
 				return nil
 			}
 		}
-		files = append(files, strings.TrimPrefix(rel, string(os.PathSeparator)))
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		files = append(files, fileEntry{rel: rel, size: info.Size()})
 		return nil
 	})
 	return files, err
@@ -432,17 +459,81 @@ func job(src, dst string) *result {
 	return &result{n: n, srcHash: hex.EncodeToString(h.Sum(nil))}
 }
 
-func hashFile(path string) (string, error) {
+func hashFile(path string, bar *mpb.Bar) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
 	h := blake3.New(32, nil)
-	if _, err := io.Copy(h, f); err != nil {
+	var r io.Reader = f
+	if bar != nil {
+		r = &progressReader{r: f, bar: bar}
+	}
+	if _, err := io.Copy(h, r); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func mountedCards(cfgs []CardConfig) []mountedCard {
+	var out []mountedCard
+	for _, c := range cfgs {
+		src := filepath.Join("/Volumes", c.Volume, c.Sub)
+		if dirExists(src) {
+			out = append(out, mountedCard{c, src})
+		}
+	}
+	return out
+}
+
+func findMissionSlug(drives []DriveConfig, yearStr string, num int) (string, error) {
+	prefix := fmt.Sprintf("%03d_", num)
+	for _, d := range drives {
+		yearDir := filepath.Join("/Volumes", d.Volume, d.Root, yearStr)
+		entries, err := os.ReadDir(yearDir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() && strings.HasPrefix(e.Name(), prefix) {
+				return e.Name(), nil
+			}
+		}
+	}
+	return "", fmt.Errorf("no mission %s found on any mounted drive", prefix)
+}
+
+func mergeChecksums(path string, newLines []string) []string {
+	existing := readChecksumFile(path)
+	for _, line := range newLines {
+		parts := strings.SplitN(line, "  ", 2)
+		if len(parts) == 2 {
+			existing[parts[1]] = parts[0]
+		}
+	}
+	merged := make([]string, 0, len(existing))
+	for rel, hash := range existing {
+		merged = append(merged, fmt.Sprintf("%s  %s", hash, rel))
+	}
+	return merged
+}
+
+func readChecksumFile(path string) map[string]string {
+	out := make(map[string]string)
+	f, err := os.Open(path)
+	if err != nil {
+		return out
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		parts := strings.SplitN(scanner.Text(), "  ", 2)
+		if len(parts) == 2 {
+			out[parts[1]] = parts[0]
+		}
+	}
+	return out
 }
 
 func peekMission(year int) (int, error) {
