@@ -488,16 +488,17 @@ func runSync(cfg Config, year int, skipConf bool) {
 		return driveState{d, yearDir, missions}, true
 	}
 
-	var primary driveState
+	var primaries []driveState
 	var archives []driveState
 	for _, d := range cfg.Drives {
 		switch d.Role {
 		case "primary":
 			if !dirExists(filepath.Join("/Volumes", d.Volume)) {
-				exit(1, "primary drive %s not mounted — cannot sync", d.Volume)
+				fmt.Printf("warning: primary %s not mounted, skipping\n", d.Volume)
+				continue
 			}
 			state, _ := scanDrive(d)
-			primary = state
+			primaries = append(primaries, state)
 		case "archive":
 			state, ok := scanDrive(d)
 			if !ok {
@@ -507,14 +508,51 @@ func runSync(cfg Config, year int, skipConf bool) {
 			archives = append(archives, state)
 		}
 	}
-	if primary.Volume == "" {
-		exit(1, "no primary drive configured (set \"role\": \"primary\" in ~/.qcp)")
+	if len(primaries) == 0 {
+		exit(1, "no primary drives mounted")
 	}
 	if len(archives) == 0 {
 		exit(1, "no archive drives mounted")
 	}
 
-	// find what primary has that archives don't, pre-scan file lists
+	// build mission → source map across all primaries.
+	// missions found on multiple primaries are cross-checked by file manifest;
+	// conflicts are skipped with a warning.
+	type missionSource struct {
+		srcVol string
+		srcDir string
+		files  []fileEntry
+		size   int64
+	}
+	missionSources := make(map[string]missionSource)
+	conflicted := make(map[string]bool)
+
+	for _, p := range primaries {
+		for slug := range p.missions {
+			if conflicted[slug] {
+				continue
+			}
+			srcDir := filepath.Join(p.yearDir, slug)
+			files, size, err := missionFiles(srcDir)
+			if err != nil {
+				fmt.Printf("ERROR scanning %s on %s: %v\n", slug, p.Volume, err)
+				continue
+			}
+			if existing, ok := missionSources[slug]; ok {
+				if !missionManifestsMatch(existing.files, files) {
+					fmt.Printf("WARNING: %s differs between %s and %s — skipping\n",
+						slug, existing.srcVol, p.Volume)
+					delete(missionSources, slug)
+					conflicted[slug] = true
+				}
+				// identical on both primaries — keep existing source
+				continue
+			}
+			missionSources[slug] = missionSource{p.Volume, srcDir, files, size}
+		}
+	}
+
+	// find what primaries have that each archive doesn't
 	type syncJob struct {
 		slug   string
 		srcDir string
@@ -525,27 +563,22 @@ func runSync(cfg Config, year int, skipConf bool) {
 	}
 	var jobs []syncJob
 	for _, dst := range archives {
-		slugs := make([]string, 0)
-		for slug := range primary.missions {
+		var slugs []string
+		for slug := range missionSources {
 			if !dst.missions[slug] {
 				slugs = append(slugs, slug)
 			}
 		}
 		sort.Strings(slugs)
 		for _, slug := range slugs {
-			srcDir := filepath.Join(primary.yearDir, slug)
-			files, size, err := missionFiles(srcDir)
-			if err != nil {
-				fmt.Printf("ERROR scanning %s: %v\n", slug, err)
-				continue
-			}
+			ms := missionSources[slug]
 			jobs = append(jobs, syncJob{
 				slug:   slug,
-				srcDir: srcDir,
+				srcDir: ms.srcDir,
 				dstDir: filepath.Join(dst.yearDir, slug),
 				dstVol: dst.Volume,
-				files:  files,
-				size:   size,
+				files:  ms.files,
+				size:   ms.size,
 			})
 		}
 	}
@@ -558,7 +591,11 @@ func runSync(cfg Config, year int, skipConf bool) {
 	for _, j := range jobs {
 		fmt.Printf("sync: %s → %s\n", j.slug, j.dstVol)
 	}
-	fmt.Printf("\n%d mission(s) to sync from %s\n", len(jobs), primary.Volume)
+	primaryNames := make([]string, len(primaries))
+	for i, p := range primaries {
+		primaryNames[i] = p.Volume
+	}
+	fmt.Printf("\n%d mission(s) to sync from %s\n", len(jobs), strings.Join(primaryNames, ", "))
 	if !skipConf && !confirm() {
 		exit(0, "aborted")
 	}
@@ -1377,6 +1414,22 @@ func mountedCards(cfgs []CardConfig) []mountedCard {
 		}
 	}
 	return out
+}
+
+func missionManifestsMatch(a, b []fileEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	sizes := make(map[string]int64, len(a))
+	for _, f := range a {
+		sizes[f.rel] = f.size
+	}
+	for _, f := range b {
+		if sizes[f.rel] != f.size {
+			return false
+		}
+	}
+	return true
 }
 
 func findMissionSlug(drives []DriveConfig, yearStr string, num int) (string, error) {
