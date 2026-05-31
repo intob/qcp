@@ -194,16 +194,20 @@ func main() {
 
 	// set up interrupt handler — from this point we have created dirs / committed seq
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt)
 	go func() {
 		<-sigCh
 		signal.Stop(sigCh)
-		// exit immediately — don't wait for in-progress io.Copy to finish
-		fmt.Print("\n\ninterrupted — delete partial mission and revert counter? (y/n): ")
+		cancel()                          // stop mpb rendering via context
+		time.Sleep(150 * time.Millisecond) // let mpb goroutine exit
+		reader := bufio.NewReader(os.Stdin)
 		var resp string
-		fmt.Scan(&resp)
+		for resp != "y" && resp != "n" {
+			fmt.Print("\r\033[2K\ninterrupted — delete partial mission and revert counter? (y/n): ")
+			line, _ := reader.ReadString('\n')
+			resp = strings.TrimSpace(line)
+		}
 		if resp == "y" {
 			for _, d := range dstRoots {
 				os.RemoveAll(d)
