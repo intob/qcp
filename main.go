@@ -118,8 +118,7 @@ func main() {
 		exit(5, "no destination drives mounted")
 	}
 
-	// Use per-card subdirs when multiple cards are mounted or appending to an existing mission.
-	useSubdir := len(cards) > 1 || isAppend
+	useSubdir := true
 
 	ops, err := buildOps(cards, dstRoots, useSubdir)
 	if err != nil {
