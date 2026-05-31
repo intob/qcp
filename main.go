@@ -94,6 +94,13 @@ func (pw *progressWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
+func (pw *progressWriter) flush() {
+	if pw.pending > 0 {
+		pw.bar.EwmaIncrBy(pw.pending, time.Since(pw.windowStart))
+		pw.pending = 0
+	}
+}
+
 type progressReader struct {
 	r           io.Reader
 	bar         *mpb.Bar
@@ -113,6 +120,13 @@ func (pr *progressReader) Read(p []byte) (int, error) {
 		pr.windowStart = time.Now()
 	}
 	return n, err
+}
+
+func (pr *progressReader) flush() {
+	if pr.pending > 0 {
+		pr.bar.EwmaIncrBy(pr.pending, time.Since(pr.windowStart))
+		pr.pending = 0
+	}
 }
 
 func main() {
@@ -895,7 +909,14 @@ func runChecksum(cfg Config, missionNum int, year int) {
 		exit(1, "error scanning %s: %v", drives[0].vol, err)
 	}
 
-	fmt.Printf("checksumming mission %03d (%s) on %d drive(s)\n\n", missionNum, slug, len(drives))
+	fmt.Printf("checksumming mission %03d (%s) on %d drive(s)\n", missionNum, slug, len(drives))
+	driveInfos := make(map[string]driveInfo)
+	for _, d := range drives {
+		info := probeDrive("/Volumes/" + d.vol)
+		driveInfos[d.vol] = info
+		fmt.Printf("  %s: %s\n", d.vol, info)
+	}
+	fmt.Println()
 
 	// hash all files on all drives in parallel, per-drive concurrency
 	p := mpb.New(mpb.WithWidth(64))
@@ -906,8 +927,7 @@ func runChecksum(cfg Config, missionNum int, year int) {
 	for i := range drives {
 		d := &drives[i]
 		bar := addBar(p, d.vol, totalSize)
-		concurrency := probeDrive("/Volumes/" + d.vol).concurrency
-		pool := fnpool.NewPool(concurrency)
+		pool := fnpool.NewPool(driveInfos[d.vol].concurrency)
 		for _, f := range files {
 			wg.Add(1)
 			f := f
@@ -1026,12 +1046,14 @@ func job(src, dst string, bar *mpb.Bar) *result {
 	}
 
 	h := blake3.New(32, nil)
+	pw := &progressWriter{w: wr, bar: bar}
 	var w io.Writer = wr
 	if bar != nil {
-		w = &progressWriter{w: wr, bar: bar}
+		w = pw
 	}
 	buf := make([]byte, 4*1024*1024)
 	n, err := io.CopyBuffer(w, io.TeeReader(rd, h), buf)
+	pw.flush()
 	wr.Sync()
 	wr.Close()
 	if err != nil {
@@ -1052,14 +1074,16 @@ func hashFile(path string, bar *mpb.Bar) (string, error) {
 	}
 	defer f.Close()
 	h := blake3.New(32, nil)
+	pr := &progressReader{r: f, bar: bar}
 	var r io.Reader = f
 	if bar != nil {
-		r = &progressReader{r: f, bar: bar}
+		r = pr
 	}
 	buf := make([]byte, 4*1024*1024)
 	if _, err := io.CopyBuffer(h, r, buf); err != nil {
 		return "", err
 	}
+	pr.flush()
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
