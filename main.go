@@ -373,14 +373,41 @@ func addBar(p *mpb.Progress, name string, total int64) *mpb.Bar {
 	)
 }
 
-// driveConcurrency returns the ideal number of concurrent file operations for
-// the given volume path. SSDs benefit from queue depth; HDDs need sequential I/O.
-func driveConcurrency(volPath string) int {
+type driveInfo struct {
+	concurrency int
+	kind        string // "SSD" or "HDD"
+	protocol    string // e.g. "USB", "Thunderbolt", "NVMe", "SATA"
+}
+
+func (d driveInfo) String() string {
+	return fmt.Sprintf("%s · %s · %d worker(s)", d.kind, d.protocol, d.concurrency)
+}
+
+// probeDrive queries diskutil for drive type and protocol, then picks
+// an appropriate concurrency (SSDs benefit from queue depth; HDDs need sequential I/O).
+func probeDrive(volPath string) driveInfo {
 	out, err := exec.Command("diskutil", "info", volPath).Output()
-	if err == nil && strings.Contains(string(out), "Solid State:               Yes") {
-		return 4
+	if err != nil {
+		return driveInfo{concurrency: 1, kind: "HDD", protocol: "unknown"}
 	}
-	return 1
+	s := string(out)
+
+	kind := "HDD"
+	concurrency := 1
+	if strings.Contains(s, "Solid State:               Yes") {
+		kind = "SSD"
+		concurrency = 4
+	}
+
+	protocol := "unknown"
+	for _, line := range strings.Split(s, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "Protocol:") {
+			protocol = strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
+			break
+		}
+	}
+
+	return driveInfo{concurrency: concurrency, kind: kind, protocol: protocol}
 }
 
 func volName(dstRoot string) string {
@@ -528,6 +555,15 @@ func runSync(cfg Config, year int, skipConf bool) {
 		archiveSize[j.dstVol] += j.size
 	}
 
+	// probe each archive drive once and report
+	volInfo := make(map[string]driveInfo)
+	fmt.Println()
+	for vol := range archiveSize {
+		info := probeDrive("/Volumes/" + vol)
+		volInfo[vol] = info
+		fmt.Printf("  %s: %s\n", vol, info)
+	}
+
 	// Phase 1: copy — one bar per archive, all missions in parallel
 	fmt.Printf("\ncopying...\n\n")
 	p1 := mpb.NewWithContext(ctx, mpb.WithWidth(64))
@@ -547,8 +583,7 @@ func runSync(cfg Config, year int, skipConf bool) {
 	var total atomic.Int64
 	var wg sync.WaitGroup
 	for vol, ops := range opsByVol {
-		concurrency := driveConcurrency("/Volumes/" + vol)
-		pool := fnpool.NewPool(concurrency)
+		pool := fnpool.NewPool(volInfo[vol].concurrency)
 		for _, op := range ops {
 			wg.Add(1)
 			op := op
@@ -606,8 +641,7 @@ func runSync(cfg Config, year int, skipConf bool) {
 
 	var wg2 sync.WaitGroup
 	for vol, rs := range resultsByVol {
-		concurrency := driveConcurrency("/Volumes/" + vol)
-		pool2 := fnpool.NewPool(concurrency)
+		pool2 := fnpool.NewPool(volInfo[vol].concurrency)
 		for _, r := range rs {
 			wg2.Add(1)
 			r := r
