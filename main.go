@@ -194,15 +194,13 @@ func main() {
 
 	// set up interrupt handler — from this point we have created dirs / committed seq
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt)
 	go func() {
 		<-sigCh
-		cancel()
 		signal.Stop(sigCh)
-	}()
-
-	cleanup := func() {
+		// exit immediately — don't wait for in-progress io.Copy to finish
 		fmt.Print("\n\ninterrupted — delete partial mission and revert counter? (y/n): ")
 		var resp string
 		fmt.Scan(&resp)
@@ -220,7 +218,7 @@ func main() {
 			}
 		}
 		os.Exit(130)
-	}
+	}()
 
 	sizeStr := jfmt.FmtSize64(uint64(totalSize))
 	fmt.Printf("\ncopying %d files (%s) to %d drive(s)\n\n", totalFiles, sizeStr, len(dstRoots))
@@ -256,10 +254,6 @@ func main() {
 	}
 	wg.Wait()
 	p1.Wait()
-
-	if ctx.Err() != nil {
-		cleanup()
-	}
 
 	var copyFailed int
 	for _, r := range results {
@@ -314,10 +308,6 @@ func main() {
 	}
 	wg2.Wait()
 	p2.Wait()
-
-	if ctx.Err() != nil {
-		cleanup()
-	}
 
 	if verifyFailed.Load() > 0 {
 		exit(11, "%d file(s) failed verification", verifyFailed.Load())
