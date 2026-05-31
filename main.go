@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -48,7 +49,8 @@ type op struct {
 type result struct {
 	err     error
 	n       int64
-	hash    string
+	srcHash string
+	dst     string
 	rel     string
 	dstRoot string
 }
@@ -57,7 +59,13 @@ func main() {
 	skipConf := flag.Bool("y", false, "skip confirmation")
 	missionFlag := flag.String("mission", "", "mission name (e.g. \"Altissimo with Anton\")")
 	year := flag.Int("year", time.Now().Year(), "year override")
+	verifyDir := flag.String("verify", "", "re-verify checksums in a mission dir")
 	flag.Parse()
+
+	if *verifyDir != "" {
+		runVerify(*verifyDir)
+		return
+	}
 
 	if *missionFlag == "" {
 		exit(1, "-mission is required")
@@ -81,10 +89,10 @@ func main() {
 
 	files, err := findFiles(cardSrc)
 	if err != nil {
-		exit(6, "err scanning card: %v", err)
+		exit(4, "err scanning card: %v", err)
 	}
 	if len(files) == 0 {
-		exit(7, "no files found on card at %s", cardSrc)
+		exit(5, "no files found on card at %s", cardSrc)
 	}
 
 	var dstRoots []string
@@ -98,7 +106,7 @@ func main() {
 	}
 
 	if len(dstRoots) == 0 {
-		exit(8, "no destination drives mounted")
+		exit(6, "no destination drives mounted")
 	}
 
 	ops := make([]*op, 0, len(files)*len(dstRoots))
@@ -114,43 +122,86 @@ func main() {
 	fmt.Printf("\nmission:      %s\n", missionSlug)
 	fmt.Printf("destinations: %s\n", strings.Join(dstRoots, "\n              "))
 	if !*skipConf && !confirm() {
-		exit(9, "aborted by user")
+		exit(7, "aborted by user")
 	}
 
 	if err := commitMission(*year, num); err != nil {
-		exit(10, "err updating mission counter: %v", err)
+		exit(8, "err updating mission counter: %v", err)
 	}
 
+	// Phase 1: copy
+	fmt.Println("\ncopying...")
+	results := make([]*result, len(ops))
 	pool := fnpool.NewPool(runtime.NumCPU())
 	var total atomic.Int64
 	var wg sync.WaitGroup
-	var mu sync.Mutex
-	checksums := make(map[string][]string) // dstRoot → "hash  rel" lines
-
-	for _, op := range ops {
+	for i, op := range ops {
 		wg.Add(1)
+		i, op := i, op
 		pool.Dispatch(func() {
 			defer wg.Done()
-			res := <-op.do()
-			if res.err != nil {
-				fmt.Printf("ERROR: %v\n", res.err)
+			r := <-op.do()
+			results[i] = r
+			if r.err != nil {
+				fmt.Printf("ERROR copy: %v\n", r.err)
 				return
 			}
-			fmt.Printf("done: %s\n", op.dst)
-			total.Add(res.n)
-			mu.Lock()
-			checksums[res.dstRoot] = append(checksums[res.dstRoot],
-				fmt.Sprintf("%s  %s", res.hash, res.rel))
-			mu.Unlock()
+			fmt.Printf("copied: %s\n", op.dst)
+			total.Add(r.n)
 		})
 	}
 	wg.Wait()
 
+	var copyFailed int
+	for _, r := range results {
+		if r.err != nil {
+			copyFailed++
+		}
+	}
+	if copyFailed > 0 {
+		exit(9, "%d file(s) failed to copy", copyFailed)
+	}
+
+	// Phase 2: verify
+	fmt.Println("\nverifying...")
+	pool2 := fnpool.NewPool(runtime.NumCPU())
+	var mu sync.Mutex
+	checksums := make(map[string][]string)
+	var verifyFailed atomic.Int64
+	var wg2 sync.WaitGroup
+	for _, r := range results {
+		wg2.Add(1)
+		r := r
+		pool2.Dispatch(func() {
+			defer wg2.Done()
+			got, err := hashFile(r.dst)
+			if err != nil {
+				fmt.Printf("ERROR verify: %v\n", err)
+				verifyFailed.Add(1)
+				return
+			}
+			if got != r.srcHash {
+				fmt.Printf("MISMATCH: %s\n", r.dst)
+				verifyFailed.Add(1)
+				return
+			}
+			fmt.Printf("ok: %s\n", r.dst)
+			mu.Lock()
+			checksums[r.dstRoot] = append(checksums[r.dstRoot],
+				fmt.Sprintf("%s  %s", got, r.rel))
+			mu.Unlock()
+		})
+	}
+	wg2.Wait()
+
+	if verifyFailed.Load() > 0 {
+		exit(10, "%d file(s) failed verification", verifyFailed.Load())
+	}
+
 	for dstRoot, lines := range checksums {
 		sort.Strings(lines)
-		content := strings.Join(lines, "\n") + "\n"
 		cPath := filepath.Join(dstRoot, "checksums.b3")
-		if err := os.WriteFile(cPath, []byte(content), 0644); err != nil {
+		if err := os.WriteFile(cPath, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
 			fmt.Printf("ERROR writing checksums: %v\n", err)
 		} else {
 			fmt.Printf("checksums: %s\n", cPath)
@@ -158,7 +209,60 @@ func main() {
 	}
 
 	perDrive := jfmt.FmtSize64(uint64(total.Load()) / uint64(len(dstRoots)))
-	fmt.Printf("copied %s to %d drive(s) → %s\n", perDrive, len(dstRoots), missionSlug)
+	fmt.Printf("\ncopied %s to %d drive(s) → %s\n", perDrive, len(dstRoots), missionSlug)
+}
+
+func runVerify(dir string) {
+	cPath := filepath.Join(dir, "checksums.b3")
+	f, err := os.Open(cPath)
+	if err != nil {
+		exit(1, "cannot open %s: %v", cPath, err)
+	}
+	defer f.Close()
+
+	type entry struct{ hash, rel string }
+	var entries []entry
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		parts := strings.SplitN(scanner.Text(), "  ", 2)
+		if len(parts) == 2 {
+			entries = append(entries, entry{parts[0], parts[1]})
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		exit(1, "err reading checksums: %v", err)
+	}
+
+	fmt.Printf("verifying %d files in %s\n", len(entries), dir)
+
+	pool := fnpool.NewPool(runtime.NumCPU())
+	var failed atomic.Int64
+	var wg sync.WaitGroup
+	for _, e := range entries {
+		wg.Add(1)
+		e := e
+		pool.Dispatch(func() {
+			defer wg.Done()
+			got, err := hashFile(filepath.Join(dir, e.rel))
+			if err != nil {
+				fmt.Printf("ERROR: %v\n", err)
+				failed.Add(1)
+				return
+			}
+			if got != e.hash {
+				fmt.Printf("FAIL: %s\n", e.rel)
+				failed.Add(1)
+				return
+			}
+			fmt.Printf("ok: %s\n", e.rel)
+		})
+	}
+	wg.Wait()
+
+	if n := failed.Load(); n > 0 {
+		exit(1, "%d file(s) failed", n)
+	}
+	fmt.Printf("all %d files ok\n", len(entries))
 }
 
 func findFiles(root string) ([]string, error) {
@@ -188,6 +292,7 @@ func prepJob(src, dst, rel, dstRoot string) func() <-chan *result {
 		done := make(chan *result)
 		go func() {
 			r := job(src, dst)
+			r.dst = dst
 			r.rel = rel
 			r.dstRoot = dstRoot
 			done <- r
@@ -218,8 +323,9 @@ func job(src, dst string) *result {
 		return &result{err: err}
 	}
 
-	srcH := blake3.New(32, nil)
-	n, err := io.Copy(wr, io.TeeReader(rd, srcH))
+	h := blake3.New(32, nil)
+	n, err := io.Copy(wr, io.TeeReader(rd, h))
+	wr.Sync()
 	wr.Close()
 	if err != nil {
 		return &result{err: err}
@@ -229,24 +335,20 @@ func job(src, dst string) *result {
 		return &result{err: err}
 	}
 
-	// verify destination
-	dstRd, err := os.Open(dst)
+	return &result{n: n, srcHash: hex.EncodeToString(h.Sum(nil))}
+}
+
+func hashFile(path string) (string, error) {
+	f, err := os.Open(path)
 	if err != nil {
-		return &result{err: fmt.Errorf("verify open: %w", err)}
+		return "", err
 	}
-	defer dstRd.Close()
-	dstH := blake3.New(32, nil)
-	if _, err := io.Copy(dstH, dstRd); err != nil {
-		return &result{err: fmt.Errorf("verify read: %w", err)}
+	defer f.Close()
+	h := blake3.New(32, nil)
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
 	}
-
-	srcHash := hex.EncodeToString(srcH.Sum(nil))
-	dstHash := hex.EncodeToString(dstH.Sum(nil))
-	if srcHash != dstHash {
-		return &result{err: fmt.Errorf("checksum mismatch: %s", dst)}
-	}
-
-	return &result{n: n, hash: srcHash}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func peekMission(year int) (int, error) {
