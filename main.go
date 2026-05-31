@@ -1338,10 +1338,12 @@ func job(src, dst string, bar *barTracker) *result {
 	wr.Sync()
 	wr.Close()
 	if err != nil {
+		os.Remove(dst)
 		return &result{err: err}
 	}
 
 	if err := os.Chmod(dst, perm); err != nil {
+		os.Remove(dst)
 		return &result{err: err}
 	}
 
