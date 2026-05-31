@@ -43,6 +43,7 @@ type CardConfig struct {
 type DriveConfig struct {
 	Volume string `json:"volume"`
 	Root   string `json:"root"`
+	Role   string `json:"role"` // "primary" or "archive"
 }
 
 type mountedCard struct {
@@ -99,9 +100,15 @@ func main() {
 	year := flag.Int("year", time.Now().Year(), "year override")
 	toMission := flag.Int("to", 0, "append to existing mission number")
 	verifyMission := flag.Int("verify", 0, "re-verify mission number across all mounted drives")
+	doSync := flag.Bool("sync", false, "sync missions from primary drive to other mounted drives")
 	flag.Parse()
 
 	cfg := loadConfig()
+
+	if *doSync {
+		runSync(cfg, *year, *skipConf)
+		return
+	}
 
 	if *verifyMission > 0 {
 		runVerify(cfg, *verifyMission)
@@ -351,6 +358,221 @@ func volName(dstRoot string) string {
 		return parts[2]
 	}
 	return dstRoot
+}
+
+func runSync(cfg Config, year int, skipConf bool) {
+	yearStr := strconv.Itoa(year)
+
+	// find mounted drives and their mission sets
+	type driveState struct {
+		DriveConfig
+		yearDir  string
+		missions map[string]bool
+	}
+
+	scanDrive := func(d DriveConfig) (driveState, bool) {
+		vol := filepath.Join("/Volumes", d.Volume)
+		if !dirExists(vol) {
+			return driveState{}, false
+		}
+		yearDir := filepath.Join(vol, d.Root, yearStr)
+		missions := make(map[string]bool)
+		if entries, err := os.ReadDir(yearDir); err == nil {
+			for _, e := range entries {
+				if e.IsDir() {
+					missions[e.Name()] = true
+				}
+			}
+		}
+		return driveState{d, yearDir, missions}, true
+	}
+
+	var primary driveState
+	var archives []driveState
+	for _, d := range cfg.Drives {
+		switch d.Role {
+		case "primary":
+			if !dirExists(filepath.Join("/Volumes", d.Volume)) {
+				exit(1, "primary drive %s not mounted — cannot sync", d.Volume)
+			}
+			state, _ := scanDrive(d)
+			primary = state
+		case "archive":
+			state, ok := scanDrive(d)
+			if !ok {
+				fmt.Printf("warning: archive %s not mounted, skipping\n", d.Volume)
+				continue
+			}
+			archives = append(archives, state)
+		}
+	}
+	if primary.Volume == "" {
+		exit(1, "no primary drive configured (set \"role\": \"primary\" in ~/.qcp)")
+	}
+	if len(archives) == 0 {
+		exit(1, "no archive drives mounted")
+	}
+
+	// find what primary has that others don't
+	type syncJob struct {
+		slug    string
+		srcDir  string
+		dstDir  string
+		dstVol  string
+	}
+	var jobs []syncJob
+	for _, dst := range archives {
+		for slug := range primary.missions {
+			if !dst.missions[slug] {
+				jobs = append(jobs, syncJob{
+					slug:   slug,
+					srcDir: filepath.Join(primary.yearDir, slug),
+					dstDir: filepath.Join(dst.yearDir, slug),
+					dstVol: dst.Volume,
+				})
+			}
+		}
+	}
+
+	if len(jobs) == 0 {
+		fmt.Println("all drives are in sync")
+		return
+	}
+
+	// sort for deterministic output
+	sort.Slice(jobs, func(i, j int) bool {
+		return jobs[i].slug < jobs[j].slug
+	})
+
+	for _, j := range jobs {
+		fmt.Printf("sync: %s → %s/%s\n", j.slug, j.dstVol, j.slug)
+	}
+	fmt.Printf("\n%d mission(s) to sync from %s\n", len(jobs), primary.Volume)
+	if !skipConf && !confirm() {
+		exit(0, "aborted")
+	}
+
+	for _, j := range jobs {
+		fmt.Printf("\nsyncing %s → %s\n\n", j.slug, j.dstVol)
+		files, totalSize, err := missionFiles(j.srcDir)
+		if err != nil {
+			fmt.Printf("ERROR scanning %s: %v\n", j.slug, err)
+			continue
+		}
+
+		p1 := mpb.New(mpb.WithWidth(64))
+		bar := addBar(p1, j.dstVol, totalSize)
+		ops := buildSyncOps(files, j.srcDir, j.dstDir, bar)
+
+		results := make([]*result, len(ops))
+		pool := fnpool.NewPool(runtime.NumCPU())
+		var wg sync.WaitGroup
+		var total atomic.Int64
+		for i, op := range ops {
+			wg.Add(1)
+			i, op := i, op
+			pool.Dispatch(func() {
+				defer wg.Done()
+				r := <-op.do()
+				results[i] = r
+				if r.err != nil {
+					fmt.Printf("\nERROR: %v\n", r.err)
+				} else {
+					total.Add(r.n)
+				}
+			})
+		}
+		wg.Wait()
+		p1.Wait()
+
+		fmt.Printf("\nverifying...\n\n")
+		p2 := mpb.New(mpb.WithWidth(64))
+		vbar := addBar(p2, j.dstVol, totalSize)
+		var verifyFailed atomic.Int64
+		var mu sync.Mutex
+		var checksumLines []string
+		var wg2 sync.WaitGroup
+		pool2 := fnpool.NewPool(runtime.NumCPU())
+		for _, r := range results {
+			if r == nil || r.err != nil {
+				continue
+			}
+			wg2.Add(1)
+			r := r
+			pool2.Dispatch(func() {
+				defer wg2.Done()
+				got, err := hashFile(r.dst, vbar)
+				if err != nil || got != r.srcHash {
+					fmt.Printf("\nFAIL: %s\n", r.dst)
+					verifyFailed.Add(1)
+					return
+				}
+				mu.Lock()
+				checksumLines = append(checksumLines, fmt.Sprintf("%s  %s", got, r.rel))
+				mu.Unlock()
+			})
+		}
+		wg2.Wait()
+		p2.Wait()
+
+		if verifyFailed.Load() > 0 {
+			fmt.Printf("ERROR: %d file(s) failed verification for %s\n", verifyFailed.Load(), j.slug)
+			continue
+		}
+
+		// write or merge checksums.b3
+		cPath := filepath.Join(j.dstDir, "checksums.b3")
+		sort.Strings(checksumLines)
+		os.WriteFile(cPath, []byte(strings.Join(checksumLines, "\n")+"\n"), 0644)
+		fmt.Printf("%s → %s: %s\n", j.slug, j.dstVol, jfmt.FmtSize64(uint64(total.Load())))
+	}
+}
+
+func buildSyncOps(files []fileEntry, srcDir, dstDir string, bar *mpb.Bar) []*op {
+	var ops []*op
+	for _, f := range files {
+		src := filepath.Join(srcDir, f.rel)
+		dst := filepath.Join(dstDir, f.rel)
+		ops = append(ops, &op{src: src, dst: dst, do: prepJob(src, dst, f.rel, dstDir, bar)})
+	}
+	return ops
+}
+
+// missionFiles returns files for a mission dir, using checksums.b3 as the
+// manifest if present (preserves sizes for progress), otherwise walks the dir.
+func missionFiles(dir string) ([]fileEntry, int64, error) {
+	cPath := filepath.Join(dir, "checksums.b3")
+	f, err := os.Open(cPath)
+	if err == nil {
+		defer f.Close()
+		var files []fileEntry
+		var total int64
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			parts := strings.SplitN(scanner.Text(), "  ", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			rel := parts[1]
+			info, err := os.Stat(filepath.Join(dir, rel))
+			if err != nil {
+				continue
+			}
+			files = append(files, fileEntry{rel: rel, size: info.Size()})
+			total += info.Size()
+		}
+		return files, total, scanner.Err()
+	}
+	// fallback: walk
+	files, err := findFiles(dir)
+	if err != nil {
+		return nil, 0, err
+	}
+	var total int64
+	for _, f := range files {
+		total += f.size
+	}
+	return files, total, nil
 }
 
 type scannedCard struct {
