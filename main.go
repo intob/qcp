@@ -1148,19 +1148,20 @@ func runUpdate(cfg Config, missionNum int, year int, skipConf bool) {
 	newHashes := make(map[string][]string) // dstRoot → "hash  rel" lines
 	var newHashesMu sync.Mutex
 
-	for vol, rs := range func() map[string][]struct {
-		dst, rel, dstRoot, srcHash string
-	} {
-		m := make(map[string][]struct{ dst, rel, dstRoot, srcHash string })
-		for _, r := range copyResults {
-			if r.err == nil {
-				m[r.vol] = append(m[r.vol], struct{ dst, rel, dstRoot, srcHash string }{r.dst, r.rel, r.dstRoot, r.srcHash})
-			}
+	type verifyItem struct{ dst, rel, dstRoot, srcHash string }
+	resultsByVol := make(map[string][]verifyItem)
+	for _, r := range copyResults {
+		if r.err == nil {
+			resultsByVol[r.vol] = append(resultsByVol[r.vol], verifyItem{r.dst, r.rel, r.dstRoot, r.srcHash})
 		}
-		return m
-	}() {
-		info := probeDrive("/Volumes/" + vol)
-		pool2 := fnpool.NewPool(info.concurrency)
+	}
+	updateVolInfos := make(map[string]driveInfo)
+	for vol := range resultsByVol {
+		updateVolInfos[vol] = probeDrive("/Volumes/" + vol)
+	}
+
+	for vol, rs := range resultsByVol {
+		pool2 := fnpool.NewPool(updateVolInfos[vol].concurrency)
 		for _, r := range rs {
 			wg2.Add(1)
 			r := r
