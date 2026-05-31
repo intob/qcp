@@ -606,6 +606,9 @@ func runSync(cfg Config, year int, skipConf bool) {
 	}
 	wg.Wait()
 	p1.Wait()
+	if ctx.Err() != nil {
+		select {} // interrupt handler will os.Exit after user responds
+	}
 
 	var copyFailed int
 	for _, r := range results {
