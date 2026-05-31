@@ -32,7 +32,6 @@ type Config struct {
 }
 
 type CardConfig struct {
-	Name   string `json:"name"`
 	Volume string `json:"volume"`
 	Sub    string `json:"sub"`
 }
@@ -118,9 +117,7 @@ func main() {
 		exit(5, "no destination drives mounted")
 	}
 
-	useSubdir := true
-
-	ops, err := buildOps(cards, dstRoots, useSubdir)
+	ops, err := buildOps(cards, dstRoots)
 	if err != nil {
 		exit(6, "err scanning cards: %v", err)
 	}
@@ -229,19 +226,16 @@ func main() {
 	fmt.Printf("\ncopied %s to %d drive(s) → %s\n", perDrive, len(dstRoots), missionSlug)
 }
 
-func buildOps(cards []mountedCard, dstRoots []string, useSubdir bool) ([]*op, error) {
+func buildOps(cards []mountedCard, dstRoots []string) ([]*op, error) {
 	var ops []*op
 	for _, card := range cards {
 		files, err := findFiles(card.src)
 		if err != nil {
-			return nil, fmt.Errorf("card %s: %w", card.Name, err)
+			return nil, fmt.Errorf("card %s: %w", card.Volume, err)
 		}
 		for _, rel := range files {
 			src := filepath.Join(card.src, rel)
-			dstRel := rel
-			if useSubdir {
-				dstRel = filepath.Join(card.Name, rel)
-			}
+			dstRel := filepath.Join(card.Volume, rel)
 			for _, dstRoot := range dstRoots {
 				dst := filepath.Join(dstRoot, dstRel)
 				ops = append(ops, &op{src: src, dst: dst, do: prepJob(src, dst, dstRel, dstRoot)})
