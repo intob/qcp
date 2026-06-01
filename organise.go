@@ -207,6 +207,10 @@ func scanUnorganised(yearDir string, regroup bool) ([]fileWithDate, error) {
 			if path == yearDir {
 				return nil
 			}
+			name := d.Name()
+			if junkDirs[name] {
+				return filepath.SkipDir
+			}
 			rel := strings.TrimPrefix(path, yearDir+string(os.PathSeparator))
 			top := strings.SplitN(rel, string(os.PathSeparator), 2)[0]
 			if strings.HasPrefix(top, "_") || (!regroup && isNumberedMission(top)) {
@@ -216,9 +220,12 @@ func scanUnorganised(yearDir string, regroup bool) ([]fileWithDate, error) {
 		}
 		rel := strings.TrimPrefix(path, yearDir+string(os.PathSeparator))
 		for _, part := range strings.Split(rel, string(os.PathSeparator)) {
-			if strings.HasPrefix(part, ".") {
+			if strings.HasPrefix(part, ".") || junkDirs[part] {
 				return nil
 			}
+		}
+		if junkFiles[d.Name()] {
+			return nil
 		}
 		rawFiles = append(rawFiles, rawFile{path, rel, d.Name()})
 		return nil
