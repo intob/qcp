@@ -18,7 +18,10 @@ import (
 	"github.com/vbauerster/mpb/v8"
 )
 
+var version = "dev"
+
 func main() {
+	showVersion := flag.Bool("version", false, "print version and exit")
 	skipConf := flag.Bool("y", false, "skip confirmation")
 	missionFlag := flag.String("mission", "", "mission name (e.g. \"Altissimo with Anton\")")
 	year := flag.Int("year", time.Now().Year(), "year override")
@@ -37,6 +40,11 @@ func main() {
 	doOrganise := flag.Bool("organise", false, "group unorganised files into seasonal mission folders")
 	doReorganise := flag.Bool("reorganise", false, "regroup already-organised missions by season (re-runs organise over existing numbered folders)")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
 
 	yearExplicit := false
 	flag.Visit(func(f *flag.Flag) {
