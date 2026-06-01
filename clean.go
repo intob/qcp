@@ -60,7 +60,15 @@ func runClean(cfg Config, skipConf bool, yearExplicit bool, year int) {
 	}
 
 	if len(items) == 0 {
-		fmt.Println(dim("nothing to clean"))
+		pruned := 0
+		for _, root := range scanRoots {
+			pruned += pruneChecksums(root)
+		}
+		if pruned > 0 {
+			fmt.Printf("%s pruned %d junk entry/entries from checksums.b3\n", green("✓"), pruned)
+		} else {
+			fmt.Println(dim("nothing to clean"))
+		}
 		return
 	}
 
