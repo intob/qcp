@@ -20,7 +20,55 @@ import (
 
 var version = "dev"
 
+func usage() {
+	w := flag.CommandLine.Output()
+	fmt.Fprintf(w, "%s  %s\n\n", bold("qcp"), dim(version))
+
+	section := func(name string) { fmt.Fprintf(w, "\n%s\n", bold(name)) }
+	row := func(flag, arg, desc string) {
+		if arg != "" {
+			flag = flag + " " + dim("<"+arg+">")
+		}
+		fmt.Fprintf(w, "  %-30s %s\n", flag, dim(desc))
+	}
+
+	section("INGEST")
+	row("-ingest", "name", `new ingest (e.g. "Altissimo with Anton")`)
+	row("-to", "n", "append files to existing mission number")
+
+	section("ARCHIVE")
+	row("-sync", "", "sync missions from hot drives to cold drives")
+	row("-update", "n", "copy files missing from cold drives for mission")
+	row("-pull", "n", "pull mission from cold storage to hot drives")
+	row("  -sub", "dir", "subdirectory within mission to pull")
+
+	section("VERIFY")
+	row("-verify", "n", "re-verify mission across all mounted drives")
+	row("-checksum", "n", "generate checksums.b3 for a mission")
+	row("-checksum-all", "", "generate checksums.b3 for all missions in year")
+
+	section("ORGANISE")
+	row("-organise", "", "group unorganised files into seasonal mission folders")
+	row("-reorganise", "", "regroup already-organised missions by season")
+	row("-init", "", "scan drives and initialise missing sequence numbers")
+
+	section("INFO")
+	row("-list", "", "list missions across all mounted drives")
+	row("-status", "", "show drive space and mission status")
+
+	section("MAINTENANCE")
+	row("-clean", "", "find and remove junk files from all mounted drives")
+
+	section("FLAGS")
+	row("-year", "year", fmt.Sprintf("year override (default: %d)", time.Now().Year()))
+	row("-y", "", "skip confirmation prompts")
+	row("-version", "", "print version and exit")
+
+	fmt.Fprintln(w)
+}
+
 func main() {
+	flag.Usage = usage
 	showVersion := flag.Bool("version", false, "print version and exit")
 	skipConf := flag.Bool("y", false, "skip confirmation")
 	missionFlag := flag.String("ingest", "", "ingest name (e.g. \"Altissimo with Anton\")")
