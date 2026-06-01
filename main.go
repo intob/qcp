@@ -33,6 +33,7 @@ func main() {
 	doSync := flag.Bool("sync", false, "sync missions from hot drives to cold drives")
 	doList := flag.Bool("list", false, "list missions across all mounted drives")
 	doStatus := flag.Bool("status", false, "show drive space and mission status")
+	doClean := flag.Bool("clean", false, "find and remove junk files (Synology metadata, Thumbs.db, etc.) from all mounted drives")
 	doInit := flag.Bool("init", false, "scan drives and initialise missing sequence numbers")
 	doOrganise := flag.Bool("organise", false, "group unorganised files into seasonal mission folders")
 	doReorganise := flag.Bool("reorganise", false, "regroup already-organised missions by season (re-runs organise over existing numbered folders)")
@@ -63,6 +64,11 @@ func main() {
 	pullMission, hasPull := parseMission(*pullMissionStr)
 
 	cfg := loadConfig()
+
+	if *doClean {
+		runClean(cfg, *skipConf)
+		return
+	}
 
 	if *doInit {
 		runInit(cfg, *year, yearExplicit)
