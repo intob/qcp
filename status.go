@@ -120,6 +120,137 @@ func runStatus(cfg Config, year int) {
 	}
 }
 
+func runListAll(cfg Config) {
+	// collect all years across all mounted drives
+	yearSet := make(map[int]bool)
+	var driveNames []string
+	mountedDrives := make(map[string]bool)
+	for _, d := range cfg.Drives {
+		base := d.basePath()
+		driveNames = append(driveNames, d.name())
+		if !dirExists(base) {
+			continue
+		}
+		mountedDrives[d.name()] = true
+		root := filepath.Join(base, d.Root)
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			if y, err := strconv.Atoi(e.Name()); err == nil && y >= 2000 && y <= 2099 {
+				yearSet[y] = true
+			}
+		}
+	}
+
+	if len(yearSet) == 0 {
+		fmt.Println(dim("no missions found"))
+		return
+	}
+
+	var years []int
+	for y := range yearSet {
+		years = append(years, y)
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(years)))
+
+	// column width for drive names
+	maxName := 0
+	for _, name := range driveNames {
+		if len(name) > maxName {
+			maxName = len(name)
+		}
+	}
+
+	for i, year := range years {
+		yearStr := strconv.Itoa(year)
+
+		missionDrives := make(map[string]map[string]bool)
+		var allSlugs []string
+		seen := make(map[string]bool)
+
+		for _, d := range cfg.Drives {
+			base := d.basePath()
+			if !dirExists(base) {
+				continue
+			}
+			yearDir := filepath.Join(base, d.Root, yearStr)
+			entries, err := os.ReadDir(yearDir)
+			if err != nil {
+				continue
+			}
+			for _, e := range entries {
+				if !e.IsDir() || !isNumberedMission(e.Name()) {
+					continue
+				}
+				slug := e.Name()
+				if !seen[slug] {
+					allSlugs = append(allSlugs, slug)
+					seen[slug] = true
+				}
+				if missionDrives[slug] == nil {
+					missionDrives[slug] = make(map[string]bool)
+				}
+				missionDrives[slug][d.name()] = true
+			}
+		}
+
+		if len(allSlugs) == 0 {
+			continue
+		}
+		sort.Strings(allSlugs)
+
+		maxSlug := 0
+		for _, s := range allSlugs {
+			if len(s) > maxSlug {
+				maxSlug = len(s)
+			}
+		}
+
+		if i > 0 {
+			fmt.Println()
+		}
+		fmt.Printf("%s  %s\n", bold(yearStr), dim(fmt.Sprintf("%d missions", len(allSlugs))))
+
+		// header row
+		fmt.Printf("  %-*s", maxSlug, "")
+		for _, name := range driveNames {
+			fmt.Printf("  %-*s", maxName, name)
+		}
+		fmt.Println()
+
+		for _, slug := range allSlugs {
+			drives := missionDrives[slug]
+			allPresent := true
+			for _, name := range driveNames {
+				if mountedDrives[name] && !drives[name] {
+					allPresent = false
+					break
+				}
+			}
+			label := bold(slug)
+			if !allPresent {
+				label = yellow(slug)
+			}
+			fmt.Printf("  %s%-*s", label, maxSlug-len(slug), "")
+			for _, name := range driveNames {
+				if drives[name] {
+					fmt.Printf("  %-*s", maxName, dim(name))
+				} else if mountedDrives[name] {
+					fmt.Printf("  %-*s", maxName, red("--"))
+				} else {
+					fmt.Printf("  %-*s", maxName, dim("--"))
+				}
+			}
+			fmt.Println()
+		}
+	}
+}
+
 func runList(cfg Config, year int) {
 	yearStr := strconv.Itoa(year)
 

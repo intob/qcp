@@ -147,7 +147,11 @@ func main() {
 	}
 
 	if *doList {
-		runList(cfg, *year)
+		if yearExplicit {
+			runList(cfg, *year)
+		} else {
+			runListAll(cfg)
+		}
 		return
 	}
 
