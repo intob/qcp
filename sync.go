@@ -25,12 +25,14 @@ func runSyncAll(cfg Config, skipConf bool) {
 	}
 	for _, year := range years {
 		fmt.Printf("%s\n\n", bold(strconv.Itoa(year)))
-		runSync(cfg, year, skipConf)
+		if !runSync(cfg, year, skipConf) {
+			break
+		}
 		fmt.Println()
 	}
 }
 
-func runSync(cfg Config, year int, skipConf bool) {
+func runSync(cfg Config, year int, skipConf bool) bool {
 	yearStr := strconv.Itoa(year)
 
 	// find mounted drives and their mission sets
@@ -78,10 +80,12 @@ func runSync(cfg Config, year int, skipConf bool) {
 		}
 	}
 	if len(primaries) == 0 {
-		exit(1, "no hot drives mounted")
+		fmt.Println(red("no hot drives mounted"))
+		return false
 	}
 	if len(archives) == 0 {
-		exit(1, "no cold drives mounted")
+		fmt.Println(red("no cold drives mounted"))
+		return false
 	}
 
 	// build mission → source map across all primaries.
@@ -181,7 +185,7 @@ func runSync(cfg Config, year int, skipConf bool) {
 
 	if len(jobs) == 0 {
 		fmt.Println(dim("all drives are in sync"))
-		return
+		return true
 	}
 
 	for _, j := range jobs {
@@ -374,6 +378,7 @@ func runSync(cfg Config, year int, skipConf bool) {
 
 	perArchive := fmtSize(uint64(total.Load()) / uint64(len(archiveSize)))
 	fmt.Printf("\n%s %s synced to %d archive(s)\n", green("✓"), perArchive, len(archiveSize))
+	return true
 }
 
 func buildSyncOps(files []fileEntry, srcDir, dstDir string, bar *barTracker) []*op {

@@ -16,50 +16,70 @@ func runCheckAll(cfg Config) {
 	}
 	for _, year := range years {
 		fmt.Printf("%s\n\n", bold(strconv.Itoa(year)))
-		runCheck(cfg, year)
+		if !runCheck(cfg, year) {
+			break
+		}
 		fmt.Println()
 	}
 }
 
-func runCheck(cfg Config, year int) {
+func runCheck(cfg Config, year int) bool {
 	yearStr := strconv.Itoa(year)
 
-	// find hot drive (source of truth) and cold drives
-	var hotDrive *DriveConfig
+	// collect all mounted hot and cold drives
+	var hotDrives []DriveConfig
 	var coldDrives []DriveConfig
-	for i, d := range cfg.Drives {
+	for _, d := range cfg.Drives {
 		if !dirExists(d.basePath()) {
 			fmt.Printf("%s %s %s\n", yellow("warning:"), bold(d.name()), dim("not mounted, skipping"))
 			continue
 		}
 		if d.Role == "hot" {
-			hotDrive = &cfg.Drives[i]
+			hotDrives = append(hotDrives, d)
 		} else {
 			coldDrives = append(coldDrives, d)
 		}
 	}
-	if hotDrive == nil {
-		exit(1, "no hot drive mounted")
+	if len(hotDrives) == 0 {
+		fmt.Println(red("no hot drive mounted"))
+		return false
 	}
 	if len(coldDrives) == 0 {
-		exit(1, "no cold drives mounted")
+		fmt.Println(red("no cold drives mounted"))
+		return false
 	}
 
-	hotYearDir := filepath.Join(hotDrive.basePath(), hotDrive.Root, yearStr)
-	entries, err := os.ReadDir(hotYearDir)
-	if err != nil {
-		exit(1, "cannot read %s on %s: %v", yearStr, hotDrive.name(), err)
+	// union missions across all hot drives; first occurrence wins for the source path
+	type hotMission struct {
+		dir  string
+		vol  string
+	}
+	hotBySlug := make(map[string]hotMission)
+	for _, h := range hotDrives {
+		hotYearDir := filepath.Join(h.basePath(), h.Root, yearStr)
+		entries, err := os.ReadDir(hotYearDir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() && isNumberedMission(e.Name()) {
+				if _, seen := hotBySlug[e.Name()]; !seen {
+					hotBySlug[e.Name()] = hotMission{
+						dir: filepath.Join(hotYearDir, e.Name()),
+						vol: h.name(),
+					}
+				}
+			}
+		}
 	}
 
 	var slugs []string
-	for _, e := range entries {
-		if e.IsDir() && isNumberedMission(e.Name()) {
-			slugs = append(slugs, e.Name())
-		}
+	for slug := range hotBySlug {
+		slugs = append(slugs, slug)
 	}
 	if len(slugs) == 0 {
 		fmt.Printf(dim("no missions found for %d\n"), year)
-		return
+		return true
 	}
 	sort.Strings(slugs)
 
@@ -77,10 +97,10 @@ func runCheck(cfg Config, year int) {
 	var totalMissing, totalExtra int
 
 	for _, slug := range slugs {
-		hotDir := filepath.Join(hotYearDir, slug)
-		hotFiles, err := findFiles(hotDir)
+		hm := hotBySlug[slug]
+		hotFiles, err := findFiles(hm.dir)
 		if err != nil {
-			fmt.Printf("%s scanning %s on %s: %v\n", red("ERROR"), slug, hotDrive.name(), err)
+			fmt.Printf("%s scanning %s on %s: %v\n", red("ERROR"), slug, hm.vol, err)
 			continue
 		}
 		hotSet := make(map[string]bool, len(hotFiles))
@@ -138,7 +158,7 @@ func runCheck(cfg Config, year int) {
 	fmt.Printf("checked %s in %d", bold(fmt.Sprintf("%d mission(s)", checked)), year)
 	if incomplete == 0 {
 		fmt.Printf("  %s\n", green("✓ all complete"))
-		return
+		return true
 	}
 	fmt.Printf("  %s\n\n", yellow(fmt.Sprintf("%d incomplete", incomplete)))
 
@@ -164,4 +184,5 @@ func runCheck(cfg Config, year int) {
 		fmt.Println()
 		fmt.Printf(dim("  run -update <n> to copy missing files for a specific mission\n"))
 	}
+	return true
 }

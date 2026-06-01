@@ -12,8 +12,13 @@ import (
 	"github.com/vbauerster/mpb/v8"
 )
 
-func runVerify(cfg Config, query string, year int) {
+func runVerify(cfg Config, missionNum int, year int) {
 	yearStr := strconv.Itoa(year)
+
+	slug, err := findMissionSlug(cfg.Drives, yearStr, missionNum)
+	if err != nil {
+		exit(1, "mission %03d not found: %v", missionNum, err)
+	}
 
 	type dirEntry struct {
 		vol  string
@@ -26,15 +31,15 @@ func runVerify(cfg Config, query string, year int) {
 		if !dirExists(base) {
 			continue
 		}
-		slug, err := resolveMission([]DriveConfig{d}, yearStr, query)
-		if err != nil {
-			fmt.Printf("%s mission %q not found on %s\n", yellow("warning:"), query, bold(d.name()))
+		dir := filepath.Join(base, d.Root, yearStr, slug)
+		if !dirExists(dir) {
+			fmt.Printf("%s mission %03d not found on %s\n", yellow("warning:"), missionNum, bold(d.name()))
 			continue
 		}
-		dirs = append(dirs, dirEntry{d.name(), filepath.Join(base, d.Root, yearStr, slug), base})
+		dirs = append(dirs, dirEntry{d.name(), dir, base})
 	}
 	if len(dirs) == 0 {
-		exit(1, "mission %q not found on any mounted drive", query)
+		exit(1, "mission %03d not found on any mounted drive", missionNum)
 	}
 
 	type entry struct{ hash, rel string }
@@ -68,10 +73,10 @@ func runVerify(cfg Config, query string, year int) {
 		jobs = append(jobs, dirJob{de, entries, totalSize})
 	}
 	if len(jobs) == 0 {
-		exit(1, "no checksums.b3 found for mission %q", query)
+		exit(1, "no checksums.b3 found for mission %03d", missionNum)
 	}
 
-	fmt.Printf("%s mission %s on %d drive(s)\n", dim("verifying"), bold(query), len(jobs))
+	fmt.Printf("%s mission %s on %d drive(s)\n", dim("verifying"), bold(fmt.Sprintf("%03d", missionNum)), len(jobs))
 	volInfos := make(map[string]driveInfo)
 	for _, job := range jobs {
 		info := probeDrive(job.base)

@@ -13,11 +13,11 @@ import (
 	"github.com/vbauerster/mpb/v8"
 )
 
-func runUpdate(cfg Config, query string, year int, skipConf bool) {
+func runUpdate(cfg Config, missionNum int, year int, skipConf bool) {
 	yearStr := strconv.Itoa(year)
-	slug, err := resolveMission(cfg.Drives, yearStr, query)
+	slug, err := findMissionSlug(cfg.Drives, yearStr, missionNum)
 	if err != nil {
-		exit(1, "%v", err)
+		exit(1, "mission %03d not found: %v", missionNum, err)
 	}
 
 	// find primary and archive drives
@@ -36,7 +36,7 @@ func runUpdate(cfg Config, query string, year int, skipConf bool) {
 		dir := filepath.Join(base, d.Root, yearStr, slug)
 		if d.Role == "hot" {
 			if !dirExists(dir) {
-				exit(1, "mission %q not found on hot drive %s", query, d.name())
+				exit(1, "mission %03d not found on hot drive %s", missionNum, d.name())
 			}
 			primaryDir = dir
 		} else {
@@ -236,17 +236,9 @@ func runUpdate(cfg Config, query string, year int, skipConf bool) {
 	// append new entries to checksums.b3 on each archive drive
 	for dstRoot, lines := range newHashes {
 		cPath := filepath.Join(dstRoot, "checksums.b3")
-		existing, _ := os.ReadFile(cPath)
-		all := append(strings.Split(strings.TrimRight(string(existing), "\n"), "\n"), lines...)
-		// remove empty entries that may result from empty file
-		var clean []string
-		for _, l := range all {
-			if l != "" {
-				clean = append(clean, l)
-			}
-		}
-		sort.Strings(clean)
-		if err := os.WriteFile(cPath, []byte(strings.Join(clean, "\n")+"\n"), 0644); err != nil {
+		merged := mergeChecksums(cPath, lines)
+		sort.Strings(merged)
+		if err := os.WriteFile(cPath, []byte(strings.Join(merged, "\n")+"\n"), 0644); err != nil {
 			fmt.Printf("%s writing checksums: %v\n", red("ERROR"), err)
 		}
 	}

@@ -110,8 +110,15 @@ func main() {
 		}
 	})
 
-	parseMission := func(s string) (string, bool) {
-		return s, s != ""
+	parseMission := func(s string) (int, bool) {
+		if s == "" {
+			return 0, false
+		}
+		n, err := strconv.Atoi(s)
+		if err != nil || n <= 0 {
+			exit(1, "invalid mission number: %s", s)
+		}
+		return n, true
 	}
 
 	toMission, hasTo := parseMission(*toMissionStr)
@@ -125,7 +132,9 @@ func main() {
 
 	if *doCheck {
 		if yearExplicit {
-			runCheck(cfg, *year)
+			if !runCheck(cfg, *year) {
+				os.Exit(1)
+			}
 		} else {
 			runCheckAll(cfg)
 		}
@@ -178,7 +187,9 @@ func main() {
 
 	if *doSync {
 		if yearExplicit {
-			runSync(cfg, *year, *skipConf)
+			if !runSync(cfg, *year, *skipConf) {
+				os.Exit(1)
+			}
 		} else {
 			runSyncAll(cfg, *skipConf)
 		}
@@ -217,7 +228,7 @@ func main() {
 
 	if hasTo {
 		isAppend = true
-		slug, err := resolveMission(cfg.Drives, yearStr, toMission)
+		slug, err := findMissionSlug(cfg.Drives, yearStr, toMission)
 		if err != nil {
 			exit(2, "mission %03d not found: %v", toMission, err)
 		}

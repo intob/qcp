@@ -239,11 +239,11 @@ func runChecksumYear(cfg Config, year int) {
 	fmt.Printf("\n%s %d mission(s) checksummed\n", green("✓"), len(jobs))
 }
 
-func runChecksum(cfg Config, query string, year int) {
+func runChecksum(cfg Config, missionNum int, year int) {
 	yearStr := strconv.Itoa(year)
-	slug, err := resolveMission(cfg.Drives, yearStr, query)
+	slug, err := findMissionSlug(cfg.Drives, yearStr, missionNum)
 	if err != nil {
-		exit(1, "%v", err)
+		exit(1, "mission %03d not found: %v", missionNum, err)
 	}
 
 	type driveHashes struct {
@@ -290,7 +290,7 @@ func runChecksum(cfg Config, query string, year int) {
 		}
 	}
 	if len(fileSet) == 0 {
-		exit(1, "no files found for mission %q", query)
+		exit(1, "no files found for mission %03d", missionNum)
 	}
 	var files []fileEntry
 	var totalSize int64

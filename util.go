@@ -8,8 +8,6 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
-	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -108,6 +106,7 @@ func missionFiles(dir string) ([]fileEntry, int64, error) {
 			rel := parts[1]
 			info, err := os.Stat(filepath.Join(dir, rel))
 			if err != nil {
+				fmt.Printf("%s %s listed in checksums.b3 but missing on disk\n", yellow("warning:"), rel)
 				continue
 			}
 			files = append(files, fileEntry{rel: rel, size: info.Size()})
@@ -160,46 +159,6 @@ func findMissionSlug(drives []DriveConfig, yearStr string, num int) (string, err
 	return "", fmt.Errorf("no mission %s found on any mounted drive", prefix)
 }
 
-// resolveMission resolves a query to a mission slug. If the query is a
-// positive integer it matches by number; otherwise it does a
-// case-insensitive substring match on slug names across all drives.
-func resolveMission(drives []DriveConfig, yearStr, query string) (string, error) {
-	if n, err := strconv.Atoi(query); err == nil && n > 0 {
-		return findMissionSlug(drives, yearStr, n)
-	}
-	q := strings.ToLower(query)
-	seen := make(map[string]bool)
-	var matches []string
-	for _, d := range drives {
-		yearDir := filepath.Join(d.basePath(), d.Root, yearStr)
-		entries, err := os.ReadDir(yearDir)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if !e.IsDir() || seen[e.Name()] {
-				continue
-			}
-			seen[e.Name()] = true
-			if strings.Contains(strings.ToLower(e.Name()), q) {
-				matches = append(matches, e.Name())
-			}
-		}
-	}
-	switch len(matches) {
-	case 0:
-		return "", fmt.Errorf("no mission matching %q found", query)
-	case 1:
-		return matches[0], nil
-	default:
-		sort.Strings(matches)
-		lines := make([]string, len(matches))
-		for i, m := range matches {
-			lines[i] = "  " + m
-		}
-		return "", fmt.Errorf("ambiguous query %q — be more specific:\n%s", query, strings.Join(lines, "\n"))
-	}
-}
 
 func mergeChecksums(path string, newLines []string) []string {
 	existing := readChecksumFile(path)
