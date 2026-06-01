@@ -83,33 +83,29 @@ Each card gets its own subfolder named after the physical volume — footage is 
 ### Ingest
 
 ```sh
-qcp -ingest "Altissimo with Anton"
+qcp -ingest "Altissimo with Anton"           # create new mission
 qcp -ingest "Altissimo with Anton" -year 2025
 qcp -ingest "Altissimo with Anton" -y        # skip confirmation
+
+qcp -ingest 42                               # append cards to existing mission 42
+qcp -ingest 42 -year 2025
 ```
 
-Scans all mounted cards, copies to every mounted drive, verifies each file against its BLAKE3 hash, and writes `checksums.b3`. Files already present are skipped — safe to run with partially mounted drives.
-
-```sh
-qcp -to 42          # append cards to existing mission 42
-qcp -to 42 -year 2025
-```
+Scans all mounted cards, copies to every mounted drive, verifies each file against its BLAKE3 hash, and writes `checksums.b3`. Files already present are skipped — safe to run with partially mounted drives or multiple card batches.
 
 ### Archive
 
 ```sh
 qcp -sync           # copy missions from hot drives to cold drives
 qcp -sync -y
-
-qcp -update 42      # copy files missing from cold drives for mission 42
-qcp -update 42 -year 2025
+qcp -sync -year 2025
 
 qcp -pull 42                        # pull mission back to hot drives
 qcp -pull 42 -sub CFEXP_250_01      # pull only one card's subfolder
 qcp -pull 42 -year 2025
 ```
 
-`-sync` cross-checks file manifests across hot drives before copying — conflicts are reported and skipped. `-update` is for syncing new files added after the initial ingest (e.g. edit exports).
+`-sync` cross-checks file manifests across hot drives before copying — conflicts are reported and skipped. It handles partial missions too, so running it after adding files to an existing mission (e.g. edit exports) will copy only what's missing.
 
 ### Verify
 
@@ -176,14 +172,14 @@ qcp -status
 # ingest from mounted cards
 qcp -ingest "Altissimo with Anton"
 
-# sync to cold archive
+# more cards arrived — append to the same mission
+qcp -ingest 42
+
+# sync everything to cold archive
 qcp -sync
 
 # check all missions are complete on cold drives
 qcp -check
-
-# fix anything missing
-qcp -update 42
 
 # periodic integrity verification
 qcp -verify 42
