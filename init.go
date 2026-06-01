@@ -58,7 +58,8 @@ func runInit(cfg Config, year int, yearExplicit bool) {
 	for _, y := range years {
 		max := maxByYear[y]
 		current := seq[y]
-		if max > current {
+		// when a year is explicitly requested, always set (fixes inflated counters too)
+		if max != current && (yearExplicit || max > current) {
 			fmt.Printf("  %d: %03d → %03d\n", y, current, max)
 			seq[y] = max
 			changed = true
