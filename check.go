@@ -37,10 +37,11 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 		}
 	}
 
+	allDrives := append(hotDrives, coldDrives...)
 	var slug, yearStr string
 	for _, y := range searchYears {
 		ys := strconv.Itoa(y)
-		s, err := findMissionSlug(append(hotDrives, coldDrives...), ys, missionNum)
+		s, err := findMissionSlug(allDrives, ys, missionNum)
 		if err == nil {
 			slug, yearStr = s, ys
 			break
@@ -81,11 +82,12 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 		refSet[f.rel] = true
 	}
 
-	var totalMissing, totalExtra, scanErrors int
+	var totalMissing, totalExtra, scanErrors, coldChecked int
 	for _, cold := range coldDrives {
 		if cold.name() == refColdVol {
 			continue // this drive is the reference, skip
 		}
+		coldChecked++
 		coldDir := filepath.Join(cold.basePath(), cold.Root, yearStr, slug)
 		if !dirExists(coldDir) {
 			fmt.Printf("  %s %s\n", yellow(cold.name()), dim("(mission directory missing)"))
@@ -126,6 +128,11 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 		}
 	}
 
+	if refColdVol != "" && coldChecked == 0 {
+		fmt.Printf("%s %s exists on %s only — not replicated to any other cold drive\n",
+			yellow("!"), bold(slug), refVol)
+		return false
+	}
 	if totalMissing == 0 && totalExtra == 0 && scanErrors == 0 {
 		fmt.Printf("%s %s complete on all cold drives\n", green("✓"), bold(slug))
 		return true
@@ -143,19 +150,21 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 	return false
 }
 
-func runCheckAll(cfg Config) {
+func runCheckAll(cfg Config) bool {
 	years := allYears(cfg)
 	if len(years) == 0 {
 		fmt.Println(dim("no missions found"))
-		return
+		return true
 	}
+	ok := true
 	for _, year := range years {
 		fmt.Printf("%s\n\n", bold(strconv.Itoa(year)))
 		if !runCheck(cfg, year) {
-			break
+			ok = false
 		}
 		fmt.Println()
 	}
+	return ok
 }
 
 func runCheck(cfg Config, year int) bool {
@@ -263,22 +272,28 @@ func runCheck(cfg Config, year int) bool {
 		}
 
 		var gaps []gap
+		var coldChecked int
 		for _, cold := range coldDrives {
 			if cold.name() == rm.coldVol {
 				continue // this drive is the reference, skip
 			}
+			coldChecked++
 			coldDir := filepath.Join(cold.basePath(), cold.Root, yearStr, slug)
 			if !dirExists(coldDir) {
 				gaps = append(gaps, gap{
 					vol:     cold.name(),
 					missing: []string{"(mission directory missing)"},
 				})
-				totalMissing++
+				totalMissing += len(refFiles)
 				continue
 			}
 			coldFiles, err := findFiles(coldDir)
 			if err != nil {
 				fmt.Printf("%s scanning %s on %s: %v\n", red("ERROR"), slug, cold.name(), err)
+				gaps = append(gaps, gap{
+					vol:     cold.name(),
+					missing: []string{"(scan error — could not verify)"},
+				})
 				continue
 			}
 			coldSet := make(map[string]bool, len(coldFiles))
@@ -302,6 +317,13 @@ func runCheck(cfg Config, year int) bool {
 				totalMissing += len(missing)
 				totalExtra += len(extra)
 			}
+		}
+
+		if rm.coldVol != "" && coldChecked == 0 {
+			gaps = append(gaps, gap{
+				vol:     rm.vol,
+				missing: []string{"(only copy — not replicated to any other cold drive)"},
+			})
 		}
 
 		if len(gaps) > 0 {
@@ -341,5 +363,5 @@ func runCheck(cfg Config, year int) bool {
 		fmt.Println()
 		fmt.Printf(dim("  run -sync to copy missing files to cold drives\n"))
 	}
-	return true
+	return false
 }

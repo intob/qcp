@@ -140,7 +140,9 @@ func main() {
 				os.Exit(1)
 			}
 		} else {
-			runCheckAll(cfg)
+			if !runCheckAll(cfg) {
+				os.Exit(1)
+			}
 		}
 		return
 	}
