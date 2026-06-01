@@ -175,6 +175,7 @@ func main() {
 	pullSub := flag.String("sub", "", "subdirectory within mission to pull (e.g. CFEXP_250_01)")
 	doSync := flag.Bool("sync", false, "sync missions from hot drives to cold drives")
 	doList := flag.Bool("list", false, "list missions across all mounted drives")
+	doStatus := flag.Bool("status", false, "show drive space and mission status")
 	flag.Parse()
 
 	parseMission := func(s string) (int, bool) {
@@ -198,6 +199,11 @@ func main() {
 
 	if *doList {
 		runList(cfg, *year)
+		return
+	}
+
+	if *doStatus {
+		runStatus(cfg, *year)
 		return
 	}
 
@@ -1198,6 +1204,126 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 		}
 	}
 	fmt.Printf("\n%d file(s) copied and verified\n", total)
+}
+
+func driveSpaceBar(used, total uint64, width int) string {
+	if total == 0 {
+		return strings.Repeat("░", width)
+	}
+	filled := int(float64(used) / float64(total) * float64(width))
+	if filled > width {
+		filled = width
+	}
+	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+}
+
+func runStatus(cfg Config, year int) {
+	yearStr := strconv.Itoa(year)
+	const barWidth = 28
+
+	// drive name column width
+	maxName := 0
+	for _, d := range cfg.Drives {
+		if len(d.name()) > maxName {
+			maxName = len(d.name())
+		}
+	}
+
+	fmt.Println("DRIVES")
+	for _, d := range cfg.Drives {
+		base := d.basePath()
+		name := fmt.Sprintf("%-*s", maxName, d.name())
+		tags := d.Role
+		if !d.pullAllowed() {
+			tags += "  no-pull"
+		}
+		if !dirExists(base) {
+			fmt.Printf("  %s  %-*s  %s\n", name, barWidth, "not mounted", tags)
+			continue
+		}
+		var stat syscall.Statfs_t
+		if err := syscall.Statfs(base, &stat); err != nil {
+			fmt.Printf("  %s  %-*s  %s\n", name, barWidth, "?", tags)
+			continue
+		}
+		total := stat.Blocks * uint64(stat.Bsize)
+		avail := stat.Bavail * uint64(stat.Bsize)
+		used := total - avail
+		bar := driveSpaceBar(used, total, barWidth)
+		fmt.Printf("  %s  %s  %s / %s  %s\n",
+			name, bar,
+			jfmt.FmtSize64(used), jfmt.FmtSize64(total),
+			tags)
+	}
+
+	// missions section — same logic as runList
+	fmt.Printf("\nMISSIONS  %d\n", year)
+
+	var driveNames []string
+	missionDrives := make(map[string]map[string]bool)
+	var allSlugs []string
+	seen := make(map[string]bool)
+
+	for _, d := range cfg.Drives {
+		base := d.basePath()
+		if !dirExists(base) {
+			driveNames = append(driveNames, d.name())
+			continue
+		}
+		yearDir := filepath.Join(base, d.Root, yearStr)
+		entries, err := os.ReadDir(yearDir)
+		driveNames = append(driveNames, d.name())
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			slug := e.Name()
+			if !seen[slug] {
+				allSlugs = append(allSlugs, slug)
+				seen[slug] = true
+			}
+			if missionDrives[slug] == nil {
+				missionDrives[slug] = make(map[string]bool)
+			}
+			missionDrives[slug][d.name()] = true
+		}
+	}
+
+	if len(allSlugs) == 0 {
+		fmt.Printf("  no missions found\n")
+		return
+	}
+	sort.Strings(allSlugs)
+
+	maxSlug := 0
+	for _, s := range allSlugs {
+		if len(s) > maxSlug {
+			maxSlug = len(s)
+		}
+	}
+
+	// header
+	fmt.Printf("  %-*s", maxSlug, "")
+	for _, name := range driveNames {
+		fmt.Printf("  %s", name)
+	}
+	fmt.Println()
+
+	for _, slug := range allSlugs {
+		drives := missionDrives[slug]
+		fmt.Printf("  %-*s", maxSlug, slug)
+		for _, name := range driveNames {
+			if drives[name] {
+				fmt.Printf("  %-*s", len(name), name)
+			} else {
+				fmt.Printf("  %-*s", len(name), "--")
+			}
+		}
+		fmt.Println()
+	}
 }
 
 func runList(cfg Config, year int) {
