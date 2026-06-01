@@ -335,30 +335,62 @@ func printOrganisePlan(p organisePlan) {
 }
 
 func executeOrganisePlan(p organisePlan) {
+	// track dirs that have files moved in or out — their checksums.b3 becomes stale
+	affected := make(map[string]bool)
+
+	markAffected := func(rel, destDir string) {
+		// source: the top-level mission dir the file came from (if any)
+		if parts := strings.SplitN(rel, string(os.PathSeparator), 2); len(parts) > 1 {
+			affected[filepath.Join(p.yearDir, parts[0])] = true
+		}
+		// destination mission dir
+		affected[destDir] = true
+	}
+
 	for _, m := range p.missions {
+		destDir := filepath.Join(p.yearDir, m.slug)
 		for _, mf := range m.files {
 			src := filepath.Join(p.yearDir, mf.f.rel)
-			dst := filepath.Join(p.yearDir, m.slug, mf.dest)
+			dst := filepath.Join(destDir, mf.dest)
+			if src == dst {
+				continue
+			}
 			if err := os.MkdirAll(filepath.Dir(dst), 0777); err != nil {
 				fmt.Printf("ERROR mkdir: %v\n", err)
 				continue
 			}
 			if err := os.Rename(src, dst); err != nil {
 				fmt.Printf("ERROR move %s: %v\n", mf.f.rel, err)
+				continue
 			}
+			markAffected(mf.f.rel, destDir)
 		}
 	}
 	for _, f := range p.unsorted {
 		src := filepath.Join(p.yearDir, f.rel)
 		dst := filepath.Join(p.yearDir, "_unsorted", filepath.Base(f.rel))
+		if src == dst {
+			continue
+		}
 		if err := os.MkdirAll(filepath.Dir(dst), 0777); err != nil {
 			fmt.Printf("ERROR mkdir: %v\n", err)
 			continue
 		}
 		if err := os.Rename(src, dst); err != nil {
 			fmt.Printf("ERROR move %s: %v\n", f.rel, err)
+			continue
+		}
+		markAffected(f.rel, filepath.Join(p.yearDir, "_unsorted"))
+	}
+
+	// remove stale checksums.b3 from any dir that had files moved in or out
+	for dir := range affected {
+		cPath := filepath.Join(dir, "checksums.b3")
+		if err := os.Remove(cPath); err == nil {
+			fmt.Printf("removed stale checksums: %s\n", cPath)
 		}
 	}
+
 	removeEmptyDirs(p.yearDir)
 	fmt.Printf("%s: organised %d mission(s)\n", p.driveName, len(p.missions))
 }
