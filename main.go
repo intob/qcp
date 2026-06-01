@@ -166,6 +166,7 @@ func main() {
 	checksumMissionStr := flag.String("checksum", "", "generate checksums.b3 for a mission by cross-verifying all mounted drives")
 	updateMissionStr := flag.String("update", "", "copy files missing from cold drives for an existing mission")
 	doSync := flag.Bool("sync", false, "sync missions from hot drives to cold drives")
+	doList := flag.Bool("list", false, "list missions across all mounted drives")
 	flag.Parse()
 
 	parseMission := func(s string) (int, bool) {
@@ -186,6 +187,11 @@ func main() {
 
 	cfg := loadConfig()
 
+	if *doList {
+		runList(cfg, *year)
+		return
+	}
+
 	if *doSync {
 		runSync(cfg, *year, *skipConf)
 		return
@@ -197,7 +203,7 @@ func main() {
 	}
 
 	if hasVerify {
-		runVerify(cfg, verifyMission)
+		runVerify(cfg, verifyMission, *year)
 		return
 	}
 
@@ -913,8 +919,78 @@ type scannedCard struct {
 }
 
 
-func runVerify(cfg Config, missionNum int) {
-	yearStr := strconv.Itoa(time.Now().Year())
+func runList(cfg Config, year int) {
+	yearStr := strconv.Itoa(year)
+
+	type drivePresence struct {
+		name    string
+		present map[string]bool // mission slug → present
+	}
+
+	var driveNames []string
+	missionDrives := make(map[string]map[string]bool) // slug → drive name → present
+	var allSlugs []string
+	seen := make(map[string]bool)
+
+	for _, d := range cfg.Drives {
+		base := d.basePath()
+		if !dirExists(base) {
+			continue
+		}
+		yearDir := filepath.Join(base, d.Root, yearStr)
+		entries, err := os.ReadDir(yearDir)
+		if err != nil {
+			continue
+		}
+		driveNames = append(driveNames, d.name())
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			slug := e.Name()
+			if !seen[slug] {
+				allSlugs = append(allSlugs, slug)
+				seen[slug] = true
+			}
+			if missionDrives[slug] == nil {
+				missionDrives[slug] = make(map[string]bool)
+			}
+			missionDrives[slug][d.name()] = true
+		}
+	}
+
+	if len(allSlugs) == 0 {
+		fmt.Printf("no missions found for %d\n", year)
+		return
+	}
+	sort.Strings(allSlugs)
+
+	// column widths
+	maxSlug := 0
+	for _, s := range allSlugs {
+		if len(s) > maxSlug {
+			maxSlug = len(s)
+		}
+	}
+
+	fmt.Printf("%-*s  %s\n", maxSlug, "mission", strings.Join(driveNames, "  "))
+	fmt.Printf("%s\n", strings.Repeat("─", maxSlug+2+len(strings.Join(driveNames, "  "))))
+	for _, slug := range allSlugs {
+		drives := missionDrives[slug]
+		var cols []string
+		for _, name := range driveNames {
+			if drives[name] {
+				cols = append(cols, name)
+			} else {
+				cols = append(cols, strings.Repeat(" ", len(name)))
+			}
+		}
+		fmt.Printf("%-*s  %s\n", maxSlug, slug, strings.Join(cols, "  "))
+	}
+}
+
+func runVerify(cfg Config, missionNum int, year int) {
+	yearStr := strconv.Itoa(year)
 
 	type dirEntry struct {
 		vol  string
