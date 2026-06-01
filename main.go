@@ -24,12 +24,17 @@ func usage() {
 	w := flag.CommandLine.Output()
 	fmt.Fprintf(w, "%s  %s\n\n", bold("qcp"), dim(version))
 
+	const colWidth = 24
 	section := func(name string) { fmt.Fprintf(w, "\n%s\n", bold(name)) }
-	row := func(flag, arg, desc string) {
+	row := func(f, arg, desc string) {
+		plain := f
+		display := f
 		if arg != "" {
-			flag = flag + " " + dim("<"+arg+">")
+			plain = f + " <" + arg + ">"
+			display = f + " " + dim("<"+arg+">")
 		}
-		fmt.Fprintf(w, "  %-30s %s\n", flag, dim(desc))
+		pad := strings.Repeat(" ", max(1, colWidth-len(plain)))
+		fmt.Fprintf(w, "  %s%s%s\n", display, pad, dim(desc))
 	}
 
 	section("INGEST")
