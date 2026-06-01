@@ -34,7 +34,8 @@ func main() {
 	doList := flag.Bool("list", false, "list missions across all mounted drives")
 	doStatus := flag.Bool("status", false, "show drive space and mission status")
 	doInit := flag.Bool("init", false, "scan drives and initialise missing sequence numbers")
-	doOrganise := flag.Bool("organise", false, "group unorganised files on cold drives into dated mission folders")
+	doOrganise := flag.Bool("organise", false, "group unorganised files into seasonal mission folders")
+	doReorganise := flag.Bool("reorganise", false, "regroup already-organised missions by season (re-runs organise over existing numbered folders)")
 	flag.Parse()
 
 	yearExplicit := false
@@ -69,7 +70,12 @@ func main() {
 	}
 
 	if *doOrganise {
-		runOrganise(cfg, *year, *skipConf)
+		runOrganise(cfg, *year, *skipConf, false)
+		return
+	}
+
+	if *doReorganise {
+		runOrganise(cfg, *year, *skipConf, true)
 		return
 	}
 

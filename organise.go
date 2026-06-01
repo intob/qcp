@@ -41,9 +41,14 @@ type fileWithDate struct {
 	src  string // "ffprobe", "filename", "mtime", or "" if none
 }
 
+type missionFile struct {
+	f    fileWithDate
+	dest string // flat filename within mission dir (collision-prefixed if needed)
+}
+
 type organiseMission struct {
 	slug  string
-	files []fileWithDate
+	files []missionFile
 	size  int64
 }
 
@@ -54,7 +59,22 @@ type organisePlan struct {
 	unsorted  []fileWithDate
 }
 
-func runOrganise(cfg Config, year int, skipConf bool) {
+// seasonKey returns the season name for a timestamp, e.g. "Summer".
+// The year is omitted because it is already encoded in the year directory.
+func seasonKey(t time.Time) string {
+	switch {
+	case t.Month() >= 3 && t.Month() <= 5:
+		return "Spring"
+	case t.Month() >= 6 && t.Month() <= 8:
+		return "Summer"
+	case t.Month() >= 9 && t.Month() <= 11:
+		return "Autumn"
+	default:
+		return "Winter"
+	}
+}
+
+func runOrganise(cfg Config, year int, skipConf bool, regroup bool) {
 	yearStr := strconv.Itoa(year)
 
 	seq, err := readSeq()
@@ -83,16 +103,16 @@ func runOrganise(cfg Config, year int, skipConf bool) {
 		exit(1, "no drives with a %s directory mounted", yearStr)
 	}
 
-	// phase 2: scan all drives for unorganised files, collect unique shoot days
+	// phase 2: scan all drives for unorganised files, collect unique seasons
 	type driveFiles struct {
 		driveYear
 		files []fileWithDate
 	}
-	allDates := make(map[string]bool)
+	allSeasons := make(map[string]bool)
 	var allDriveFiles []driveFiles
 	for _, dy := range drives {
 		fmt.Printf("scanning %s...\n", dy.d.name())
-		files, err := scanUnorganised(dy.yearDir)
+		files, err := scanUnorganised(dy.yearDir, regroup)
 		if err != nil {
 			fmt.Printf("ERROR scanning %s: %v\n", dy.d.name(), err)
 			continue
@@ -100,27 +120,25 @@ func runOrganise(cfg Config, year int, skipConf bool) {
 		allDriveFiles = append(allDriveFiles, driveFiles{dy, files})
 		for _, f := range files {
 			if f.src != "" {
-				allDates[f.date.Local().Format("2006-01-02")] = true
+				allSeasons[seasonKey(f.date.Local())] = true
 			}
 		}
 	}
 
-	if len(allDates) == 0 && func() bool {
-		for _, df := range allDriveFiles {
-			for _, f := range df.files {
-				if f.src == "" {
-					return false
-				}
-			}
-		}
-		return true
-	}() {
+	if len(allSeasons) == 0 {
 		fmt.Println("nothing to organise")
 		return
 	}
 
-	// phase 3: assign a globally consistent slug to every shoot day
-	nextNum := seq[year] + 1
+	// phase 3: assign a globally consistent slug to every season.
+	// Start from the global max across all years so mission numbers never repeat.
+	nextNum := 0
+	for _, v := range seq {
+		if v > nextNum {
+			nextNum = v
+		}
+	}
+	nextNum++
 	for _, df := range allDriveFiles {
 		probe := make(map[int]int)
 		scanYearDir(df.yearDir, year, probe)
@@ -128,20 +146,20 @@ func runOrganise(cfg Config, year int, skipConf bool) {
 			nextNum = probe[year] + 1
 		}
 	}
-	var days []string
-	for day := range allDates {
-		days = append(days, day)
+	var seasons []string
+	for s := range allSeasons {
+		seasons = append(seasons, s)
 	}
-	sort.Strings(days)
-	dateSlug := make(map[string]string, len(days))
-	for i, day := range days {
-		dateSlug[day] = fmt.Sprintf("%03d_%s", nextNum+i, day)
+	sort.Strings(seasons)
+	seasonSlug := make(map[string]string, len(seasons))
+	for i, s := range seasons {
+		seasonSlug[s] = fmt.Sprintf("%03d_%s", nextNum+i, s)
 	}
 
 	// phase 4: build and display the plan for every drive
 	var plans []organisePlan
 	for _, df := range allDriveFiles {
-		p := buildOrganisePlan(df.yearDir, df.d.name(), df.files, dateSlug)
+		p := buildOrganisePlan(df.yearDir, df.d.name(), df.files, seasonSlug)
 		if len(p.missions) == 0 && len(p.unsorted) == 0 {
 			fmt.Printf("%s: nothing to organise\n", df.d.name())
 			continue
@@ -170,17 +188,15 @@ func runOrganise(cfg Config, year int, skipConf bool) {
 		executeOrganisePlan(p)
 	}
 
-	if len(days) > 0 {
-		seq[year] = nextNum + len(days) - 1
-		if err := writeSeq(seq); err != nil {
-			fmt.Printf("ERROR writing seq: %v\n", err)
-		}
+	seq[year] = nextNum + len(seasons) - 1
+	if err := writeSeq(seq); err != nil {
+		fmt.Printf("ERROR writing seq: %v\n", err)
 	}
 }
 
 // scanUnorganised walks yearDir and extracts dates from all files that are not
 // already inside a numbered or underscore-prefixed folder.
-func scanUnorganised(yearDir string) ([]fileWithDate, error) {
+func scanUnorganised(yearDir string, regroup bool) ([]fileWithDate, error) {
 	type rawFile struct{ path, rel, name string }
 	var rawFiles []rawFile
 	err := filepath.WalkDir(yearDir, func(path string, d fs.DirEntry, err error) error {
@@ -193,7 +209,7 @@ func scanUnorganised(yearDir string) ([]fileWithDate, error) {
 			}
 			rel := strings.TrimPrefix(path, yearDir+string(os.PathSeparator))
 			top := strings.SplitN(rel, string(os.PathSeparator), 2)[0]
-			if isNumberedMission(top) || strings.HasPrefix(top, "_") {
+			if strings.HasPrefix(top, "_") || (!regroup && isNumberedMission(top)) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -243,7 +259,7 @@ func scanUnorganised(yearDir string) ([]fileWithDate, error) {
 	return files, nil
 }
 
-func buildOrganisePlan(yearDir, driveName string, files []fileWithDate, dateSlug map[string]string) organisePlan {
+func buildOrganisePlan(yearDir, driveName string, files []fileWithDate, seasonSlug map[string]string) organisePlan {
 	missionMap := make(map[string]*organiseMission)
 	var missionOrder []string
 	var unsorted []fileWithDate
@@ -253,23 +269,38 @@ func buildOrganisePlan(yearDir, driveName string, files []fileWithDate, dateSlug
 			unsorted = append(unsorted, f)
 			continue
 		}
-		day := f.date.Local().Format("2006-01-02")
-		slug := dateSlug[day]
+		slug := seasonSlug[seasonKey(f.date.Local())]
 		if missionMap[slug] == nil {
 			missionMap[slug] = &organiseMission{slug: slug}
 			missionOrder = append(missionOrder, slug)
 		}
 		m := missionMap[slug]
-		m.files = append(m.files, f)
+		m.files = append(m.files, missionFile{f: f})
 		if info, err := os.Stat(filepath.Join(yearDir, f.rel)); err == nil {
 			m.size += info.Size()
 		}
 	}
 	sort.Strings(missionOrder)
 
+	// compute flat dest names per mission with collision detection
 	var missions []organiseMission
 	for _, slug := range missionOrder {
-		missions = append(missions, *missionMap[slug])
+		m := missionMap[slug]
+		count := make(map[string]int, len(m.files))
+		for _, mf := range m.files {
+			count[filepath.Base(mf.f.rel)]++
+		}
+		for i, mf := range m.files {
+			base := filepath.Base(mf.f.rel)
+			if count[base] > 1 {
+				// prefix with the top-level source subfolder if one exists
+				if parts := strings.SplitN(mf.f.rel, string(os.PathSeparator), 2); len(parts) > 1 {
+					base = parts[0] + "_" + base
+				}
+			}
+			m.files[i].dest = base
+		}
+		missions = append(missions, *m)
 	}
 	return organisePlan{driveName: driveName, yearDir: yearDir, missions: missions, unsorted: unsorted}
 }
@@ -281,8 +312,8 @@ func printOrganisePlan(p organisePlan) {
 		if len(shown) > 4 {
 			shown = shown[:4]
 		}
-		for _, f := range shown {
-			fmt.Printf("    [%-8s] %s\n", f.src, f.rel)
+		for _, mf := range shown {
+			fmt.Printf("    [%-8s] %s\n", mf.f.src, mf.dest)
 		}
 		if len(m.files) > 4 {
 			fmt.Printf("    ... and %d more\n", len(m.files)-4)
@@ -291,28 +322,28 @@ func printOrganisePlan(p organisePlan) {
 	if len(p.unsorted) > 0 {
 		fmt.Printf("  _unsorted  (%d files — no date resolved)\n", len(p.unsorted))
 		for _, f := range p.unsorted {
-			fmt.Printf("    %s\n", f.rel)
+			fmt.Printf("    %s\n", filepath.Base(f.rel))
 		}
 	}
 }
 
 func executeOrganisePlan(p organisePlan) {
 	for _, m := range p.missions {
-		for _, f := range m.files {
-			src := filepath.Join(p.yearDir, f.rel)
-			dst := filepath.Join(p.yearDir, m.slug, f.rel)
+		for _, mf := range m.files {
+			src := filepath.Join(p.yearDir, mf.f.rel)
+			dst := filepath.Join(p.yearDir, m.slug, mf.dest)
 			if err := os.MkdirAll(filepath.Dir(dst), 0777); err != nil {
 				fmt.Printf("ERROR mkdir: %v\n", err)
 				continue
 			}
 			if err := os.Rename(src, dst); err != nil {
-				fmt.Printf("ERROR move %s: %v\n", f.rel, err)
+				fmt.Printf("ERROR move %s: %v\n", mf.f.rel, err)
 			}
 		}
 	}
 	for _, f := range p.unsorted {
 		src := filepath.Join(p.yearDir, f.rel)
-		dst := filepath.Join(p.yearDir, "_unsorted", f.rel)
+		dst := filepath.Join(p.yearDir, "_unsorted", filepath.Base(f.rel))
 		if err := os.MkdirAll(filepath.Dir(dst), 0777); err != nil {
 			fmt.Printf("ERROR mkdir: %v\n", err)
 			continue
@@ -378,7 +409,6 @@ func filenameDate(base string) (time.Time, bool) {
 		if m == nil {
 			continue
 		}
-		// submatches are always the last 3 groups
 		sub := m[len(m)-3:]
 		year, _ := strconv.Atoi(sub[0])
 		month, _ := strconv.Atoi(sub[1])
