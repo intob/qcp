@@ -60,7 +60,8 @@ func usage() {
 	section("INFO")
 	row("-list", "", "list missions across all mounted drives")
 	row("-status", "", "show drive space and mission status")
-	row("-check", "", "check all missions in the year for missing files across drives")
+	row("-check", "n", "check mission n for missing files across drives")
+	row("-check-all", "", "check all missions for missing files across drives")
 
 	section("MAINTENANCE")
 	row("-clean", "", "find and remove junk files from all mounted drives")
@@ -87,7 +88,8 @@ func main() {
 	doSync := flag.Bool("sync", false, "sync missions from hot drives to cold drives")
 	doList := flag.Bool("list", false, "list missions across all mounted drives")
 	doStatus := flag.Bool("status", false, "show drive space and mission status")
-	doCheck := flag.Bool("check", false, "check all missions in the year for missing files across drives")
+	checkMissionStr := flag.String("check", "", "check a specific mission for missing files across drives")
+	doCheckAll := flag.Bool("check-all", false, "check all missions for missing files across drives")
 	doClean := flag.Bool("clean", false, "find and remove junk files (Synology metadata, Thumbs.db, etc.) from all mounted drives")
 	doInit := flag.Bool("init", false, "scan drives and initialise missing sequence numbers")
 	doOrganise := flag.Bool("organise", false, "group unorganised files into seasonal mission folders")
@@ -125,7 +127,12 @@ func main() {
 	cfg := loadConfig()
 	keepAwake()
 
-	if *doCheck {
+	checkMission, hasCheck := parseMission(*checkMissionStr)
+	if hasCheck {
+		runCheckMission(cfg, checkMission, *year)
+		return
+	}
+	if *doCheckAll {
 		if yearExplicit {
 			if !runCheck(cfg, *year) {
 				os.Exit(1)
