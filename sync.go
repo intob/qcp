@@ -108,7 +108,7 @@ func runSync(cfg Config, year int, skipConf bool) {
 		}
 	}
 
-	// find what primaries have that each archive doesn't
+	// find what primaries have that each archive is missing (wholly or partially)
 	type syncJob struct {
 		slug    string
 		srcDir  string
@@ -122,22 +122,47 @@ func runSync(cfg Config, year int, skipConf bool) {
 	for _, dst := range archives {
 		var slugs []string
 		for slug := range missionSources {
-			if !dst.missions[slug] {
-				slugs = append(slugs, slug)
-			}
+			slugs = append(slugs, slug)
 		}
 		sort.Strings(slugs)
 		for _, slug := range slugs {
 			ms := missionSources[slug]
-			jobs = append(jobs, syncJob{
-				slug:    slug,
-				srcDir:  ms.srcDir,
-				dstDir:  filepath.Join(dst.yearDir, slug),
-				dstVol:  dst.name(),
-				dstBase: dst.basePath(),
-				files:   ms.files,
-				size:    ms.size,
-			})
+			dstDir := filepath.Join(dst.yearDir, slug)
+			var missing []fileEntry
+			var missingSize int64
+			if !dst.missions[slug] {
+				// mission entirely absent — copy everything
+				missing = ms.files
+				missingSize = ms.size
+			} else {
+				// mission exists — find files absent from dst
+				dstFiles, err := findFiles(dstDir)
+				if err != nil {
+					fmt.Printf("%s scanning %s on %s: %v\n", red("ERROR"), slug, bold(dst.name()), err)
+					continue
+				}
+				dstSet := make(map[string]bool, len(dstFiles))
+				for _, f := range dstFiles {
+					dstSet[f.rel] = true
+				}
+				for _, f := range ms.files {
+					if !dstSet[f.rel] {
+						missing = append(missing, f)
+						missingSize += f.size
+					}
+				}
+			}
+			if len(missing) > 0 {
+				jobs = append(jobs, syncJob{
+					slug:    slug,
+					srcDir:  ms.srcDir,
+					dstDir:  dstDir,
+					dstVol:  dst.name(),
+					dstBase: dst.basePath(),
+					files:   missing,
+					size:    missingSize,
+				})
+			}
 		}
 	}
 
@@ -328,9 +353,10 @@ func runSync(cfg Config, year int, skipConf bool) {
 	}
 
 	for dstRoot, lines := range checksums {
+		cPath := filepath.Join(dstRoot, "checksums.b3")
+		lines = mergeChecksums(cPath, lines)
 		sort.Strings(lines)
-		os.WriteFile(filepath.Join(dstRoot, "checksums.b3"),
-			[]byte(strings.Join(lines, "\n")+"\n"), 0644)
+		os.WriteFile(cPath, []byte(strings.Join(lines, "\n")+"\n"), 0644)
 	}
 
 	perArchive := fmtSize(uint64(total.Load()) / uint64(len(archiveSize)))
