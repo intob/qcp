@@ -30,7 +30,8 @@ Builds with the current git version stamped in and installs to `$(go env GOPATH)
     { "volume": "T9",         "root": "",          "role": "hot" },
     { "volume": "T7",         "root": "",          "role": "hot" },
     { "volume": "MAC",        "path": "~/Footage", "root": "", "role": "hot", "pull": false },
-    { "volume": "ARCHIVE_01", "root": "Footage",   "role": "cold" }
+    { "volume": "ARCHIVE_01", "root": "Footage",   "role": "cold", "year_from": 2024 },
+    { "volume": "ARCHIVE_OLD","root": "Footage",   "role": "cold", "year_to":   2023 }
   ]
 }
 ```
@@ -44,6 +45,7 @@ Builds with the current git version stamped in and installs to `$(go env GOPATH)
 - `root` — subdirectory under which year/mission dirs are created. Empty = drive root.
 - `role` — `hot` (working SSD/NVMe) or `cold` (archive HDD).
 - `pull` — set `false` to exclude a drive from `-pull` (useful for internal drives with limited space).
+- `year_from` / `year_to` — year range this cold drive is responsible for (both optional, 0 = unbounded). `-sync`, `-replicate`, and `-check` only involve a cold drive for years within its range. Hot drives are always unbounded.
 
 Check mounted card names with `ls /Volumes/`.
 
@@ -100,12 +102,18 @@ qcp -sync           # copy missions from hot drives to cold drives
 qcp -sync -y
 qcp -sync -year 2025
 
+qcp -replicate      # copy missions between cold drives
+qcp -replicate -y
+qcp -replicate -year 2025
+
 qcp -pull 42                        # pull mission back to hot drives
 qcp -pull 42 -sub CFEXP_250_01      # pull only one card's subfolder
 qcp -pull 42 -year 2025
 ```
 
-`-sync` cross-checks file manifests across hot drives before copying — conflicts are reported and skipped. It handles partial missions too, so running it after adding files to an existing mission (e.g. edit exports) will copy only what's missing.
+`-sync` copies from hot drives to cold drives — only cold drives scoped for the given year receive data. Cross-checks file manifests across hot drives before copying; conflicts are reported and skipped. Partial missions are handled too, so running it after adding files to an existing mission (e.g. edit exports) will copy only what's missing.
+
+`-replicate` copies missions between cold drives. Any mounted cold drive with the data is a valid source; only cold drives scoped for the year are destinations. Follows the same copy-then-verify pipeline as `-sync`. Use this to populate a second cold drive from an existing one, or to catch up a cold drive that wasn't present during the original `-sync`.
 
 ### Verify
 
@@ -128,11 +136,13 @@ qcp -list -year 2026    # single year, per-mission drive presence
 qcp -status             # drive space + mission matrix for current year
 qcp -status -year 2025
 
-qcp -check              # scan all missions for missing files across drives
-qcp -check -year 2025
+qcp -check 42           # check a specific mission across cold drives
+qcp -check 42 -year 2025
+qcp -check-all          # check every mission across all years
+qcp -check-all -year 2025
 ```
 
-`-list` shows every mission grouped by year with drive presence columns — missions missing from a mounted drive are highlighted. `-check` compares each mission on the hot drive against every cold drive and reports missing or unexpected files.
+`-list` shows every mission grouped by year with drive presence columns — missions missing from a mounted drive are highlighted. `-check` / `-check-all` compare each mission against every cold drive scoped for that year and report missing or unexpected files. Only cold drives whose year range covers the mission's year are included. Both commands exit 1 if any mission is incomplete.
 
 ### Organise
 
@@ -178,8 +188,11 @@ qcp -ingest 42
 # sync everything to cold archive
 qcp -sync
 
+# replicate to a second cold drive
+qcp -replicate
+
 # check all missions are complete on cold drives
-qcp -check
+qcp -check-all
 
 # periodic integrity verification
 qcp -verify 42
