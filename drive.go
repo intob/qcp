@@ -1,26 +1,27 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 )
 
 type driveInfo struct {
 	concurrency int
 	kind        string // "SSD" or "HDD"
-	protocol    string // e.g. "USB", "Thunderbolt", "NVMe", "SATA"
+	protocol    string // e.g. "USB", "NVMe", "SATA"
 }
 
 func (d driveInfo) String() string {
 	return fmt.Sprintf("%s · %s · %d worker(s)", d.kind, d.protocol, d.concurrency)
 }
 
-// probeDrive queries diskutil for drive type and protocol, then picks
-// an appropriate concurrency (SSDs benefit from queue depth; HDDs need sequential I/O).
 func probeDrive(volPath string) driveInfo {
 	out, err := exec.Command("diskutil", "info", volPath).Output()
 	if err != nil {
@@ -29,21 +30,131 @@ func probeDrive(volPath string) driveInfo {
 	s := string(out)
 
 	kind := "HDD"
-	concurrency := 1
 	if strings.Contains(s, "Solid State:               Yes") {
 		kind = "SSD"
-		concurrency = 4
 	}
 
 	protocol := "unknown"
+	bsdName := ""
 	for _, line := range strings.Split(s, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "Protocol:") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Protocol:") {
 			protocol = strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
-			break
+		}
+		if strings.HasPrefix(line, "Device Identifier:") {
+			bsdName = strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
 		}
 	}
 
-	return driveInfo{concurrency: concurrency, kind: kind, protocol: protocol}
+	return driveInfo{
+		concurrency: pickConcurrency(kind, protocol, bsdName),
+		kind:        kind,
+		protocol:    protocol,
+	}
+}
+
+func pickConcurrency(kind, protocol, bsdName string) int {
+	if kind == "HDD" {
+		return 1
+	}
+	switch protocol {
+	case "NVMe":
+		return 8
+	case "USB":
+		switch usbDeviceSpeed(bsdName) {
+		case "super_speed_plus":
+			return 8 // 10 Gbps+
+		case "super_speed":
+			return 4 // 5 Gbps
+		default:
+			return 4
+		}
+	default:
+		return 4
+	}
+}
+
+// usbProfile caches the system_profiler output — it's slow and shared across drives.
+var (
+	usbProfileOnce sync.Once
+	usbProfileRoot map[string]interface{}
+)
+
+var partitionSuffix = regexp.MustCompile(`s\d+$`)
+
+func usbDeviceSpeed(bsdName string) string {
+	if bsdName == "" {
+		return ""
+	}
+	// resolve the stable media name from the base disk (BSD numbers can be stale in system_profiler)
+	baseDisk := partitionSuffix.ReplaceAllString(bsdName, "")
+	mediaName := diskMediaName(baseDisk)
+	if mediaName == "" {
+		return ""
+	}
+
+	usbProfileOnce.Do(func() {
+		out, err := exec.Command("system_profiler", "SPUSBDataType", "-json").Output()
+		if err != nil {
+			return
+		}
+		var root map[string]interface{}
+		if err := json.Unmarshal(out, &root); err != nil {
+			return
+		}
+		usbProfileRoot = root
+	})
+
+	if usbProfileRoot == nil {
+		return ""
+	}
+
+	buses, _ := usbProfileRoot["SPUSBDataType"].([]interface{})
+	for _, bus := range buses {
+		if b, ok := bus.(map[string]interface{}); ok {
+			if speed := usbSpeedFromTree(b, mediaName); speed != "" {
+				return speed
+			}
+		}
+	}
+	return ""
+}
+
+// diskMediaName returns the "Device / Media Name" for a base disk identifier
+// (e.g. "disk5" → "PSSD T9"). This is stable across remounts unlike BSD numbers.
+func diskMediaName(baseDisk string) string {
+	out, err := exec.Command("diskutil", "info", baseDisk).Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Device / Media Name:") {
+			return strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
+		}
+	}
+	return ""
+}
+
+// usbSpeedFromTree walks the USB device tree looking for the device entry
+// with a matching _name and a device_speed field.
+func usbSpeedFromTree(node map[string]interface{}, mediaName string) string {
+	items, _ := node["_items"].([]interface{})
+	for _, item := range items {
+		dev, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if speed, ok := dev["device_speed"].(string); ok {
+			if name, _ := dev["_name"].(string); name == mediaName {
+				return speed
+			}
+		}
+		if speed := usbSpeedFromTree(dev, mediaName); speed != "" {
+			return speed
+		}
+	}
+	return ""
 }
 
 func mountedCards(cfgs []CardConfig) []mountedCard {
