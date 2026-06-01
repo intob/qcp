@@ -38,12 +38,11 @@ func usage() {
 	}
 
 	section("INGEST")
-	row("-ingest", "name", `new ingest (e.g. "Altissimo with Anton")`)
-	row("-to", "n", "append files to existing mission number")
+	row("-ingest", "name", `create new mission (e.g. "Altissimo with Anton")`)
+	row("-ingest", "n", "append cards to existing mission number")
 
 	section("ARCHIVE")
 	row("-sync", "", "sync missions from hot drives to cold drives")
-	row("-update", "n", "copy files missing from cold drives for mission")
 	row("-pull", "n", "pull mission from cold storage to hot drives")
 	row("  -sub", "dir", "subdirectory within mission to pull")
 
@@ -78,13 +77,11 @@ func main() {
 	flag.Usage = usage
 	showVersion := flag.Bool("version", false, "print version and exit")
 	skipConf := flag.Bool("y", false, "skip confirmation")
-	missionFlag := flag.String("ingest", "", "ingest name (e.g. \"Altissimo with Anton\")")
+	missionFlag := flag.String("ingest", "", "mission name or number")
 	year := flag.Int("year", time.Now().Year(), "year override")
-	toMissionStr := flag.String("to", "", "append to existing mission number")
 	verifyMissionStr := flag.String("verify", "", "re-verify mission number across all mounted drives")
 	checksumMissionStr := flag.String("checksum", "", "generate checksums.b3 for a mission by cross-verifying all mounted drives")
 	doChecksumAll := flag.Bool("checksum-all", false, "generate checksums.b3 for every mission in the year across all mounted drives")
-	updateMissionStr := flag.String("update", "", "copy files missing from cold drives for an existing mission")
 	pullMissionStr := flag.String("pull", "", "pull a mission from cold storage to hot drives")
 	pullSub := flag.String("sub", "", "subdirectory within mission to pull (e.g. CFEXP_250_01)")
 	doSync := flag.Bool("sync", false, "sync missions from hot drives to cold drives")
@@ -121,10 +118,8 @@ func main() {
 		return n, true
 	}
 
-	toMission, hasTo := parseMission(*toMissionStr)
 	verifyMission, hasVerify := parseMission(*verifyMissionStr)
 	checksumMission, hasChecksum := parseMission(*checksumMissionStr)
-	updateMission, hasUpdate := parseMission(*updateMissionStr)
 	pullMission, hasPull := parseMission(*pullMissionStr)
 
 	cfg := loadConfig()
@@ -196,11 +191,6 @@ func main() {
 		return
 	}
 
-	if hasUpdate {
-		runUpdate(cfg, updateMission, *year, *skipConf)
-		return
-	}
-
 	if hasVerify {
 		runVerify(cfg, verifyMission, *year)
 		return
@@ -221,22 +211,23 @@ func main() {
 		exit(1, "no configured cards mounted")
 	}
 
+	if *missionFlag == "" {
+		exit(3, "-ingest is required")
+	}
+
 	yearStr := strconv.Itoa(*year)
 	var missionSlug string
 	var isAppend bool
 	var missionNum int
 
-	if hasTo {
+	if n, err := strconv.Atoi(*missionFlag); err == nil && n > 0 {
 		isAppend = true
-		slug, err := findMissionSlug(cfg.Drives, yearStr, toMission)
+		slug, err := findMissionSlug(cfg.Drives, yearStr, n)
 		if err != nil {
-			exit(2, "mission %03d not found: %v", toMission, err)
+			exit(2, "mission %03d not found: %v", n, err)
 		}
 		missionSlug = slug
 	} else {
-		if *missionFlag == "" {
-			exit(3, "-ingest is required")
-		}
 		num, err := peekMission(*year)
 		if err != nil {
 			exit(4, "err reading mission counter: %v", err)
