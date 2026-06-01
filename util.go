@@ -233,7 +233,7 @@ func fmtSize(size uint64) string {
 // keepAwake runs caffeinate -m in the background to prevent drive sleep.
 // It is killed automatically when the process exits.
 func keepAwake() {
-	cmd := exec.Command("caffeinate", "-m")
+	cmd := exec.Command("caffeinate", "-mi")
 	_ = cmd.Start()
 }
 
