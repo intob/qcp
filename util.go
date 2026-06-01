@@ -74,7 +74,7 @@ func findFiles(root string) ([]fileEntry, error) {
 				return nil
 			}
 		}
-		if junkFiles[name] {
+		if junkFiles[name] || strings.HasPrefix(name, "._") {
 			return nil
 		}
 		info, err := d.Info()

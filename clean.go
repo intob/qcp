@@ -5,12 +5,13 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/inneslabs/jfmt"
 )
 
-func runClean(cfg Config, skipConf bool) {
+func runClean(cfg Config, skipConf bool, yearExplicit bool, year int) {
 	type junkItem struct {
 		path  string
 		isDir bool
@@ -25,17 +26,23 @@ func runClean(cfg Config, skipConf bool) {
 			continue
 		}
 		root := filepath.Join(base, d.Root)
+		if yearExplicit {
+			root = filepath.Join(root, strconv.Itoa(year))
+			if !dirExists(root) {
+				continue
+			}
+		}
 		fmt.Printf("scanning %s...\n", d.name())
 
 		filepath.WalkDir(root, func(path string, de fs.DirEntry, err error) error {
 			if err != nil {
+				fmt.Printf("warning: %v\n", err)
 				return nil
 			}
 			name := de.Name()
 			if de.IsDir() {
 				if junkDirs[name] {
-					size := dirSize(path)
-					items = append(items, junkItem{path, true, size})
+					items = append(items, junkItem{path, true, 0})
 					return filepath.SkipDir
 				}
 				return nil
@@ -54,16 +61,24 @@ func runClean(cfg Config, skipConf bool) {
 		return
 	}
 
-	var totalSize int64
+	var totalFileSize int64
+	var dirCount, fileCount int
 	for _, item := range items {
-		totalSize += item.size
-		tag := "file"
 		if item.isDir {
-			tag = "dir "
+			dirCount++
+			fmt.Printf("  [dir ] %s\n", item.path)
+		} else {
+			fileCount++
+			totalFileSize += item.size
+			fmt.Printf("  [file] %s  (%s)\n", item.path, jfmt.FmtSize64(uint64(item.size)))
 		}
-		fmt.Printf("  [%s] %s  (%s)\n", tag, item.path, jfmt.FmtSize64(uint64(item.size)))
 	}
-	fmt.Printf("\n%d item(s), %s\n", len(items), jfmt.FmtSize64(uint64(totalSize)))
+	fmt.Printf("\n%d dir(s), %d file(s)", dirCount, fileCount)
+	if totalFileSize > 0 {
+		fmt.Printf(", %s in files", jfmt.FmtSize64(uint64(totalFileSize)))
+	}
+	fmt.Println()
+
 	if !skipConf && !confirm() {
 		return
 	}
@@ -86,17 +101,4 @@ func runClean(cfg Config, skipConf bool) {
 		return
 	}
 	fmt.Printf("removed %d item(s)\n", len(items))
-}
-
-func dirSize(path string) int64 {
-	var total int64
-	filepath.WalkDir(path, func(_ string, d fs.DirEntry, err error) error {
-		if err == nil && !d.IsDir() {
-			if info, err := d.Info(); err == nil {
-				total += info.Size()
-			}
-		}
-		return nil
-	})
-	return total
 }

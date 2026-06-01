@@ -66,7 +66,7 @@ func main() {
 	cfg := loadConfig()
 
 	if *doClean {
-		runClean(cfg, *skipConf)
+		runClean(cfg, *skipConf, yearExplicit, *year)
 		return
 	}
 
