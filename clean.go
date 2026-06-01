@@ -5,8 +5,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
-
+	"strings"
 )
 
 func runClean(cfg Config, skipConf bool, yearExplicit bool, year int) {
@@ -16,6 +17,7 @@ func runClean(cfg Config, skipConf bool, yearExplicit bool, year int) {
 		size  int64
 	}
 	var items []junkItem
+	var scanRoots []string
 
 	for _, d := range cfg.Drives {
 		base := d.basePath()
@@ -30,6 +32,7 @@ func runClean(cfg Config, skipConf bool, yearExplicit bool, year int) {
 				continue
 			}
 		}
+		scanRoots = append(scanRoots, root)
 		fmt.Printf("scanning %s...\n", bold(d.name()))
 
 		if err := filepath.WalkDir(root, func(path string, de fs.DirEntry, err error) error {
@@ -101,4 +104,61 @@ func runClean(cfg Config, skipConf bool, yearExplicit bool, year int) {
 		return
 	}
 	fmt.Printf("%s removed %d item(s)\n", green("✓"), len(items))
+
+	// rewrite checksums.b3 on each scanned root to remove junk entries
+	var pruned int
+	for _, root := range scanRoots {
+		pruned += pruneChecksums(root)
+	}
+	if pruned > 0 {
+		fmt.Printf("%s pruned %d junk entry/entries from checksums.b3\n", green("✓"), pruned)
+	}
+}
+
+// pruneChecksums walks root, finds every checksums.b3, and removes entries
+// whose path components are junk. Returns the number of entries removed.
+func pruneChecksums(root string) int {
+	var total int
+	filepath.WalkDir(root, func(path string, de fs.DirEntry, err error) error {
+		if err != nil || de.IsDir() || de.Name() != "checksums.b3" {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		var kept []string
+		removed := 0
+		for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+			if line == "" {
+				continue
+			}
+			parts := strings.SplitN(line, "  ", 2)
+			if len(parts) != 2 {
+				kept = append(kept, line)
+				continue
+			}
+			rel := parts[1]
+			junk := false
+			components := strings.Split(rel, string(os.PathSeparator))
+			for i, c := range components {
+				if isJunk(c, i < len(components)-1) {
+					junk = true
+					break
+				}
+			}
+			if junk {
+				removed++
+			} else {
+				kept = append(kept, line)
+			}
+		}
+		if removed > 0 {
+			sort.Strings(kept)
+			os.WriteFile(path, []byte(strings.Join(kept, "\n")+"\n"), 0644)
+			total += removed
+		}
+		return nil
+	})
+	return total
 }
