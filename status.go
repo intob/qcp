@@ -120,20 +120,15 @@ func runStatus(cfg Config, year int) {
 	}
 }
 
-func runListAll(cfg Config) {
-	// collect all years across all mounted drives
+// allYears returns all years found across all mounted drives, newest first.
+func allYears(cfg Config) []int {
 	yearSet := make(map[int]bool)
-	var driveNames []string
-	mountedDrives := make(map[string]bool)
 	for _, d := range cfg.Drives {
 		base := d.basePath()
-		driveNames = append(driveNames, d.name())
 		if !dirExists(base) {
 			continue
 		}
-		mountedDrives[d.name()] = true
-		root := filepath.Join(base, d.Root)
-		entries, err := os.ReadDir(root)
+		entries, err := os.ReadDir(filepath.Join(base, d.Root))
 		if err != nil {
 			continue
 		}
@@ -146,17 +141,29 @@ func runListAll(cfg Config) {
 			}
 		}
 	}
-
-	if len(yearSet) == 0 {
-		fmt.Println(dim("no missions found"))
-		return
-	}
-
 	var years []int
 	for y := range yearSet {
 		years = append(years, y)
 	}
 	sort.Sort(sort.Reverse(sort.IntSlice(years)))
+	return years
+}
+
+func runListAll(cfg Config) {
+	var driveNames []string
+	mountedDrives := make(map[string]bool)
+	for _, d := range cfg.Drives {
+		driveNames = append(driveNames, d.name())
+		if dirExists(d.basePath()) {
+			mountedDrives[d.name()] = true
+		}
+	}
+
+	years := allYears(cfg)
+	if len(years) == 0 {
+		fmt.Println(dim("no missions found"))
+		return
+	}
 
 	// column width for drive names
 	maxName := 0

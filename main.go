@@ -124,7 +124,11 @@ func main() {
 	keepAwake()
 
 	if *doCheck {
-		runCheck(cfg, *year)
+		if yearExplicit {
+			runCheck(cfg, *year)
+		} else {
+			runCheckAll(cfg)
+		}
 		return
 	}
 
@@ -173,7 +177,11 @@ func main() {
 	}
 
 	if *doSync {
-		runSync(cfg, *year, *skipConf)
+		if yearExplicit {
+			runSync(cfg, *year, *skipConf)
+		} else {
+			runSyncAll(cfg, *skipConf)
+		}
 		return
 	}
 

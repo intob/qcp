@@ -17,6 +17,19 @@ import (
 	"github.com/vbauerster/mpb/v8"
 )
 
+func runSyncAll(cfg Config, skipConf bool) {
+	years := allYears(cfg)
+	if len(years) == 0 {
+		fmt.Println(dim("no missions found"))
+		return
+	}
+	for _, year := range years {
+		fmt.Printf("%s\n\n", bold(strconv.Itoa(year)))
+		runSync(cfg, year, skipConf)
+		fmt.Println()
+	}
+}
+
 func runSync(cfg Config, year int, skipConf bool) {
 	yearStr := strconv.Itoa(year)
 

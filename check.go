@@ -8,6 +8,19 @@ import (
 	"strconv"
 )
 
+func runCheckAll(cfg Config) {
+	years := allYears(cfg)
+	if len(years) == 0 {
+		fmt.Println(dim("no missions found"))
+		return
+	}
+	for _, year := range years {
+		fmt.Printf("%s\n\n", bold(strconv.Itoa(year)))
+		runCheck(cfg, year)
+		fmt.Println()
+	}
+}
+
 func runCheck(cfg Config, year int) {
 	yearStr := strconv.Itoa(year)
 
