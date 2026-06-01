@@ -105,13 +105,13 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 	for _, f := range files {
 		totalSrc += f.size
 	}
-	fmt.Printf("pull: %s from %s (%s total)\n\n", slug, srcVol, fmtSize(uint64(totalSrc)))
+	fmt.Printf("pull: %s from %s (%s total)\n\n", bold(slug), bold(srcVol), dim(fmtSize(uint64(totalSrc))))
 	allUpToDate := true
 	for _, d := range dsts {
 		avail := availableBytes(d.base)
 		alreadyBytes := totalSrc - d.size
 		if d.size == 0 {
-			fmt.Printf("  %-12s already up to date\n", d.name)
+			fmt.Printf("  %-12s %s\n", d.name, dim("already up to date"))
 			continue
 		}
 		allUpToDate = false
@@ -119,14 +119,14 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 		if d.size > int64(avail) {
 			warn = " ⚠ insufficient space"
 		}
-		fmt.Printf("  %-12s %s to copy", d.name, fmtSize(uint64(d.size)))
+		fmt.Printf("  %-12s %s to copy", d.name, dim(fmtSize(uint64(d.size))))
 		if alreadyBytes > 0 {
-			fmt.Printf(", %s already present", fmtSize(uint64(alreadyBytes)))
+			fmt.Printf(", %s already present", dim(fmtSize(uint64(alreadyBytes))))
 		}
-		fmt.Printf("  (%s available)%s\n", fmtSize(avail), warn)
+		fmt.Printf("  (%s available)%s\n", dim(fmtSize(avail)), warn)
 	}
 	if allUpToDate {
-		fmt.Println("all hot drives already up to date")
+		fmt.Println(dim("all hot drives already up to date"))
 		return
 	}
 	fmt.Println()
@@ -135,7 +135,7 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 	}
 
 	// copy
-	fmt.Printf("\ncopying...\n\n")
+	fmt.Printf("\n%s\n\n", dim("copying..."))
 	p1 := mpb.New(mpb.WithWidth(64))
 	var results []*result
 	var resultsMu sync.Mutex
@@ -164,7 +164,7 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 				results = append(results, r)
 				resultsMu.Unlock()
 				if r.err != nil {
-					fmt.Printf("\nERROR: %v\n", r.err)
+					fmt.Printf("\n%s %v\n", red("ERROR:"), r.err)
 				}
 			})
 		}
@@ -188,7 +188,7 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 	}
 
 	// verify
-	fmt.Printf("\nverifying...\n\n")
+	fmt.Printf("\n%s\n\n", dim("verifying..."))
 	p2 := mpb.New(mpb.WithWidth(64))
 	verifyTrackers := make(map[string]*barTracker)
 	verifySize := make(map[string]int64)
@@ -226,7 +226,7 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 			wp.run(func() {
 				got, err := hashFile(r.dst, verifyTrackers[r.dstRoot])
 				if err != nil || got != r.srcHash {
-					fmt.Printf("\nFAIL: %s\n", r.dst)
+					fmt.Printf("\n%s %s\n", red("FAIL:"), r.dst)
 					verifyFailed.Add(1)
 					return
 				}
@@ -261,7 +261,7 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 		}
 		sort.Strings(clean)
 		if err := os.WriteFile(cPath, []byte(strings.Join(clean, "\n")+"\n"), 0644); err != nil {
-			fmt.Printf("ERROR writing checksums: %v\n", err)
+			fmt.Printf("%s writing checksums: %v\n", red("ERROR"), err)
 		}
 	}
 
@@ -271,5 +271,5 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 			total++
 		}
 	}
-	fmt.Printf("\n%d file(s) copied and verified\n", total)
+	fmt.Printf("\n%s %d file(s) copied and verified\n", green("✓"), total)
 }

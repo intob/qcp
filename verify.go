@@ -28,7 +28,7 @@ func runVerify(cfg Config, missionNum int, year int) {
 		}
 		slug, err := findMissionSlug([]DriveConfig{d}, yearStr, missionNum)
 		if err != nil {
-			fmt.Printf("warning: mission %03d not found on %s\n", missionNum, d.name())
+			fmt.Printf("%s mission %03d not found on %s\n", yellow("warning:"), missionNum, bold(d.name()))
 			continue
 		}
 		dirs = append(dirs, dirEntry{d.name(), filepath.Join(base, d.Root, yearStr, slug), base})
@@ -51,7 +51,7 @@ func runVerify(cfg Config, missionNum int, year int) {
 		var totalSize int64
 		f, err := os.Open(cPath)
 		if err != nil {
-			fmt.Printf("warning: cannot open %s: %v\n", cPath, err)
+			fmt.Printf("%s cannot open %s: %v\n", yellow("warning:"), cPath, err)
 			continue
 		}
 		scanner := bufio.NewScanner(f)
@@ -71,12 +71,12 @@ func runVerify(cfg Config, missionNum int, year int) {
 		exit(1, "no checksums.b3 found for mission %03d", missionNum)
 	}
 
-	fmt.Printf("verifying mission %03d on %d drive(s)\n", missionNum, len(jobs))
+	fmt.Printf("%s mission %03d on %d drive(s)\n", dim("verifying"), missionNum, len(jobs))
 	volInfos := make(map[string]driveInfo)
 	for _, job := range jobs {
 		info := probeDrive(job.base)
 		volInfos[job.vol] = info
-		fmt.Printf("  %s: %s\n", job.vol, info)
+		fmt.Printf("  %s: %s\n", bold(job.vol), info)
 	}
 	fmt.Println()
 
@@ -95,12 +95,12 @@ func runVerify(cfg Config, missionNum int, year int) {
 			wp.run(func() {
 				got, err := hashFile(filepath.Join(dir, e.rel), b)
 				if err != nil {
-					fmt.Printf("\nERROR: %v\n", err)
+					fmt.Printf("\n%s %v\n", red("ERROR:"), err)
 					failed.Add(1)
 					return
 				}
 				if got != e.hash {
-					fmt.Printf("\nFAIL [%s]: %s\n", filepath.Base(dir), e.rel)
+					fmt.Printf("\n%s [%s]: %s\n", red("FAIL"), filepath.Base(dir), e.rel)
 					failed.Add(1)
 				}
 			})
@@ -121,5 +121,5 @@ func runVerify(cfg Config, missionNum int, year int) {
 	for _, j := range jobs {
 		total += len(j.entries)
 	}
-	fmt.Printf("\nall %d files ok across %d drive(s)\n", total, len(jobs))
+	fmt.Printf("\n%s all %d files ok across %d drive(s)\n", green("✓"), total, len(jobs))
 }

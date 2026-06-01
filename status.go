@@ -23,7 +23,7 @@ func runStatus(cfg Config, year int) {
 		}
 	}
 
-	fmt.Println("DRIVES")
+	fmt.Println(bold("DRIVES"))
 	for _, d := range cfg.Drives {
 		base := d.basePath()
 		name := fmt.Sprintf("%-*s", maxName, d.name())
@@ -46,12 +46,12 @@ func runStatus(cfg Config, year int) {
 		bar := driveSpaceBar(used, total, barWidth)
 		fmt.Printf("  %s  %s  %s / %s  %s\n",
 			name, bar,
-			fmtSize(used), fmtSize(total),
+			dim(fmtSize(used)), dim(fmtSize(total)),
 			tags)
 	}
 
 	// missions section — same logic as runList
-	fmt.Printf("\nMISSIONS  %d\n", year)
+	fmt.Printf("\n%s  %d\n", bold("MISSIONS"), year)
 
 	var driveNames []string
 	missionDrives := make(map[string]map[string]bool)
@@ -108,7 +108,7 @@ func runStatus(cfg Config, year int) {
 
 	for _, slug := range allSlugs {
 		drives := missionDrives[slug]
-		fmt.Printf("  %-*s", maxSlug, slug)
+		fmt.Printf("  %s%-*s", bold(slug), maxSlug-len(slug), "")
 		for _, name := range driveNames {
 			if drives[name] {
 				fmt.Printf("  %-*s", len(name), name)

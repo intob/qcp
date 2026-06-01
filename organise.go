@@ -95,7 +95,7 @@ func runOrganise(cfg Config, year int, skipConf bool, regroup bool) {
 	for _, d := range cfg.Drives {
 		base := d.basePath()
 		if !dirExists(base) {
-			fmt.Printf("warning: %s not mounted, skipping\n", d.name())
+			fmt.Printf("%s %s %s\n", yellow("warning:"), bold(d.name()), dim("not mounted, skipping"))
 			continue
 		}
 		yearDir := filepath.Join(base, d.Root, yearStr)
@@ -115,10 +115,10 @@ func runOrganise(cfg Config, year int, skipConf bool, regroup bool) {
 	allSeasons := make(map[string]bool)
 	var allDriveFiles []driveFiles
 	for _, dy := range drives {
-		fmt.Printf("scanning %s...\n", dy.d.name())
+		fmt.Printf("%s %s\n", dim("scanning"), bold(dy.d.name()))
 		files, err := scanUnorganised(dy.yearDir, regroup)
 		if err != nil {
-			fmt.Printf("ERROR scanning %s: %v\n", dy.d.name(), err)
+			fmt.Printf("%s scanning %s: %v\n", red("ERROR"), dy.d.name(), err)
 			continue
 		}
 		allDriveFiles = append(allDriveFiles, driveFiles{dy, files})
@@ -160,10 +160,10 @@ func runOrganise(cfg Config, year int, skipConf bool, regroup bool) {
 	for _, df := range allDriveFiles {
 		p := buildOrganisePlan(df.yearDir, df.d.name(), df.files, seasonSlug)
 		if len(p.missions) == 0 && len(p.unsorted) == 0 {
-			fmt.Printf("%s: nothing to organise\n", df.d.name())
+			fmt.Printf("%s: nothing to organise\n", bold(df.d.name()))
 			continue
 		}
-		fmt.Printf("\n%s\n\n", df.d.name())
+		fmt.Printf("\n%s\n\n", bold(df.d.name()))
 		printOrganisePlan(p)
 		plans = append(plans, p)
 	}
@@ -189,7 +189,7 @@ func runOrganise(cfg Config, year int, skipConf bool, regroup bool) {
 
 	seq[year] = nextNum + len(seasons) - 1
 	if err := writeSeq(seq); err != nil {
-		fmt.Printf("ERROR writing seq: %v\n", err)
+		fmt.Printf("%s writing seq: %v\n", red("ERROR"), err)
 	}
 }
 
@@ -313,7 +313,7 @@ func buildOrganisePlan(yearDir, driveName string, files []fileWithDate, seasonSl
 
 func printOrganisePlan(p organisePlan) {
 	for _, m := range p.missions {
-		fmt.Printf("  %s  (%d files, %s)\n", m.slug, len(m.files), fmtSize(uint64(m.size)))
+		fmt.Printf("  %s  (%d files, %s)\n", bold(m.slug), len(m.files), dim(fmtSize(uint64(m.size))))
 		shown := m.files
 		if len(shown) > 4 {
 			shown = shown[:4]
@@ -355,11 +355,11 @@ func executeOrganisePlan(p organisePlan) {
 				continue
 			}
 			if err := os.MkdirAll(filepath.Dir(dst), 0777); err != nil {
-				fmt.Printf("ERROR mkdir: %v\n", err)
+				fmt.Printf("%s mkdir: %v\n", red("ERROR"), err)
 				continue
 			}
 			if err := os.Rename(src, dst); err != nil {
-				fmt.Printf("ERROR move %s: %v\n", mf.f.rel, err)
+				fmt.Printf("%s move %s: %v\n", red("ERROR"), mf.f.rel, err)
 				continue
 			}
 			markAffected(mf.f.rel, destDir)
@@ -372,11 +372,11 @@ func executeOrganisePlan(p organisePlan) {
 			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(dst), 0777); err != nil {
-			fmt.Printf("ERROR mkdir: %v\n", err)
+			fmt.Printf("%s mkdir: %v\n", red("ERROR"), err)
 			continue
 		}
 		if err := os.Rename(src, dst); err != nil {
-			fmt.Printf("ERROR move %s: %v\n", f.rel, err)
+			fmt.Printf("%s move %s: %v\n", red("ERROR"), f.rel, err)
 			continue
 		}
 		markAffected(f.rel, filepath.Join(p.yearDir, "_unsorted"))
@@ -391,7 +391,7 @@ func executeOrganisePlan(p organisePlan) {
 	}
 
 	removeEmptyDirs(p.yearDir)
-	fmt.Printf("%s: organised %d mission(s)\n", p.driveName, len(p.missions))
+	fmt.Printf("%s %s: organised %d mission(s)\n", green("✓"), bold(p.driveName), len(p.missions))
 }
 
 func extractFileDate(path, name string) (time.Time, string) {

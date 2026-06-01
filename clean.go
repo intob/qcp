@@ -21,7 +21,7 @@ func runClean(cfg Config, skipConf bool, yearExplicit bool, year int) {
 	for _, d := range cfg.Drives {
 		base := d.basePath()
 		if !dirExists(base) {
-			fmt.Printf("warning: %s not mounted, skipping\n", d.name())
+			fmt.Printf("%s %s not mounted, %s\n", yellow("warning:"), bold(d.name()), dim("skipping"))
 			continue
 		}
 		root := filepath.Join(base, d.Root)
@@ -31,11 +31,11 @@ func runClean(cfg Config, skipConf bool, yearExplicit bool, year int) {
 				continue
 			}
 		}
-		fmt.Printf("scanning %s...\n", d.name())
+		fmt.Printf("scanning %s...\n", bold(d.name()))
 
 		if err := filepath.WalkDir(root, func(path string, de fs.DirEntry, err error) error {
 			if err != nil {
-				fmt.Printf("warning: %v\n", err)
+				fmt.Printf("%s %v\n", yellow("warning:"), err)
 				return nil
 			}
 			name := de.Name()
@@ -53,12 +53,12 @@ func runClean(cfg Config, skipConf bool, yearExplicit bool, year int) {
 			}
 			return nil
 		}); err != nil {
-			fmt.Printf("warning: walk error on %s: %v\n", d.name(), err)
+			fmt.Printf("%s walk error on %s: %v\n", yellow("warning:"), bold(d.name()), err)
 		}
 	}
 
 	if len(items) == 0 {
-		fmt.Println("nothing to clean")
+		fmt.Println(dim("nothing to clean"))
 		return
 	}
 
@@ -93,7 +93,7 @@ func runClean(cfg Config, skipConf bool, yearExplicit bool, year int) {
 			err = os.Remove(item.path)
 		}
 		if err != nil {
-			fmt.Printf("ERROR: %v\n", err)
+			fmt.Printf("%s %v\n", red("ERROR:"), err)
 			failed++
 		}
 	}
@@ -101,5 +101,5 @@ func runClean(cfg Config, skipConf bool, yearExplicit bool, year int) {
 		fmt.Printf("%d item(s) could not be deleted\n", failed)
 		return
 	}
-	fmt.Printf("removed %d item(s)\n", len(items))
+	fmt.Printf("%s removed %d item(s)\n", green("✓"), len(items))
 }

@@ -50,7 +50,7 @@ func runSync(cfg Config, year int, skipConf bool) {
 		switch d.Role {
 		case "hot":
 			if !dirExists(d.basePath()) {
-				fmt.Printf("warning: primary %s not mounted, skipping\n", d.name())
+				fmt.Printf("%s %s %s\n", yellow("warning:"), bold(d.name()), dim("not mounted, skipping"))
 				continue
 			}
 			state, _ := scanDrive(d)
@@ -58,7 +58,7 @@ func runSync(cfg Config, year int, skipConf bool) {
 		case "cold":
 			state, ok := scanDrive(d)
 			if !ok {
-				fmt.Printf("warning: archive %s not mounted, skipping\n", d.name())
+				fmt.Printf("%s %s %s\n", yellow("warning:"), bold(d.name()), dim("not mounted, skipping"))
 				continue
 			}
 			archives = append(archives, state)
@@ -91,13 +91,13 @@ func runSync(cfg Config, year int, skipConf bool) {
 			srcDir := filepath.Join(p.yearDir, slug)
 			files, size, err := missionFiles(srcDir)
 			if err != nil {
-				fmt.Printf("ERROR scanning %s on %s: %v\n", slug, p.Volume, err)
+				fmt.Printf("%s scanning %s on %s: %v\n", red("ERROR"), slug, bold(p.Volume), err)
 				continue
 			}
 			if existing, ok := missionSources[slug]; ok {
 				if !missionManifestsMatch(existing.files, files) {
-					fmt.Printf("WARNING: %s differs between %s and %s — skipping\n",
-						slug, existing.srcVol, p.Volume)
+					fmt.Printf("%s %s differs between %s and %s — skipping\n",
+						red("CONFLICT"), slug, bold(existing.srcVol), bold(p.Volume))
 					delete(missionSources, slug)
 					conflicted[slug] = true
 				}
@@ -142,16 +142,16 @@ func runSync(cfg Config, year int, skipConf bool) {
 	}
 
 	if len(jobs) == 0 {
-		fmt.Println("all drives are in sync")
+		fmt.Println(dim("all drives are in sync"))
 		return
 	}
 
 	for _, j := range jobs {
-		fmt.Printf("sync: %s → %s\n", j.slug, j.dstVol)
+		fmt.Printf("sync: %s → %s\n", j.slug, bold(j.dstVol))
 	}
 	primaryNames := make([]string, len(primaries))
 	for i, p := range primaries {
-		primaryNames[i] = p.Volume
+		primaryNames[i] = bold(p.Volume)
 	}
 	fmt.Printf("\n%d mission(s) to sync from %s\n", len(jobs), strings.Join(primaryNames, ", "))
 	if !skipConf && !confirm() {
@@ -203,11 +203,11 @@ func runSync(cfg Config, year int, skipConf bool) {
 	for vol := range archiveSize {
 		info := probeDrive(dstBaseByVol[vol])
 		volInfo[vol] = info
-		fmt.Printf("  %s: %s\n", vol, info)
+		fmt.Printf("  %s: %s\n", bold(vol), info)
 	}
 
 	// Phase 1: copy — one bar per archive, all missions in parallel
-	fmt.Printf("\ncopying...\n\n")
+	fmt.Printf("\n%s\n\n", dim("copying..."))
 	p1 := mpb.NewWithContext(ctx, mpb.WithWidth(64))
 	copyBars := make(map[string]*barTracker)
 	for vol, size := range archiveSize {
@@ -238,7 +238,7 @@ func runSync(cfg Config, year int, skipConf bool) {
 				results = append(results, r)
 				resultsMu.Unlock()
 				if r.err != nil {
-					fmt.Printf("\nERROR: %v\n", r.err)
+					fmt.Printf("\n%s %v\n", red("ERROR:"), r.err)
 				} else {
 					total.Add(r.n)
 				}
@@ -267,7 +267,7 @@ func runSync(cfg Config, year int, skipConf bool) {
 	}
 
 	// Phase 2: verify — one bar per archive
-	fmt.Printf("\nverifying...\n\n")
+	fmt.Printf("\n%s\n\n", dim("verifying..."))
 	p2 := mpb.NewWithContext(ctx, mpb.WithWidth(64))
 	verifyBars := make(map[string]*barTracker)
 	for vol, size := range archiveSize {
@@ -304,7 +304,7 @@ func runSync(cfg Config, year int, skipConf bool) {
 				}
 				got, err := hashFile(r.dst, verifyBars[dstDirToVol[r.dstRoot]])
 				if err != nil || got != r.srcHash {
-					fmt.Printf("\nFAIL: %s\n", r.dst)
+					fmt.Printf("\n%s %s\n", red("FAIL:"), r.dst)
 					verifyFailed.Add(1)
 					return
 				}
@@ -334,7 +334,7 @@ func runSync(cfg Config, year int, skipConf bool) {
 	}
 
 	perArchive := fmtSize(uint64(total.Load()) / uint64(len(archiveSize)))
-	fmt.Printf("\n%s synced to %d archive(s)\n", perArchive, len(archiveSize))
+	fmt.Printf("\n%s %s synced to %d archive(s)\n", green("✓"), perArchive, len(archiveSize))
 }
 
 func buildSyncOps(files []fileEntry, srcDir, dstDir string, bar *barTracker) []*op {

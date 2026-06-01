@@ -92,7 +92,7 @@ func runChecksumYear(cfg Config, year int) {
 		for _, md := range mDrives {
 			fs, _, err := missionFiles(md.dir)
 			if err != nil {
-				fmt.Printf("warning: error scanning %s on %s: %v\n", slug, md.vol, err)
+				fmt.Printf("%s error scanning %s on %s: %v\n", yellow("warning:"), slug, md.vol, err)
 				continue
 			}
 			for _, f := range fs {
@@ -102,7 +102,7 @@ func runChecksumYear(cfg Config, year int) {
 			}
 		}
 		if len(fileSet) == 0 {
-			fmt.Printf("warning: no files found for %s\n", slug)
+			fmt.Printf("%s no files found for %s\n", yellow("warning:"), slug)
 			continue
 		}
 		var files []fileEntry
@@ -117,7 +117,7 @@ func runChecksumYear(cfg Config, year int) {
 
 	already := len(slugs) - len(jobs)
 	if len(jobs) == 0 {
-		fmt.Printf("all %d mission(s) already checksummed\n", already)
+		fmt.Printf("%s\n", dim(fmt.Sprintf("all %d mission(s) already checksummed", already)))
 		return
 	}
 
@@ -129,7 +129,7 @@ func runChecksumYear(cfg Config, year int) {
 		}
 	}
 
-	fmt.Printf("checksumming %d mission(s) in %d", len(jobs), year)
+	fmt.Printf("checksumming %s mission(s) in %d", bold(strconv.Itoa(len(jobs))), year)
 	if already > 0 {
 		fmt.Printf(" (%d already done)", already)
 	}
@@ -143,7 +143,7 @@ func runChecksumYear(cfg Config, year int) {
 			if _, ok := volInfo[md.vol]; !ok {
 				volInfo[md.vol] = probeDrive(md.base)
 				volOrder = append(volOrder, md.vol)
-				fmt.Printf("  %s: %s\n", md.vol, volInfo[md.vol])
+				fmt.Printf("  %s: %s\n", bold(md.vol), volInfo[md.vol])
 			}
 		}
 	}
@@ -177,7 +177,7 @@ func runChecksumYear(cfg Config, year int) {
 				dp.run(func() {
 					hash, err := hashFile(filepath.Join(md.dir, f.rel), bars[md.vol])
 					if err != nil {
-						fmt.Printf("\nERROR [%s] %s: %v\n", md.vol, f.rel, err)
+						fmt.Printf("\n%s %s: %v\n", red(fmt.Sprintf("ERROR [%s]", md.vol)), f.rel, err)
 						failed.Add(1)
 						return
 					}
@@ -193,7 +193,7 @@ func runChecksumYear(cfg Config, year int) {
 
 		if failed.Load() > 0 {
 			totalFailed.Add(failed.Load())
-			fmt.Printf("\nskipping %s: %d error(s)\n", j.slug, failed.Load())
+			fmt.Printf("\n%s %s: %d error(s)\n", dim("skipping"), j.slug, failed.Load())
 			continue
 		}
 
@@ -203,14 +203,14 @@ func runChecksumYear(cfg Config, year int) {
 			ref := j.drives[0].hashes[f.rel]
 			for _, md := range j.drives[1:] {
 				if md.hashes[f.rel] != ref {
-					fmt.Printf("\nCONFLICT [%s vs %s]: %s\n", j.drives[0].vol, md.vol, f.rel)
+					fmt.Printf("\n%s [%s vs %s]: %s\n", red("CONFLICT"), j.drives[0].vol, md.vol, f.rel)
 					conflicts++
 				}
 			}
 		}
 		if conflicts > 0 {
 			totalFailed.Add(int64(conflicts))
-			fmt.Printf("\nskipping %s: %d conflict(s)\n", j.slug, conflicts)
+			fmt.Printf("\n%s %s: %d conflict(s)\n", dim("skipping"), j.slug, conflicts)
 			continue
 		}
 
@@ -223,7 +223,7 @@ func runChecksumYear(cfg Config, year int) {
 			sort.Strings(lines)
 			cPath := filepath.Join(md.dir, "checksums.b3")
 			if err := os.WriteFile(cPath, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
-				fmt.Printf("\nERROR writing %s: %v\n", cPath, err)
+				fmt.Printf("\n%s writing %s: %v\n", red("ERROR"), cPath, err)
 			}
 		}
 	}
@@ -236,7 +236,7 @@ func runChecksumYear(cfg Config, year int) {
 	if n := totalFailed.Load(); n > 0 {
 		exit(1, "%d error(s) — some missions may be incomplete", n)
 	}
-	fmt.Printf("\n%d mission(s) checksummed\n", len(jobs))
+	fmt.Printf("\n%s %d mission(s) checksummed\n", green("✓"), len(jobs))
 }
 
 func runChecksum(cfg Config, missionNum int, year int) {
@@ -262,11 +262,11 @@ func runChecksum(cfg Config, missionNum int, year int) {
 		}
 		dir := filepath.Join(base, d.Root, yearStr, slug)
 		if !dirExists(dir) {
-			fmt.Printf("warning: mission not found on %s, skipping\n", d.name())
+			fmt.Printf("%s mission not found on %s, %s\n", yellow("warning:"), bold(d.name()), dim("skipping"))
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(dir, "checksums.b3")); err == nil {
-			fmt.Printf("warning: %s already has checksums.b3, skipping\n", d.name())
+			fmt.Printf("%s %s already has checksums.b3, %s\n", yellow("warning:"), bold(d.name()), dim("skipping"))
 			continue
 		}
 		drives = append(drives, driveHashes{vol: d.name(), dir: dir, base: base, hashes: make(map[string]string)})
@@ -280,7 +280,7 @@ func runChecksum(cfg Config, missionNum int, year int) {
 	for _, d := range drives {
 		fs, _, err := missionFiles(d.dir)
 		if err != nil {
-			fmt.Printf("warning: error scanning %s: %v\n", d.vol, err)
+			fmt.Printf("%s error scanning %s: %v\n", yellow("warning:"), d.vol, err)
 			continue
 		}
 		for _, f := range fs {
@@ -300,12 +300,12 @@ func runChecksum(cfg Config, missionNum int, year int) {
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].rel < files[j].rel })
 
-	fmt.Printf("checksumming mission %03d (%s) on %d drive(s)\n", missionNum, slug, len(drives))
+	fmt.Printf("checksumming mission %s (%s) on %s drive(s)\n", bold(fmt.Sprintf("%03d", missionNum)), slug, bold(strconv.Itoa(len(drives))))
 	driveInfos := make(map[string]driveInfo)
 	for _, d := range drives {
 		info := probeDrive(d.base)
 		driveInfos[d.vol] = info
-		fmt.Printf("  %s: %s\n", d.vol, info)
+		fmt.Printf("  %s: %s\n", bold(d.vol), info)
 	}
 	fmt.Println()
 
@@ -327,7 +327,7 @@ func runChecksum(cfg Config, missionNum int, year int) {
 			dp.run(func() {
 				hash, err := hashFile(filepath.Join(d.dir, f.rel), bar)
 				if err != nil {
-					fmt.Printf("\nERROR [%s]: %v\n", d.vol, err)
+					fmt.Printf("\n%s %v\n", red(fmt.Sprintf("ERROR [%s]:", d.vol)), err)
 					failed.Add(1)
 					return
 				}
@@ -355,8 +355,8 @@ func runChecksum(cfg Config, missionNum int, year int) {
 		ref := drives[0].hashes[f.rel]
 		for _, d := range drives[1:] {
 			if d.hashes[f.rel] != ref {
-				fmt.Printf("CONFLICT: %s — %s=%s  %s=%s\n",
-					f.rel, drives[0].vol, ref[:8], d.vol, d.hashes[f.rel][:8])
+				fmt.Printf("%s %s — %s=%s  %s=%s\n",
+					red("CONFLICT:"), f.rel, drives[0].vol, ref[:8], d.vol, d.hashes[f.rel][:8])
 				conflicts++
 			}
 		}
@@ -374,9 +374,9 @@ func runChecksum(cfg Config, missionNum int, year int) {
 		sort.Strings(lines)
 		cPath := filepath.Join(d.dir, "checksums.b3")
 		if err := os.WriteFile(cPath, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
-			fmt.Printf("ERROR writing %s: %v\n", cPath, err)
+			fmt.Printf("%s writing %s: %v\n", red("ERROR"), cPath, err)
 		} else {
-			fmt.Printf("wrote %s (%d files)\n", cPath, len(lines))
+			fmt.Printf("%s wrote %s (%d files)\n", green("✓"), cPath, len(lines))
 		}
 	}
 }

@@ -43,7 +43,7 @@ func runUpdate(cfg Config, missionNum int, year int, skipConf bool) {
 			if dirExists(dir) {
 				archives = append(archives, archiveDrive{d.name(), dir, base})
 			} else {
-				fmt.Printf("warning: mission not found on %s, skipping\n", d.name())
+				fmt.Printf("%s mission not found on %s, skipping\n", yellow("warning:"), d.name())
 			}
 		}
 	}
@@ -74,7 +74,7 @@ func runUpdate(cfg Config, missionNum int, year int, skipConf bool) {
 	for _, a := range archives {
 		existing, err := findFiles(a.dir)
 		if err != nil {
-			fmt.Printf("warning: error scanning %s: %v\n", a.vol, err)
+			fmt.Printf("%s error scanning %s: %v\n", yellow("warning:"), a.vol, err)
 			continue
 		}
 		existingSet := make(map[string]bool, len(existing))
@@ -92,23 +92,23 @@ func runUpdate(cfg Config, missionNum int, year int, skipConf bool) {
 		if len(missing) > 0 {
 			jobs = append(jobs, archiveJob{a, missing, size})
 		} else {
-			fmt.Printf("%s: already up to date\n", a.vol)
+			fmt.Printf("%s: %s\n", a.vol, dim("already up to date"))
 		}
 	}
 	if len(jobs) == 0 {
-		fmt.Println("all archive drives are up to date")
+		fmt.Println(dim("all archive drives are up to date"))
 		return
 	}
 
 	for _, j := range jobs {
-		fmt.Printf("update: %d file(s) (%s) → %s\n", len(j.missing), fmtSize(uint64(j.size)), j.vol)
+		fmt.Printf("update: %d file(s) (%s) → %s\n", len(j.missing), dim(fmtSize(uint64(j.size))), bold(j.vol))
 	}
 	if !skipConf && !confirm() {
 		exit(0, "aborted")
 	}
 
 	// copy missing files per archive drive
-	fmt.Printf("\ncopying...\n\n")
+	fmt.Printf("\n%s\n\n", dim("copying..."))
 	p1 := mpb.New(mpb.WithWidth(64))
 	var copyResults []struct {
 		dst     string
@@ -145,7 +145,7 @@ func runUpdate(cfg Config, missionNum int, year int, skipConf bool) {
 				}{dst, f.rel, dstRoot, j.vol, r.srcHash, r.err})
 				resultsMu.Unlock()
 				if r.err != nil {
-					fmt.Printf("\nERROR: %v\n", r.err)
+					fmt.Printf("\n%s %v\n", red("ERROR:"), r.err)
 				}
 			})
 		}
@@ -169,7 +169,7 @@ func runUpdate(cfg Config, missionNum int, year int, skipConf bool) {
 	}
 
 	// verify copied files
-	fmt.Printf("\nverifying...\n\n")
+	fmt.Printf("\n%s\n\n", dim("verifying..."))
 	p2 := mpb.New(mpb.WithWidth(64))
 	verifyTrackers := make(map[string]*barTracker)
 	verifySize := make(map[string]int64)
@@ -211,7 +211,7 @@ func runUpdate(cfg Config, missionNum int, year int, skipConf bool) {
 			wp.run(func() {
 				got, err := hashFile(r.dst, verifyTrackers[vol])
 				if err != nil || got != r.srcHash {
-					fmt.Printf("\nFAIL: %s\n", r.dst)
+					fmt.Printf("\n%s %s\n", red("FAIL:"), r.dst)
 					verifyFailed.Add(1)
 					return
 				}
@@ -247,7 +247,7 @@ func runUpdate(cfg Config, missionNum int, year int, skipConf bool) {
 		}
 		sort.Strings(clean)
 		if err := os.WriteFile(cPath, []byte(strings.Join(clean, "\n")+"\n"), 0644); err != nil {
-			fmt.Printf("ERROR writing checksums: %v\n", err)
+			fmt.Printf("%s writing checksums: %v\n", red("ERROR"), err)
 		}
 	}
 
@@ -255,5 +255,5 @@ func runUpdate(cfg Config, missionNum int, year int, skipConf bool) {
 	for _, j := range jobs {
 		total += len(j.missing)
 	}
-	fmt.Printf("\n%d file(s) copied and verified\n", total)
+	fmt.Printf("\n%s %d file(s) copied and verified\n", green("✓"), total)
 }

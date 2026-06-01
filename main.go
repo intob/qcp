@@ -167,7 +167,7 @@ func main() {
 	for _, d := range cfg.Drives {
 		base := d.basePath()
 		if !dirExists(base) {
-			fmt.Printf("warning: %s not mounted, skipping\n", d.name())
+			fmt.Printf("%s %s %s\n", yellow("warning:"), bold(d.name()), dim("not mounted, skipping"))
 			continue
 		}
 		dstRoot := filepath.Join(base, d.Root, yearStr, missionSlug)
@@ -251,7 +251,7 @@ func main() {
 	}()
 
 	sizeStr := fmtSize(uint64(totalSize))
-	fmt.Printf("\ncopying %d files (%s) to %d drive(s)\n\n", totalFiles, sizeStr, len(dstRoots))
+	fmt.Printf("\n%s %d files (%s) to %d drive(s)\n\n", dim("copying..."), totalFiles, sizeStr, len(dstRoots))
 
 	// probe destination drives once
 	dstInfos := make(map[string]driveInfo)
@@ -297,7 +297,7 @@ func main() {
 	for _, dstRoot := range dstRoots {
 		missing := missingByDst[dstRoot]
 		if len(missing) == 0 {
-			fmt.Printf("%s: already up to date\n", dstNames[dstRoot])
+			fmt.Printf("%s: %s\n", bold(dstNames[dstRoot]), dim("already up to date"))
 			continue
 		}
 		wp := newPool(dstInfos[dstRoot].concurrency)
@@ -314,7 +314,7 @@ func main() {
 				results = append(results, r)
 				resultsMu.Unlock()
 				if r.err != nil {
-					fmt.Printf("\nERROR copy: %v\n", r.err)
+					fmt.Printf("\n%s copy: %v\n", red("ERROR"), r.err)
 					return
 				}
 				total.Add(r.n)
@@ -340,7 +340,7 @@ func main() {
 	}
 
 	// Phase 2: verify — per-drive pool
-	fmt.Printf("\nverifying...\n\n")
+	fmt.Printf("\n%s\n\n", dim("verifying..."))
 	p2 := mpb.NewWithContext(ctx, mpb.WithWidth(64))
 	verifyBars := make(map[string]*barTracker)
 	for _, dstRoot := range dstRoots {
@@ -368,12 +368,12 @@ func main() {
 				}
 				got, err := hashFile(r.dst, verifyBars[r.dstRoot])
 				if err != nil {
-					fmt.Printf("\nERROR verify: %v\n", err)
+					fmt.Printf("\n%s verify: %v\n", red("ERROR"), err)
 					verifyFailed.Add(1)
 					return
 				}
 				if got != r.srcHash {
-					fmt.Printf("\nMISMATCH: %s\n", r.dst)
+					fmt.Printf("\n%s %s\n", red("MISMATCH:"), r.dst)
 					verifyFailed.Add(1)
 					return
 				}
@@ -401,10 +401,10 @@ func main() {
 		lines = mergeChecksums(cPath, lines)
 		sort.Strings(lines)
 		if err := os.WriteFile(cPath, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
-			fmt.Printf("ERROR writing checksums: %v\n", err)
+			fmt.Printf("%s writing checksums: %v\n", red("ERROR"), err)
 		}
 	}
 
 	perDrive := fmtSize(uint64(total.Load()) / uint64(len(dstRoots)))
-	fmt.Printf("\n%s copied and verified → %s\n", perDrive, missionSlug)
+	fmt.Printf("\n%s %s copied and verified → %s\n", green("✓"), perDrive, bold(missionSlug))
 }
