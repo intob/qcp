@@ -34,10 +34,10 @@ Move the binary somewhere on your `$PATH`, e.g. `/usr/local/bin/qcp`.
 }
 ```
 
-- **cards** — mounted card volumes to ingest from. `sub` is the subdirectory on the card that contains footage.
+- **cards** — card volumes to ingest from. `volume` is a prefix — any mounted volume whose name starts with it will be picked up. `sub` is the subdirectory on the card containing footage.
 - **drives** — destination drives. `root` is the subdirectory on the drive under which year/mission dirs are created (empty = drive root). `role` is either `hot` (working SSD) or `cold` (archive HDD).
 
-Volume names must match exactly what macOS mounts them as (check `ls /Volumes/`).
+Card `volume` values are prefix-matched against mounted volumes. A single entry `"CFEXP"` will match `CFEXP_01`, `CFEXP_02`, `CFEXP_250_01`, etc. — each landing in its own named subfolder. Check mounted names with `ls /Volumes/`.
 
 ---
 
@@ -52,18 +52,26 @@ Each ingest creates a numbered mission directory:
   checksums.b3
 ```
 
-Example:
+Example with two CFexpress cards and a GoPro:
 ```
 T9/2026/042_Altissimo_with_Anton/
-  CFEXP/
+  CFEXP_250_01/
     Clip0001.MXF
     Clip0002.MXF
+  CFEXP_250_02/
+    Clip0003.MXF
   GoPro/
     GH010042.MP4
   checksums.b3
 ```
 
-`checksums.b3` is a sorted text file of `blake3_hash  relative_path` entries, one per file.
+Each card gets its own subfolder named after the physical volume, so footage is always traceable back to the source media. `checksums.b3` is a sorted text file of `blake3_hash  relative_path` entries, one per file.
+
+### Naming convention
+
+Name your cards consistently and descriptively — the volume name becomes the subfolder name in every mission archive. A scheme like `CFEXP_250_01` (type, size in GB, card number) makes archives self-documenting without needing a separate log.
+
+`000_*` directories (e.g. `000_Edits`) sort to the top and are synced like any mission, but cannot be addressed by number-based commands.
 
 ---
 
@@ -164,6 +172,5 @@ qcp -verify 42
 ## Notes
 
 - Dotfiles (`.DS_Store`, `.Spotlight-V100`, etc.) are always skipped.
-- `000_*` directories (e.g. `000_Edits`) are treated as regular mission dirs by `-sync` and `-update` but cannot be addressed by number-based commands (`-verify`, `-checksum`, `-to`).
-- Drive type is detected once per session via `diskutil info` — SSD gets 4 concurrent workers, HDD gets 1 (sequential I/O).
+- Drive type is detected via `diskutil info` — SSD gets 4 concurrent workers, HDD gets 1 (sequential I/O).
 - Interrupting a sync or ingest with `^C` prompts to clean up partial directories.
