@@ -23,7 +23,7 @@ var version = "dev"
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	skipConf := flag.Bool("y", false, "skip confirmation")
-	missionFlag := flag.String("mission", "", "mission name (e.g. \"Altissimo with Anton\")")
+	missionFlag := flag.String("ingest", "", "ingest name (e.g. \"Altissimo with Anton\")")
 	year := flag.Int("year", time.Now().Year(), "year override")
 	toMissionStr := flag.String("to", "", "append to existing mission number")
 	verifyMissionStr := flag.String("verify", "", "re-verify mission number across all mounted drives")
@@ -151,7 +151,7 @@ func main() {
 		missionSlug = slug
 	} else {
 		if *missionFlag == "" {
-			exit(3, "-mission is required")
+			exit(3, "-ingest is required")
 		}
 		num, err := peekMission(*year)
 		if err != nil {
