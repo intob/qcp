@@ -27,6 +27,7 @@ func main() {
 	toMissionStr := flag.String("to", "", "append to existing mission number")
 	verifyMissionStr := flag.String("verify", "", "re-verify mission number across all mounted drives")
 	checksumMissionStr := flag.String("checksum", "", "generate checksums.b3 for a mission by cross-verifying all mounted drives")
+	doChecksumAll := flag.Bool("checksum-all", false, "generate checksums.b3 for every mission in the year across all mounted drives")
 	updateMissionStr := flag.String("update", "", "copy files missing from cold drives for an existing mission")
 	pullMissionStr := flag.String("pull", "", "pull a mission from cold storage to hot drives")
 	pullSub := flag.String("sub", "", "subdirectory within mission to pull (e.g. CFEXP_250_01)")
@@ -112,6 +113,11 @@ func main() {
 
 	if hasVerify {
 		runVerify(cfg, verifyMission, *year)
+		return
+	}
+
+	if *doChecksumAll {
+		runChecksumYear(cfg, *year)
 		return
 	}
 

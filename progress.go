@@ -78,6 +78,31 @@ func (pr *progressReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// addBarDynamic is like addBar but prepends a dynamic label (e.g. mission counter)
+// returned by the label func, read on every render tick.
+func addBarDynamic(p *mpb.Progress, name string, total int64, label func() string) *barTracker {
+	style := mpb.BarStyle().
+		Lbound("").
+		Filler("█").
+		Tip("▌").
+		Padding("░").
+		Rbound("")
+	bar := p.New(total,
+		style,
+		mpb.PrependDecorators(
+			decor.Any(func(_ decor.Statistics) string {
+				return fmt.Sprintf("%-12s %-10s  ", name, label())
+			}),
+			decor.CountersKibiByte("% .1f / % .1f  "),
+		),
+		mpb.AppendDecorators(
+			decor.EwmaSpeed(decor.SizeB1024(0), "% .1f  ", 30),
+			decor.OnComplete(decor.EwmaETA(decor.ET_STYLE_GO, 150), "✓"),
+		),
+	)
+	return &barTracker{bar: bar}
+}
+
 func addBar(p *mpb.Progress, name string, total int64) *barTracker {
 	style := mpb.BarStyle().
 		Lbound("").
