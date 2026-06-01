@@ -50,33 +50,46 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 		exit(1, "mission %03d not found", missionNum)
 	}
 
-	var hotDir, hotVol string
+	// prefer a hot drive as reference; fall back to the first cold drive that has it
+	var refDir, refVol, refColdVol string
 	for _, h := range hotDrives {
 		dir := filepath.Join(h.basePath(), h.Root, yearStr, slug)
 		if dirExists(dir) {
-			hotDir, hotVol = dir, h.name()
+			refDir, refVol = dir, h.name()
 			break
 		}
 	}
-	if hotDir == "" {
-		exit(1, "mission %s not found on any hot drive", slug)
+	if refDir == "" {
+		for _, c := range coldDrives {
+			dir := filepath.Join(c.basePath(), c.Root, yearStr, slug)
+			if dirExists(dir) {
+				refDir, refVol, refColdVol = dir, c.name(), c.name()
+				break
+			}
+		}
+	}
+	if refDir == "" {
+		exit(1, "mission %s not found on any drive", slug)
 	}
 
-	hotFiles, err := findFiles(hotDir)
+	refFiles, err := findFiles(refDir)
 	if err != nil {
-		exit(1, "error scanning %s on %s: %v", slug, hotVol, err)
+		exit(1, "error scanning %s on %s: %v", slug, refVol, err)
 	}
-	hotSet := make(map[string]bool, len(hotFiles))
-	for _, f := range hotFiles {
-		hotSet[f.rel] = true
+	refSet := make(map[string]bool, len(refFiles))
+	for _, f := range refFiles {
+		refSet[f.rel] = true
 	}
 
 	var totalMissing, totalExtra, scanErrors int
 	for _, cold := range coldDrives {
+		if cold.name() == refColdVol {
+			continue // this drive is the reference, skip
+		}
 		coldDir := filepath.Join(cold.basePath(), cold.Root, yearStr, slug)
 		if !dirExists(coldDir) {
 			fmt.Printf("  %s %s\n", yellow(cold.name()), dim("(mission directory missing)"))
-			totalMissing += len(hotFiles)
+			totalMissing += len(refFiles)
 			continue
 		}
 		coldFiles, err := findFiles(coldDir)
@@ -90,13 +103,13 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 			coldSet[f.rel] = true
 		}
 		var missing, extra []string
-		for _, f := range hotFiles {
+		for _, f := range refFiles {
 			if !coldSet[f.rel] {
 				missing = append(missing, f.rel)
 			}
 		}
 		for _, f := range coldFiles {
-			if !hotSet[f.rel] {
+			if !refSet[f.rel] {
 				extra = append(extra, f.rel)
 			}
 		}
@@ -171,12 +184,13 @@ func runCheck(cfg Config, year int) bool {
 		return false
 	}
 
-	// union missions across all hot drives; first occurrence wins for the source path
-	type hotMission struct {
-		dir  string
-		vol  string
+	// union missions across all drives; hot wins as reference, cold fills gaps
+	type refMission struct {
+		dir     string
+		vol     string
+		coldVol string // non-empty when reference is a cold drive
 	}
-	hotBySlug := make(map[string]hotMission)
+	refBySlug := make(map[string]refMission)
 	for _, h := range hotDrives {
 		hotYearDir := filepath.Join(h.basePath(), h.Root, yearStr)
 		entries, err := os.ReadDir(hotYearDir)
@@ -185,8 +199,8 @@ func runCheck(cfg Config, year int) bool {
 		}
 		for _, e := range entries {
 			if e.IsDir() && isNumberedMission(e.Name()) {
-				if _, seen := hotBySlug[e.Name()]; !seen {
-					hotBySlug[e.Name()] = hotMission{
+				if _, seen := refBySlug[e.Name()]; !seen {
+					refBySlug[e.Name()] = refMission{
 						dir: filepath.Join(hotYearDir, e.Name()),
 						vol: h.name(),
 					}
@@ -194,9 +208,27 @@ func runCheck(cfg Config, year int) bool {
 			}
 		}
 	}
+	for _, c := range coldDrives {
+		coldYearDir := filepath.Join(c.basePath(), c.Root, yearStr)
+		entries, err := os.ReadDir(coldYearDir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() && isNumberedMission(e.Name()) {
+				if _, seen := refBySlug[e.Name()]; !seen {
+					refBySlug[e.Name()] = refMission{
+						dir:     filepath.Join(coldYearDir, e.Name()),
+						vol:     c.name(),
+						coldVol: c.name(),
+					}
+				}
+			}
+		}
+	}
 
 	var slugs []string
-	for slug := range hotBySlug {
+	for slug := range refBySlug {
 		slugs = append(slugs, slug)
 	}
 	if len(slugs) == 0 {
@@ -219,19 +251,22 @@ func runCheck(cfg Config, year int) bool {
 	var totalMissing, totalExtra int
 
 	for _, slug := range slugs {
-		hm := hotBySlug[slug]
-		hotFiles, err := findFiles(hm.dir)
+		rm := refBySlug[slug]
+		refFiles, err := findFiles(rm.dir)
 		if err != nil {
-			fmt.Printf("%s scanning %s on %s: %v\n", red("ERROR"), slug, hm.vol, err)
+			fmt.Printf("%s scanning %s on %s: %v\n", red("ERROR"), slug, rm.vol, err)
 			continue
 		}
-		hotSet := make(map[string]bool, len(hotFiles))
-		for _, f := range hotFiles {
-			hotSet[f.rel] = true
+		refSet := make(map[string]bool, len(refFiles))
+		for _, f := range refFiles {
+			refSet[f.rel] = true
 		}
 
 		var gaps []gap
 		for _, cold := range coldDrives {
+			if cold.name() == rm.coldVol {
+				continue // this drive is the reference, skip
+			}
 			coldDir := filepath.Join(cold.basePath(), cold.Root, yearStr, slug)
 			if !dirExists(coldDir) {
 				gaps = append(gaps, gap{
@@ -252,13 +287,13 @@ func runCheck(cfg Config, year int) bool {
 			}
 
 			var missing, extra []string
-			for _, f := range hotFiles {
+			for _, f := range refFiles {
 				if !coldSet[f.rel] {
 					missing = append(missing, f.rel)
 				}
 			}
 			for _, f := range coldFiles {
-				if !hotSet[f.rel] {
+				if !refSet[f.rel] {
 					extra = append(extra, f.rel)
 				}
 			}
