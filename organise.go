@@ -59,6 +59,11 @@ type organisePlan struct {
 	unsorted  []fileWithDate
 }
 
+// seasonOrder returns the chronological position of a season within the year.
+func seasonOrder(season string) int {
+	return map[string]int{"Spring": 0, "Summer": 1, "Autumn": 2, "Winter": 3}[season]
+}
+
 // seasonKey returns the season name for a timestamp, e.g. "Summer".
 // The year is omitted because it is already encoded in the year directory.
 func seasonKey(t time.Time) string {
@@ -150,7 +155,9 @@ func runOrganise(cfg Config, year int, skipConf bool, regroup bool) {
 	for s := range allSeasons {
 		seasons = append(seasons, s)
 	}
-	sort.Strings(seasons)
+	sort.Slice(seasons, func(i, j int) bool {
+		return seasonOrder(seasons[i]) < seasonOrder(seasons[j])
+	})
 	seasonSlug := make(map[string]string, len(seasons))
 	for i, s := range seasons {
 		seasonSlug[s] = fmt.Sprintf("%03d_%s", nextNum+i, s)
