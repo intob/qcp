@@ -234,12 +234,9 @@ func main() {
 
 	// print plan from scanned data
 	for _, sc := range scanned {
+		fmt.Printf("%s → %s\n", sc.src, strings.Join(dstRoots, ", "))
 		for _, f := range sc.files {
-			src := filepath.Join(sc.src, f.rel)
-			for _, dstRoot := range dstRoots {
-				dst := filepath.Join(dstRoot, sc.Volume, f.rel)
-				fmt.Printf("plan: %s\n      -> %s\n", src, dst)
-			}
+			fmt.Printf("  %s\n", f.rel)
 		}
 	}
 
