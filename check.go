@@ -8,9 +8,7 @@ import (
 	"strconv"
 )
 
-func runCheckMission(cfg Config, missionNum int, year int) {
-	yearStr := strconv.Itoa(year)
-
+func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bool {
 	var hotDrives, coldDrives []DriveConfig
 	for _, d := range cfg.Drives {
 		if !dirExists(d.basePath()) {
@@ -29,9 +27,27 @@ func runCheckMission(cfg Config, missionNum int, year int) {
 		exit(1, "no cold drives mounted")
 	}
 
-	slug, err := findMissionSlug(append(hotDrives, coldDrives...), yearStr, missionNum)
-	if err != nil {
-		exit(1, "mission %03d not found: %v", missionNum, err)
+	var searchYears []int
+	if yearExplicit {
+		searchYears = []int{year}
+	} else {
+		searchYears = allYears(cfg)
+		if len(searchYears) == 0 {
+			exit(1, "mission %03d not found", missionNum)
+		}
+	}
+
+	var slug, yearStr string
+	for _, y := range searchYears {
+		ys := strconv.Itoa(y)
+		s, err := findMissionSlug(append(hotDrives, coldDrives...), ys, missionNum)
+		if err == nil {
+			slug, yearStr = s, ys
+			break
+		}
+	}
+	if slug == "" {
+		exit(1, "mission %03d not found", missionNum)
 	}
 
 	var hotDir, hotVol string
@@ -55,17 +71,18 @@ func runCheckMission(cfg Config, missionNum int, year int) {
 		hotSet[f.rel] = true
 	}
 
-	var totalMissing, totalExtra int
+	var totalMissing, totalExtra, scanErrors int
 	for _, cold := range coldDrives {
 		coldDir := filepath.Join(cold.basePath(), cold.Root, yearStr, slug)
 		if !dirExists(coldDir) {
 			fmt.Printf("  %s %s\n", yellow(cold.name()), dim("(mission directory missing)"))
-			totalMissing++
+			totalMissing += len(hotFiles)
 			continue
 		}
 		coldFiles, err := findFiles(coldDir)
 		if err != nil {
 			fmt.Printf("%s scanning %s on %s: %v\n", red("ERROR"), slug, cold.name(), err)
+			scanErrors++
 			continue
 		}
 		coldSet := make(map[string]bool, len(coldFiles))
@@ -96,18 +113,21 @@ func runCheckMission(cfg Config, missionNum int, year int) {
 		}
 	}
 
-	if totalMissing == 0 && totalExtra == 0 {
+	if totalMissing == 0 && totalExtra == 0 && scanErrors == 0 {
 		fmt.Printf("%s %s complete on all cold drives\n", green("✓"), bold(slug))
-		return
+		return true
 	}
 	fmt.Println()
 	if totalMissing > 0 {
 		fmt.Printf("  %s files missing from cold drives", red(strconv.Itoa(totalMissing)))
+		if totalExtra > 0 {
+			fmt.Printf("  ·  %s extra files on cold drives", dim(strconv.Itoa(totalExtra)))
+		}
+		fmt.Println()
+	} else if totalExtra > 0 {
+		fmt.Printf("  %s extra files on cold drives\n", dim(strconv.Itoa(totalExtra)))
 	}
-	if totalExtra > 0 {
-		fmt.Printf("  ·  %s extra files on cold drives", dim(strconv.Itoa(totalExtra)))
-	}
-	fmt.Println()
+	return false
 }
 
 func runCheckAll(cfg Config) {

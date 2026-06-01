@@ -163,7 +163,10 @@ func pruneChecksums(root string) int {
 		}
 		if removed > 0 {
 			sort.Strings(kept)
-			os.WriteFile(path, []byte(strings.Join(kept, "\n")+"\n"), 0644)
+			if err := os.WriteFile(path, []byte(strings.Join(kept, "\n")+"\n"), 0644); err != nil {
+				fmt.Printf("%s updating %s: %v\n", red("ERROR"), path, err)
+				return nil
+			}
 			total += removed
 		}
 		return nil

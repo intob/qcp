@@ -129,7 +129,9 @@ func main() {
 
 	checkMission, hasCheck := parseMission(*checkMissionStr)
 	if hasCheck {
-		runCheckMission(cfg, checkMission, *year)
+		if !runCheckMission(cfg, checkMission, *year, yearExplicit) {
+			os.Exit(1)
+		}
 		return
 	}
 	if *doCheckAll {
