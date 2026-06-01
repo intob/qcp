@@ -27,15 +27,16 @@ Move the binary somewhere on your `$PATH`, e.g. `/usr/local/bin/qcp`.
     { "volume": "GoPro",  "sub": "DCIM" }
   ],
   "drives": [
-    { "volume": "T9",         "root": "",       "role": "hot" },
-    { "volume": "T7",         "root": "",       "role": "hot" },
+    { "volume": "T9",       "root": "",        "role": "hot" },
+    { "volume": "T7",       "root": "",        "role": "hot" },
+    { "volume": "Footage",  "path": "~/Footage", "root": "", "role": "hot" },
     { "volume": "ARCHIVE_01", "root": "Footage", "role": "cold" }
   ]
 }
 ```
 
 - **cards** — card volumes to ingest from. `volume` is a prefix — any mounted volume whose name starts with it will be picked up. `sub` is the subdirectory on the card containing footage.
-- **drives** — destination drives. `root` is the subdirectory on the drive under which year/mission dirs are created (empty = drive root). `role` is either `hot` (working SSD) or `cold` (archive HDD).
+- **drives** — destination drives. `volume` resolves to `/Volumes/<volume>` on macOS. Use `path` instead (e.g. `"~/Footage"`) for local directories not under `/Volumes`. If both are set, `volume` is used as the display name and `path` as the actual location. `root` is a subdirectory under which year/mission dirs are created (empty = drive root). `role` is `hot` (working SSD) or `cold` (archive HDD).
 
 Card `volume` values are prefix-matched against mounted volumes. A single entry `"CFEXP"` will match `CFEXP_01`, `CFEXP_02`, `CFEXP_250_01`, etc. — each landing in its own named subfolder. Check mounted names with `ls /Volumes/`.
 

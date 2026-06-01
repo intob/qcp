@@ -41,9 +41,28 @@ type CardConfig struct {
 }
 
 type DriveConfig struct {
-	Volume string `json:"volume"`
+	Volume string `json:"volume"` // display name and /Volumes/<volume> path (if Path not set)
+	Path   string `json:"path"`   // explicit path, e.g. "~/Footage" (overrides Volume for path)
 	Root   string `json:"root"`
 	Role   string `json:"role"` // "hot" or "cold"
+}
+
+func (d DriveConfig) basePath() string {
+	if d.Path != "" {
+		if strings.HasPrefix(d.Path, "~/") {
+			home, _ := os.UserHomeDir()
+			return filepath.Join(home, d.Path[2:])
+		}
+		return d.Path
+	}
+	return filepath.Join("/Volumes", d.Volume)
+}
+
+func (d DriveConfig) name() string {
+	if d.Volume != "" {
+		return d.Volume
+	}
+	return filepath.Base(d.basePath())
 }
 
 type mountedCard struct {
@@ -201,13 +220,18 @@ func main() {
 	}
 
 	var dstRoots []string
+	dstNames := make(map[string]string)    // dstRoot → display name
+	dstBase := make(map[string]string)     // dstRoot → base path for probeDrive
 	for _, d := range cfg.Drives {
-		vol := filepath.Join("/Volumes", d.Volume)
-		if !dirExists(vol) {
-			fmt.Printf("warning: %s not mounted, skipping\n", d.Volume)
+		base := d.basePath()
+		if !dirExists(base) {
+			fmt.Printf("warning: %s not mounted, skipping\n", d.name())
 			continue
 		}
-		dstRoots = append(dstRoots, filepath.Join(vol, d.Root, yearStr, missionSlug))
+		dstRoot := filepath.Join(base, d.Root, yearStr, missionSlug)
+		dstRoots = append(dstRoots, dstRoot)
+		dstNames[dstRoot] = d.name()
+		dstBase[dstRoot] = base
 	}
 	if len(dstRoots) == 0 {
 		exit(5, "no destination drives mounted")
@@ -290,7 +314,7 @@ func main() {
 	// probe destination drives once
 	dstInfos := make(map[string]driveInfo)
 	for _, dstRoot := range dstRoots {
-		dstInfos[dstRoot] = probeDrive("/Volumes/" + volName(dstRoot))
+		dstInfos[dstRoot] = probeDrive(dstBase[dstRoot])
 	}
 
 	// Phase 1: copy — per-drive pool, skipping files that already exist
@@ -321,7 +345,7 @@ func main() {
 		for _, fj := range missingByDst[dstRoot] {
 			size += fj.size
 		}
-		copyBars[dstRoot] = addBar(p1, volName(dstRoot), size)
+		copyBars[dstRoot] = addBar(p1, dstNames[dstRoot], size)
 	}
 
 	var results []*result
@@ -331,7 +355,7 @@ func main() {
 	for _, dstRoot := range dstRoots {
 		missing := missingByDst[dstRoot]
 		if len(missing) == 0 {
-			fmt.Printf("%s: already up to date\n", volName(dstRoot))
+			fmt.Printf("%s: already up to date\n", dstNames[dstRoot])
 			continue
 		}
 		pool := fnpool.NewPool(dstInfos[dstRoot].concurrency)
@@ -377,7 +401,7 @@ func main() {
 	p2 := mpb.NewWithContext(ctx, mpb.WithWidth(64))
 	verifyBars := make(map[string]*barTracker)
 	for _, dstRoot := range dstRoots {
-		verifyBars[dstRoot] = addBar(p2, volName(dstRoot), totalSize)
+		verifyBars[dstRoot] = addBar(p2, dstNames[dstRoot], totalSize)
 	}
 
 	var mu sync.Mutex
@@ -501,13 +525,6 @@ func probeDrive(volPath string) driveInfo {
 	return driveInfo{concurrency: concurrency, kind: kind, protocol: protocol}
 }
 
-func volName(dstRoot string) string {
-	parts := strings.SplitN(dstRoot, string(os.PathSeparator), 4)
-	if len(parts) >= 3 {
-		return parts[2]
-	}
-	return dstRoot
-}
 
 func runSync(cfg Config, year int, skipConf bool) {
 	yearStr := strconv.Itoa(year)
@@ -520,11 +537,11 @@ func runSync(cfg Config, year int, skipConf bool) {
 	}
 
 	scanDrive := func(d DriveConfig) (driveState, bool) {
-		vol := filepath.Join("/Volumes", d.Volume)
-		if !dirExists(vol) {
+		base := d.basePath()
+		if !dirExists(base) {
 			return driveState{}, false
 		}
-		yearDir := filepath.Join(vol, d.Root, yearStr)
+		yearDir := filepath.Join(base, d.Root, yearStr)
 		missions := make(map[string]bool)
 		if entries, err := os.ReadDir(yearDir); err == nil {
 			for _, e := range entries {
@@ -541,8 +558,8 @@ func runSync(cfg Config, year int, skipConf bool) {
 	for _, d := range cfg.Drives {
 		switch d.Role {
 		case "hot":
-			if !dirExists(filepath.Join("/Volumes", d.Volume)) {
-				fmt.Printf("warning: primary %s not mounted, skipping\n", d.Volume)
+			if !dirExists(d.basePath()) {
+				fmt.Printf("warning: primary %s not mounted, skipping\n", d.name())
 				continue
 			}
 			state, _ := scanDrive(d)
@@ -550,7 +567,7 @@ func runSync(cfg Config, year int, skipConf bool) {
 		case "cold":
 			state, ok := scanDrive(d)
 			if !ok {
-				fmt.Printf("warning: archive %s not mounted, skipping\n", d.Volume)
+				fmt.Printf("warning: archive %s not mounted, skipping\n", d.name())
 				continue
 			}
 			archives = append(archives, state)
@@ -602,12 +619,13 @@ func runSync(cfg Config, year int, skipConf bool) {
 
 	// find what primaries have that each archive doesn't
 	type syncJob struct {
-		slug   string
-		srcDir string
-		dstDir string
-		dstVol string
-		files  []fileEntry
-		size   int64
+		slug     string
+		srcDir   string
+		dstDir   string
+		dstVol   string // display name
+		dstBase  string // base path for probeDrive
+		files    []fileEntry
+		size     int64
 	}
 	var jobs []syncJob
 	for _, dst := range archives {
@@ -621,12 +639,13 @@ func runSync(cfg Config, year int, skipConf bool) {
 		for _, slug := range slugs {
 			ms := missionSources[slug]
 			jobs = append(jobs, syncJob{
-				slug:   slug,
-				srcDir: ms.srcDir,
-				dstDir: filepath.Join(dst.yearDir, slug),
-				dstVol: dst.Volume,
-				files:  ms.files,
-				size:   ms.size,
+				slug:    slug,
+				srcDir:  ms.srcDir,
+				dstDir:  filepath.Join(dst.yearDir, slug),
+				dstVol:  dst.name(),
+				dstBase: dst.basePath(),
+				files:   ms.files,
+				size:    ms.size,
 			})
 		}
 	}
@@ -685,9 +704,13 @@ func runSync(cfg Config, year int, skipConf bool) {
 
 	// probe each archive drive once and report
 	volInfo := make(map[string]driveInfo)
+	dstBaseByVol := make(map[string]string) // vol display name → base path
+	for _, j := range jobs {
+		dstBaseByVol[j.dstVol] = j.dstBase
+	}
 	fmt.Println()
 	for vol := range archiveSize {
-		info := probeDrive("/Volumes/" + vol)
+		info := probeDrive(dstBaseByVol[vol])
 		volInfo[vol] = info
 		fmt.Printf("  %s: %s\n", vol, info)
 	}
@@ -759,6 +782,11 @@ func runSync(cfg Config, year int, skipConf bool) {
 		verifyBars[vol] = addBar(p2, vol, size)
 	}
 
+	dstDirToVol := make(map[string]string) // dstDir → display name
+	for _, j := range jobs {
+		dstDirToVol[j.dstDir] = j.dstVol
+	}
+
 	var mu sync.Mutex
 	checksums := make(map[string][]string)
 	var verifyFailed atomic.Int64
@@ -769,8 +797,7 @@ func runSync(cfg Config, year int, skipConf bool) {
 		if r == nil || r.err != nil {
 			continue
 		}
-		vol := volName(r.dstRoot)
-		resultsByVol[vol] = append(resultsByVol[vol], r)
+		resultsByVol[dstDirToVol[r.dstRoot]] = append(resultsByVol[dstDirToVol[r.dstRoot]], r)
 	}
 
 	var wg2 sync.WaitGroup
@@ -784,7 +811,7 @@ func runSync(cfg Config, year int, skipConf bool) {
 				if ctx.Err() != nil {
 					return
 				}
-				got, err := hashFile(r.dst, verifyBars[volName(r.dstRoot)])
+				got, err := hashFile(r.dst, verifyBars[dstDirToVol[r.dstRoot]])
 				if err != nil || got != r.srcHash {
 					fmt.Printf("\nFAIL: %s\n", r.dst)
 					verifyFailed.Add(1)
@@ -874,21 +901,22 @@ func runVerify(cfg Config, missionNum int) {
 	yearStr := strconv.Itoa(time.Now().Year())
 
 	type dirEntry struct {
-		vol string
-		dir string
+		vol  string
+		dir  string
+		base string
 	}
 	var dirs []dirEntry
 	for _, d := range cfg.Drives {
-		vol := filepath.Join("/Volumes", d.Volume)
-		if !dirExists(vol) {
+		base := d.basePath()
+		if !dirExists(base) {
 			continue
 		}
 		slug, err := findMissionSlug(cfg.Drives, yearStr, missionNum)
 		if err != nil {
-			fmt.Printf("warning: mission %03d not found on %s\n", missionNum, d.Volume)
+			fmt.Printf("warning: mission %03d not found on %s\n", missionNum, d.name())
 			continue
 		}
-		dirs = append(dirs, dirEntry{d.Volume, filepath.Join(vol, d.Root, yearStr, slug)})
+		dirs = append(dirs, dirEntry{d.name(), filepath.Join(base, d.Root, yearStr, slug), base})
 	}
 	if len(dirs) == 0 {
 		exit(1, "mission %03d not found on any mounted drive", missionNum)
@@ -931,7 +959,7 @@ func runVerify(cfg Config, missionNum int) {
 	fmt.Printf("verifying mission %03d on %d drive(s)\n", missionNum, len(jobs))
 	volInfos := make(map[string]driveInfo)
 	for _, job := range jobs {
-		info := probeDrive("/Volumes/" + job.vol)
+		info := probeDrive(job.base)
 		volInfos[job.vol] = info
 		fmt.Printf("  %s: %s\n", job.vol, info)
 	}
@@ -990,26 +1018,27 @@ func runUpdate(cfg Config, missionNum int, year int, skipConf bool) {
 	// find primary and archive drives
 	var primaryDir string
 	type archiveDrive struct {
-		vol string
-		dir string
+		vol  string
+		dir  string
+		base string
 	}
 	var archives []archiveDrive
 	for _, d := range cfg.Drives {
-		vol := filepath.Join("/Volumes", d.Volume)
-		if !dirExists(vol) {
+		base := d.basePath()
+		if !dirExists(base) {
 			continue
 		}
-		dir := filepath.Join(vol, d.Root, yearStr, slug)
+		dir := filepath.Join(base, d.Root, yearStr, slug)
 		if d.Role == "hot" {
 			if !dirExists(dir) {
-				exit(1, "mission %03d not found on hot drive %s", missionNum, d.Volume)
+				exit(1, "mission %03d not found on hot drive %s", missionNum, d.name())
 			}
 			primaryDir = dir
 		} else {
 			if dirExists(dir) {
-				archives = append(archives, archiveDrive{d.Volume, dir})
+				archives = append(archives, archiveDrive{d.name(), dir, base})
 			} else {
-				fmt.Printf("warning: mission not found on %s, skipping\n", d.Volume)
+				fmt.Printf("warning: mission not found on %s, skipping\n", d.name())
 			}
 		}
 	}
@@ -1089,7 +1118,7 @@ func runUpdate(cfg Config, missionNum int, year int, skipConf bool) {
 	var trackers []*barTracker
 
 	for _, j := range jobs {
-		info := probeDrive("/Volumes/" + j.vol)
+		info := probeDrive(j.base)
 		bar := addBar(p1, j.vol, j.size)
 		trackers = append(trackers, bar)
 		pool := fnpool.NewPool(info.concurrency)
@@ -1159,9 +1188,13 @@ func runUpdate(cfg Config, missionNum int, year int, skipConf bool) {
 			resultsByVol[r.vol] = append(resultsByVol[r.vol], verifyItem{r.dst, r.rel, r.dstRoot, r.srcHash})
 		}
 	}
+	archiveBaseByVol := make(map[string]string)
+	for _, a := range archives {
+		archiveBaseByVol[a.vol] = a.base
+	}
 	updateVolInfos := make(map[string]driveInfo)
 	for vol := range resultsByVol {
-		updateVolInfos[vol] = probeDrive("/Volumes/" + vol)
+		updateVolInfos[vol] = probeDrive(archiveBaseByVol[vol])
 	}
 
 	for vol, rs := range resultsByVol {
@@ -1226,28 +1259,29 @@ func runChecksum(cfg Config, missionNum int, year int) {
 	}
 
 	type driveHashes struct {
-		vol  string
-		dir  string
+		vol    string
+		dir    string
+		base   string
 		hashes map[string]string // rel → hash
 	}
 
 	// find mission on all mounted drives
 	var drives []driveHashes
 	for _, d := range cfg.Drives {
-		vol := filepath.Join("/Volumes", d.Volume)
-		if !dirExists(vol) {
+		base := d.basePath()
+		if !dirExists(base) {
 			continue
 		}
-		dir := filepath.Join(vol, d.Root, yearStr, slug)
+		dir := filepath.Join(base, d.Root, yearStr, slug)
 		if !dirExists(dir) {
-			fmt.Printf("warning: mission not found on %s, skipping\n", d.Volume)
+			fmt.Printf("warning: mission not found on %s, skipping\n", d.name())
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(dir, "checksums.b3")); err == nil {
-			fmt.Printf("warning: %s already has checksums.b3, skipping\n", d.Volume)
+			fmt.Printf("warning: %s already has checksums.b3, skipping\n", d.name())
 			continue
 		}
-		drives = append(drives, driveHashes{vol: d.Volume, dir: dir, hashes: make(map[string]string)})
+		drives = append(drives, driveHashes{vol: d.name(), dir: dir, base: base, hashes: make(map[string]string)})
 	}
 	if len(drives) == 0 {
 		exit(1, "no drives to checksum (all missing or already have checksums.b3)")
@@ -1262,7 +1296,7 @@ func runChecksum(cfg Config, missionNum int, year int) {
 	fmt.Printf("checksumming mission %03d (%s) on %d drive(s)\n", missionNum, slug, len(drives))
 	driveInfos := make(map[string]driveInfo)
 	for _, d := range drives {
-		info := probeDrive("/Volumes/" + d.vol)
+		info := probeDrive(d.base)
 		driveInfos[d.vol] = info
 		fmt.Printf("  %s: %s\n", d.vol, info)
 	}
@@ -1476,7 +1510,7 @@ func missionManifestsMatch(a, b []fileEntry) bool {
 func findMissionSlug(drives []DriveConfig, yearStr string, num int) (string, error) {
 	prefix := fmt.Sprintf("%03d_", num)
 	for _, d := range drives {
-		yearDir := filepath.Join("/Volumes", d.Volume, d.Root, yearStr)
+		yearDir := filepath.Join(d.basePath(), d.Root, yearStr)
 		entries, err := os.ReadDir(yearDir)
 		if err != nil {
 			continue
