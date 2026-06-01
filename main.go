@@ -124,6 +124,7 @@ func main() {
 	pullMission, hasPull := parseMission(*pullMissionStr)
 
 	cfg := loadConfig()
+	keepAwake()
 
 	if *doClean {
 		runClean(cfg, *skipConf, yearExplicit, *year)

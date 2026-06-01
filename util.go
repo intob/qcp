@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strings"
@@ -227,6 +228,13 @@ func fmtSize(size uint64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f%cB", float64(size)/float64(div), "KMGTPE"[exp])
+}
+
+// keepAwake runs caffeinate -m in the background to prevent drive sleep.
+// It is killed automatically when the process exits.
+func keepAwake() {
+	cmd := exec.Command("caffeinate", "-m")
+	_ = cmd.Start()
 }
 
 func exit(code int, msg string, args ...any) {
