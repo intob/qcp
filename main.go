@@ -161,12 +161,28 @@ func main() {
 	skipConf := flag.Bool("y", false, "skip confirmation")
 	missionFlag := flag.String("mission", "", "mission name (e.g. \"Altissimo with Anton\")")
 	year := flag.Int("year", time.Now().Year(), "year override")
-	toMission := flag.Int("to", 0, "append to existing mission number")
-	verifyMission := flag.Int("verify", 0, "re-verify mission number across all mounted drives")
-	checksumMission := flag.Int("checksum", 0, "generate checksums.b3 for a mission by cross-verifying all mounted drives")
-	updateMission := flag.Int("update", 0, "copy files missing from cold drives for an existing mission")
+	toMissionStr := flag.String("to", "", "append to existing mission number")
+	verifyMissionStr := flag.String("verify", "", "re-verify mission number across all mounted drives")
+	checksumMissionStr := flag.String("checksum", "", "generate checksums.b3 for a mission by cross-verifying all mounted drives")
+	updateMissionStr := flag.String("update", "", "copy files missing from cold drives for an existing mission")
 	doSync := flag.Bool("sync", false, "sync missions from hot drives to cold drives")
 	flag.Parse()
+
+	parseMission := func(s string) (int, bool) {
+		if s == "" {
+			return 0, false
+		}
+		n, err := strconv.Atoi(s)
+		if err != nil || n <= 0 {
+			exit(1, "invalid mission number: %s", s)
+		}
+		return n, true
+	}
+
+	toMission, hasTo := parseMission(*toMissionStr)
+	verifyMission, hasVerify := parseMission(*verifyMissionStr)
+	checksumMission, hasChecksum := parseMission(*checksumMissionStr)
+	updateMission, hasUpdate := parseMission(*updateMissionStr)
 
 	cfg := loadConfig()
 
@@ -175,18 +191,18 @@ func main() {
 		return
 	}
 
-	if *updateMission > 0 {
-		runUpdate(cfg, *updateMission, *year, *skipConf)
+	if hasUpdate {
+		runUpdate(cfg, updateMission, *year, *skipConf)
 		return
 	}
 
-	if *verifyMission > 0 {
-		runVerify(cfg, *verifyMission)
+	if hasVerify {
+		runVerify(cfg, verifyMission)
 		return
 	}
 
-	if *checksumMission > 0 {
-		runChecksum(cfg, *checksumMission, *year)
+	if hasChecksum {
+		runChecksum(cfg, checksumMission, *year)
 		return
 	}
 
@@ -200,11 +216,11 @@ func main() {
 	var isAppend bool
 	var missionNum int
 
-	if *toMission > 0 {
+	if hasTo {
 		isAppend = true
-		slug, err := findMissionSlug(cfg.Drives, yearStr, *toMission)
+		slug, err := findMissionSlug(cfg.Drives, yearStr, toMission)
 		if err != nil {
-			exit(2, "mission %03d not found: %v", *toMission, err)
+			exit(2, "mission %03d not found: %v", toMission, err)
 		}
 		missionSlug = slug
 	} else {
