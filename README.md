@@ -1,18 +1,18 @@
 # qcp
 
-Fast, verified media ingest and archiving for camera cards. Copies footage from mounted cards to one or more drives, hashes every file with Blake3, and writes a `checksums.b3` manifest per mission. Subsequent commands use those manifests to verify integrity across drives.
+Fast, verified media ingest and archiving for camera cards. Copies footage from mounted cards to one or more drives, hashes every file with BLAKE3, and writes a `checksums.b3` manifest per mission. All subsequent commands use those manifests to verify integrity across drives.
 
-Designed for macOS. Drive type (HDD/SSD) is auto-detected via `diskutil` to set optimal I/O concurrency per destination.
+Designed for macOS. Drive type (HDD/SSD) is auto-detected via `diskutil` to set optimal I/O concurrency. Drives are kept awake during long operations.
 
 ---
 
-## Build
+## Install
 
-```
-go build -o qcp .
+```sh
+./install.sh
 ```
 
-Move the binary somewhere on your `$PATH`, e.g. `/usr/local/bin/qcp`.
+Builds with the current git version stamped in and installs to `$(go env GOPATH)/bin/qcp`.
 
 ---
 
@@ -27,33 +27,39 @@ Move the binary somewhere on your `$PATH`, e.g. `/usr/local/bin/qcp`.
     { "volume": "GoPro",  "sub": "DCIM" }
   ],
   "drives": [
-    { "volume": "T9",         "root": "",         "role": "hot" },
-    { "volume": "T7",         "root": "",         "role": "hot" },
+    { "volume": "T9",         "root": "",          "role": "hot" },
+    { "volume": "T7",         "root": "",          "role": "hot" },
     { "volume": "MAC",        "path": "~/Footage", "root": "", "role": "hot", "pull": false },
-    { "volume": "ARCHIVE_01", "root": "Footage",  "role": "cold" }
+    { "volume": "ARCHIVE_01", "root": "Footage",   "role": "cold" }
   ]
 }
 ```
 
-- **cards** — card volumes to ingest from. `volume` is a prefix — any mounted volume whose name starts with it will be picked up. `sub` is the subdirectory on the card containing footage.
-- **drives** — destination drives. `volume` resolves to `/Volumes/<volume>` on macOS. Use `path` instead (e.g. `"~/Footage"`) for local directories not under `/Volumes`. If both are set, `volume` is used as the display name and `path` as the actual location. `root` is a subdirectory under which year/mission dirs are created (empty = drive root). `role` is `hot` (working SSD) or `cold` (archive HDD). Set `"pull": false` to exclude a drive from `-pull` (useful for internal drives with limited space).
+**cards**
+- `volume` — prefix matched against mounted volumes. `CFEXP` matches `CFEXP_01`, `CFEXP_250_01`, etc. Each matched volume lands in its own named subfolder within the mission.
+- `sub` — subdirectory on the card containing footage.
 
-Card `volume` values are prefix-matched against mounted volumes. A single entry `"CFEXP"` will match `CFEXP_01`, `CFEXP_02`, `CFEXP_250_01`, etc. — each landing in its own named subfolder. Check mounted names with `ls /Volumes/`.
+**drives**
+- `volume` — resolves to `/Volumes/<volume>`. Use `path` instead for local directories (e.g. `"~/Footage"`). If both are set, `volume` is the display name and `path` is the location.
+- `root` — subdirectory under which year/mission dirs are created. Empty = drive root.
+- `role` — `hot` (working SSD/NVMe) or `cold` (archive HDD).
+- `pull` — set `false` to exclude a drive from `-pull` (useful for internal drives with limited space).
+
+Check mounted card names with `ls /Volumes/`.
 
 ---
 
 ## Mission layout
 
-Each ingest creates a numbered mission directory:
-
 ```
-<drive>/<root>/<year>/<NNN>_<slug>/
+<drive>/<root>/<year>/<NNN>_<name>/
   <card_volume>/
     <original file paths>
   checksums.b3
 ```
 
 Example with two CFexpress cards and a GoPro:
+
 ```
 T9/2026/042_Altissimo_with_Anton/
   CFEXP_250_01/
@@ -66,11 +72,7 @@ T9/2026/042_Altissimo_with_Anton/
   checksums.b3
 ```
 
-Each card gets its own subfolder named after the physical volume, so footage is always traceable back to the source media. `checksums.b3` is a sorted text file of `blake3_hash  relative_path` entries, one per file.
-
-### Naming convention
-
-Name your cards consistently and descriptively — the volume name becomes the subfolder name in every mission archive. A scheme like `CFEXP_250_01` (type, size in GB, card number) makes archives self-documenting without needing a separate log.
+Each card gets its own subfolder named after the physical volume — footage is always traceable to source media. `checksums.b3` is a sorted text file of `blake3_hash  relative_path` entries.
 
 `000_*` directories (e.g. `000_Edits`) sort to the top and are synced like any mission, but cannot be addressed by number-based commands.
 
@@ -78,137 +80,111 @@ Name your cards consistently and descriptively — the volume name becomes the s
 
 ## Commands
 
-### Status
+### Ingest
 
-```
-qcp -status
-qcp -status -year 2025
-```
-
-Dashboard view showing drive space and mission presence in one screen:
-
-```
-DRIVES
-  T9          ██████░░░░░░░░░░░░░░░░░░░░░░  847 GiB / 3.6 TiB   hot
-  T7          not mounted                                          hot
-  MAC         ███████████████████████████░  924 GiB / 926 GiB    hot  no-pull
-  ARCHIVE_01  ███████░░░░░░░░░░░░░░░░░░░░░  5.5 TiB / 21.8 TiB  cold
-
-MISSIONS  2026
-                                     T9  T7  MAC  ARCHIVE_01
-  016_Dos_d_Abramo                   T9  --  --   --
-  017_Dos_d_Abramo_Kristina_Edo      T9  --  --   --
-  018_Ballanhochst                   T9  --  --   --
+```sh
+qcp -ingest "Altissimo with Anton"
+qcp -ingest "Altissimo with Anton" -year 2025
+qcp -ingest "Altissimo with Anton" -y        # skip confirmation
 ```
 
-### List missions
+Scans all mounted cards, copies to every mounted drive, verifies each file against its BLAKE3 hash, and writes `checksums.b3`. Files already present are skipped — safe to run with partially mounted drives.
 
-```
-qcp -list
-qcp -list -year 2025
-```
-
-Same mission matrix as `-status` without the drive space section.
-
-### Ingest from cards
-
-```
-qcp -mission "Altissimo with Anton"
-```
-
-Scans all mounted cards, copies all files to every mounted drive, verifies each file against its Blake3 hash, and writes `checksums.b3`. Files already present at the destination are skipped.
-
-Flags:
-- `-year <N>` — override year (default: current year)
-- `-y` — skip confirmation prompt
-
-### Append to existing mission
-
-```
-qcp -to <N>
-```
-
-Adds files from currently mounted cards to an existing mission. Files already present at the destination are skipped, so you can safely run this with multiple cards mounted at different times.
-
-```
-qcp -to 42
+```sh
+qcp -to 42          # append cards to existing mission 42
 qcp -to 42 -year 2025
 ```
 
-### Sync hot → cold
+### Archive
 
-```
-qcp -sync
+```sh
+qcp -sync           # copy missions from hot drives to cold drives
 qcp -sync -y
-```
 
-Finds missions present on any hot drive but missing from cold drives, and copies them across. Missions found on multiple hot drives are cross-checked by file manifest before syncing — conflicts are reported and skipped.
-
-### Pull from cold to hot
-
-```
-qcp -pull <N>
-qcp -pull <N> -sub CFEXP_250_01
-qcp -pull <N> -year 2025
-```
-
-Copies a mission from cold storage back to mounted hot drives (excluding any marked `"pull": false`). Shows total size and available space per destination before confirming. Use `-sub` to pull only a specific subfolder (e.g. one camera's footage) rather than the full mission.
-
-### Update existing mission on cold drives
-
-```
-qcp -update <N>
+qcp -update 42      # copy files missing from cold drives for mission 42
 qcp -update 42 -year 2025
+
+qcp -pull 42                        # pull mission back to hot drives
+qcp -pull 42 -sub CFEXP_250_01      # pull only one card's subfolder
+qcp -pull 42 -year 2025
 ```
 
-Copies files present on hot drives but missing from cold drives for a specific mission. Useful for syncing new files added after the initial ingest (e.g. edit exports).
+`-sync` cross-checks file manifests across hot drives before copying — conflicts are reported and skipped. `-update` is for syncing new files added after the initial ingest (e.g. edit exports).
 
 ### Verify
 
-```
-qcp -verify <N>
+```sh
+qcp -verify 42              # re-verify all files in a mission
 qcp -verify 42 -year 2025
+
+qcp -checksum 42            # generate checksums.b3 for an existing mission
+qcp -checksum-all           # generate checksums.b3 for every mission in the year
 ```
 
-Re-hashes every file in a mission across all mounted drives and checks each against `checksums.b3`. Reports any failures.
+`-verify` re-hashes every file and checks against `checksums.b3`. Use `-checksum` / `-checksum-all` for missions that predate the manifest or were copied by other means — hashes all drives, cross-checks them, and writes `checksums.b3` only if all drives agree.
 
-### Generate checksums for existing missions
+### Info
 
+```sh
+qcp -list               # all years, newest first
+qcp -list -year 2026    # single year, per-mission drive presence
+
+qcp -status             # drive space + mission matrix for current year
+qcp -status -year 2025
+
+qcp -check              # scan all missions for missing files across drives
+qcp -check -year 2025
 ```
-qcp -checksum <N>
-qcp -checksum 42 -year 2025
+
+`-list` shows every mission grouped by year with drive presence columns — missions missing from a mounted drive are highlighted. `-check` compares each mission on the hot drive against every cold drive and reports missing or unexpected files.
+
+### Organise
+
+```sh
+qcp -organise           # group loose files into seasonal mission folders
+qcp -reorganise         # regroup already-organised missions by season
+qcp -renumber           # fix mission numbers to be sequential
+qcp -init               # scan drives and initialise missing sequence numbers
 ```
 
-For missions that pre-date `checksums.b3` (or were copied by other means): hashes all files on every mounted copy of the mission, cross-checks them against each other, and writes `checksums.b3` to all drives only if they all agree. Skips drives that already have a manifest.
+`-organise` extracts shoot dates from filenames and media metadata (via `ffprobe`) and groups files into `NNN_Spring`, `NNN_Summer`, `NNN_Autumn`, `NNN_Winter` folders. `-reorganise` re-runs the same grouping over already-numbered missions. `-renumber` fixes duplicate or gapped numbers after any reorganisation.
+
+### Maintenance
+
+```sh
+qcp -clean              # remove Synology metadata, Thumbs.db, etc.
+qcp -clean -year 2026   # limit to a specific year
+qcp -clean -y
+```
+
+### Flags
+
+```sh
+-year <N>    year override (default: current year)
+-y           skip confirmation prompts
+-version     print version and exit
+```
 
 ---
 
 ## Typical workflow
 
 ```sh
-# check drive space and what needs syncing
+# check drive space and mission status
 qcp -status
 
-# cards in — ingest to all mounted drives
-qcp -mission "Altissimo with Anton"
+# ingest from mounted cards
+qcp -ingest "Altissimo with Anton"
 
-# sync to cold archive HDDs
+# sync to cold archive
 qcp -sync
 
-# add edit exports to an existing mission
+# check all missions are complete on cold drives
+qcp -check
+
+# fix anything missing
 qcp -update 42
 
-# pull a mission back to hot storage for re-editing
-qcp -pull 42 -sub CFEXP_250_01
-
-# periodic integrity check
+# periodic integrity verification
 qcp -verify 42
 ```
-
----
-
-## Notes
-
-- Dotfiles (`.DS_Store`, `.Spotlight-V100`, etc.) are always skipped.
-- Drive type is detected via `diskutil info` — SSD gets 4 concurrent workers, HDD gets 1 (sequential I/O).
-- Interrupting a sync or ingest with `^C` prompts to clean up partial directories.
