@@ -78,6 +78,23 @@ Name your cards consistently and descriptively — the volume name becomes the s
 
 ## Commands
 
+### List missions
+
+```
+qcp -list
+qcp -list -year 2025
+```
+
+Shows all missions for the given year across every mounted drive, with a column per drive so gaps are immediately visible:
+
+```
+mission                          T9  T7  Footage  ARCHIVE_01
+─────────────────────────────────────────────────────────────
+014_Anton_Walenstadt_with_Westy  T9  T7           ARCHIVE_01
+016_Zurich_Rooftop               T9      Footage  ARCHIVE_01
+017_New_Mission                  T9
+```
+
 ### Ingest from cards
 
 ```
@@ -107,6 +124,7 @@ qcp -to 42 -year 2025
 
 ```
 qcp -sync
+qcp -sync -y
 ```
 
 Finds missions present on any hot drive but missing from cold drives, and copies them across. Missions found on multiple hot drives are cross-checked by file manifest before syncing — conflicts are reported and skipped.
