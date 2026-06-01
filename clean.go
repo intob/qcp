@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 
 )
 
@@ -40,13 +39,13 @@ func runClean(cfg Config, skipConf bool, yearExplicit bool, year int) {
 			}
 			name := de.Name()
 			if de.IsDir() {
-				if junkDirs[name] {
+				if isJunk(name, true) {
 					items = append(items, junkItem{path, true, 0})
 					return filepath.SkipDir
 				}
 				return nil
 			}
-			if junkFiles[name] || strings.HasPrefix(name, "._") {
+			if isJunk(name, false) {
 				if info, err := de.Info(); err == nil {
 					items = append(items, junkItem{path, false, info.Size()})
 				}

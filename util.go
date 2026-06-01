@@ -42,15 +42,27 @@ type mountedCard struct {
 
 // junkDirs are directories whose contents should never be ingested or synced.
 var junkDirs = map[string]bool{
-	"@eaDir":        true, // Synology extended attributes
-	"@SynoResource": true, // Synology resource forks
-	"@tmp":          true, // Synology temp
+	"@eaDir": true, // Synology extended attributes
+	"@tmp":   true, // Synology temp
 }
 
 // junkFiles are filenames that should always be skipped.
 var junkFiles = map[string]bool{
 	"Thumbs.db":   true,
 	"desktop.ini": true,
+}
+
+// isJunk reports whether a file or directory name should be treated as junk.
+// This covers exact matches (junkDirs, junkFiles) as well as Synology resource
+// fork entries which are named <original>@SynoResource.
+func isJunk(name string, isDir bool) bool {
+	if strings.HasSuffix(name, "@SynoResource") {
+		return true
+	}
+	if isDir {
+		return junkDirs[name]
+	}
+	return junkFiles[name] || strings.HasPrefix(name, "._")
 }
 
 func findFiles(root string) ([]fileEntry, error) {
@@ -64,18 +76,18 @@ func findFiles(root string) ([]fileEntry, error) {
 		}
 		name := d.Name()
 		if d.IsDir() {
-			if junkDirs[name] {
+			if isJunk(name, true) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 		rel := strings.TrimPrefix(path, root+string(os.PathSeparator))
 		for _, part := range strings.Split(rel, string(os.PathSeparator)) {
-			if strings.HasPrefix(part, ".") || junkDirs[part] {
+			if strings.HasPrefix(part, ".") || isJunk(part, true) {
 				return nil
 			}
 		}
-		if junkFiles[name] || strings.HasPrefix(name, "._") {
+		if isJunk(name, false) {
 			return nil
 		}
 		info, err := d.Info()
