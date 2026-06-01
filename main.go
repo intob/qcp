@@ -55,6 +55,7 @@ func usage() {
 	section("ORGANISE")
 	row("-organise", "", "group unorganised files into seasonal mission folders")
 	row("-reorganise", "", "regroup already-organised missions by season")
+	row("-renumber", "", "fix mission numbers to be sequential with no gaps or duplicates")
 	row("-init", "", "scan drives and initialise missing sequence numbers")
 
 	section("INFO")
@@ -92,6 +93,7 @@ func main() {
 	doInit := flag.Bool("init", false, "scan drives and initialise missing sequence numbers")
 	doOrganise := flag.Bool("organise", false, "group unorganised files into seasonal mission folders")
 	doReorganise := flag.Bool("reorganise", false, "regroup already-organised missions by season (re-runs organise over existing numbered folders)")
+	doRenumber := flag.Bool("renumber", false, "fix mission numbers to be sequential with no gaps or duplicates")
 	flag.Parse()
 
 	if *showVersion {
@@ -143,6 +145,11 @@ func main() {
 
 	if *doReorganise {
 		runOrganise(cfg, *year, *skipConf, true)
+		return
+	}
+
+	if *doRenumber {
+		runRenumber(cfg, *year, *skipConf)
 		return
 	}
 
