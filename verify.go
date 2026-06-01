@@ -7,10 +7,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 
-	"github.com/inneslabs/fnpool"
 	"github.com/vbauerster/mpb/v8"
 )
 
@@ -28,7 +26,7 @@ func runVerify(cfg Config, missionNum int, year int) {
 		if !dirExists(base) {
 			continue
 		}
-		slug, err := findMissionSlug(cfg.Drives, yearStr, missionNum)
+		slug, err := findMissionSlug([]DriveConfig{d}, yearStr, missionNum)
 		if err != nil {
 			fmt.Printf("warning: mission %03d not found on %s\n", missionNum, d.name())
 			continue
@@ -84,18 +82,17 @@ func runVerify(cfg Config, missionNum int, year int) {
 
 	p := mpb.New(mpb.WithWidth(64))
 	var failed atomic.Int64
-	var wg sync.WaitGroup
 	var trackers []*barTracker
+	var jobPools []*pool
 
 	for _, job := range jobs {
 		bar := addBar(p, job.vol, job.totalSize)
 		trackers = append(trackers, bar)
-		pool := fnpool.NewPool(volInfos[job.vol].concurrency)
+		wp := newPool(volInfos[job.vol].concurrency)
+		jobPools = append(jobPools, wp)
 		for _, e := range job.entries {
-			wg.Add(1)
 			e, dir, b := e, job.dir, bar
-			pool.Dispatch(func() {
-				defer wg.Done()
+			wp.run(func() {
 				got, err := hashFile(filepath.Join(dir, e.rel), b)
 				if err != nil {
 					fmt.Printf("\nERROR: %v\n", err)
@@ -109,7 +106,9 @@ func runVerify(cfg Config, missionNum int, year int) {
 			})
 		}
 	}
-	wg.Wait()
+	for _, wp := range jobPools {
+		wp.wait()
+	}
 	for _, t := range trackers {
 		t.flush()
 	}

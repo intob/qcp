@@ -216,6 +216,19 @@ func confirm() bool {
 	return resp == "y"
 }
 
+func fmtSize(size uint64) string {
+	const unit = uint64(1024)
+	if size < unit {
+		return fmt.Sprintf("%dB", size)
+	}
+	div, exp := unit, 0
+	for n := size / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f%cB", float64(size)/float64(div), "KMGTPE"[exp])
+}
+
 func exit(code int, msg string, args ...any) {
 	fmt.Printf(msg+"\n", args...)
 	os.Exit(code)

@@ -10,7 +10,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/inneslabs/fnpool"
 	"github.com/vbauerster/mpb/v8"
 )
 
@@ -89,11 +88,30 @@ func runChecksumYear(cfg Config, year int) {
 		if len(mDrives) == 0 {
 			continue
 		}
-		files, size, err := missionFiles(mDrives[0].dir)
-		if err != nil {
-			fmt.Printf("warning: error scanning %s: %v\n", slug, err)
+		fileSet := make(map[string]fileEntry)
+		for _, md := range mDrives {
+			fs, _, err := missionFiles(md.dir)
+			if err != nil {
+				fmt.Printf("warning: error scanning %s on %s: %v\n", slug, md.vol, err)
+				continue
+			}
+			for _, f := range fs {
+				if _, exists := fileSet[f.rel]; !exists {
+					fileSet[f.rel] = f
+				}
+			}
+		}
+		if len(fileSet) == 0 {
+			fmt.Printf("warning: no files found for %s\n", slug)
 			continue
 		}
+		var files []fileEntry
+		var size int64
+		for _, f := range fileSet {
+			files = append(files, f)
+			size += f.size
+		}
+		sort.Slice(files, func(a, b int) bool { return files[a].rel < files[b].rel })
 		jobs = append(jobs, missionJob{slug, mDrives, files, size})
 	}
 
@@ -146,18 +164,17 @@ func runChecksumYear(cfg Config, year int) {
 	for i, j := range jobs {
 		labelVal.Store(fmt.Sprintf("[%d/%d]", i+1, len(jobs)))
 
-		var wg sync.WaitGroup
 		var mu sync.Mutex
 		var failed atomic.Int64
+		var drivePools []*pool
 
 		for k := range j.drives {
 			md := &j.drives[k]
-			pool := fnpool.NewPool(volInfo[md.vol].concurrency)
+			dp := newPool(volInfo[md.vol].concurrency)
+			drivePools = append(drivePools, dp)
 			for _, f := range j.files {
-				wg.Add(1)
 				f := f
-				pool.Dispatch(func() {
-					defer wg.Done()
+				dp.run(func() {
 					hash, err := hashFile(filepath.Join(md.dir, f.rel), bars[md.vol])
 					if err != nil {
 						fmt.Printf("\nERROR [%s] %s: %v\n", md.vol, f.rel, err)
@@ -170,7 +187,9 @@ func runChecksumYear(cfg Config, year int) {
 				})
 			}
 		}
-		wg.Wait()
+		for _, dp := range drivePools {
+			dp.wait()
+		}
 
 		if failed.Load() > 0 {
 			totalFailed.Add(failed.Load())
@@ -256,11 +275,30 @@ func runChecksum(cfg Config, missionNum int, year int) {
 		exit(1, "no drives to checksum (all missing or already have checksums.b3)")
 	}
 
-	// collect file list from first drive (all should be identical post-sync)
-	files, totalSize, err := missionFiles(drives[0].dir)
-	if err != nil {
-		exit(1, "error scanning %s: %v", drives[0].vol, err)
+	// union file lists from all drives so files absent from drives[0] are not silently omitted
+	fileSet := make(map[string]fileEntry)
+	for _, d := range drives {
+		fs, _, err := missionFiles(d.dir)
+		if err != nil {
+			fmt.Printf("warning: error scanning %s: %v\n", d.vol, err)
+			continue
+		}
+		for _, f := range fs {
+			if _, exists := fileSet[f.rel]; !exists {
+				fileSet[f.rel] = f
+			}
+		}
 	}
+	if len(fileSet) == 0 {
+		exit(1, "no files found for mission %03d", missionNum)
+	}
+	var files []fileEntry
+	var totalSize int64
+	for _, f := range fileSet {
+		files = append(files, f)
+		totalSize += f.size
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].rel < files[j].rel })
 
 	fmt.Printf("checksumming mission %03d (%s) on %d drive(s)\n", missionNum, slug, len(drives))
 	driveInfos := make(map[string]driveInfo)
@@ -275,19 +313,18 @@ func runChecksum(cfg Config, missionNum int, year int) {
 	p := mpb.New(mpb.WithWidth(64))
 	var mu sync.Mutex
 	var failed atomic.Int64
-	var wg sync.WaitGroup
 	var trackers []*barTracker
+	var drivePools []*pool
 
 	for i := range drives {
 		d := &drives[i]
 		bar := addBar(p, d.vol, totalSize)
 		trackers = append(trackers, bar)
-		pool := fnpool.NewPool(driveInfos[d.vol].concurrency)
+		dp := newPool(driveInfos[d.vol].concurrency)
+		drivePools = append(drivePools, dp)
 		for _, f := range files {
-			wg.Add(1)
 			f := f
-			pool.Dispatch(func() {
-				defer wg.Done()
+			dp.run(func() {
 				hash, err := hashFile(filepath.Join(d.dir, f.rel), bar)
 				if err != nil {
 					fmt.Printf("\nERROR [%s]: %v\n", d.vol, err)
@@ -300,7 +337,9 @@ func runChecksum(cfg Config, missionNum int, year int) {
 			})
 		}
 	}
-	wg.Wait()
+	for _, dp := range drivePools {
+		dp.wait()
+	}
 	for _, t := range trackers {
 		t.flush()
 	}

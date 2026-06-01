@@ -15,8 +15,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/inneslabs/fnpool"
-	"github.com/inneslabs/jfmt"
 	"github.com/vbauerster/mpb/v8"
 )
 
@@ -244,7 +242,7 @@ func main() {
 		os.Exit(130)
 	}()
 
-	sizeStr := jfmt.FmtSize64(uint64(totalSize))
+	sizeStr := fmtSize(uint64(totalSize))
 	fmt.Printf("\ncopying %d files (%s) to %d drive(s)\n\n", totalFiles, sizeStr, len(dstRoots))
 
 	// probe destination drives once
@@ -287,20 +285,19 @@ func main() {
 	var results []*result
 	var resultsMu sync.Mutex
 	var total atomic.Int64
-	var wg sync.WaitGroup
+	var copyPools []*pool
 	for _, dstRoot := range dstRoots {
 		missing := missingByDst[dstRoot]
 		if len(missing) == 0 {
 			fmt.Printf("%s: already up to date\n", dstNames[dstRoot])
 			continue
 		}
-		pool := fnpool.NewPool(dstInfos[dstRoot].concurrency)
+		wp := newPool(dstInfos[dstRoot].concurrency)
+		copyPools = append(copyPools, wp)
 		for _, fj := range missing {
-			wg.Add(1)
 			fj := fj
 			o := prepJob(fj.src, fj.dst, fj.rel, fj.dstRoot, copyBars[fj.dstRoot])
-			pool.Dispatch(func() {
-				defer wg.Done()
+			wp.run(func() {
 				if ctx.Err() != nil {
 					return
 				}
@@ -316,7 +313,9 @@ func main() {
 			})
 		}
 	}
-	wg.Wait()
+	for _, wp := range copyPools {
+		wp.wait()
+	}
 	for _, t := range copyBars {
 		t.flush()
 	}
@@ -343,20 +342,19 @@ func main() {
 	var mu sync.Mutex
 	newChecksums := make(map[string][]string)
 	var verifyFailed atomic.Int64
-	var wg2 sync.WaitGroup
 	resultsByDst := make(map[string][]*result)
 	for _, r := range results {
 		if r != nil && r.err == nil {
 			resultsByDst[r.dstRoot] = append(resultsByDst[r.dstRoot], r)
 		}
 	}
+	var verifyPools []*pool
 	for dstRoot, rs := range resultsByDst {
-		pool2 := fnpool.NewPool(dstInfos[dstRoot].concurrency)
+		wp := newPool(dstInfos[dstRoot].concurrency)
+		verifyPools = append(verifyPools, wp)
 		for _, r := range rs {
-			wg2.Add(1)
 			r := r
-			pool2.Dispatch(func() {
-				defer wg2.Done()
+			wp.run(func() {
 				if ctx.Err() != nil {
 					return
 				}
@@ -378,7 +376,9 @@ func main() {
 			})
 		}
 	}
-	wg2.Wait()
+	for _, wp := range verifyPools {
+		wp.wait()
+	}
 	for _, t := range verifyBars {
 		t.flush()
 	}
@@ -390,15 +390,13 @@ func main() {
 
 	for dstRoot, lines := range newChecksums {
 		cPath := filepath.Join(dstRoot, "checksums.b3")
-		if isAppend {
-			lines = mergeChecksums(cPath, lines)
-		}
+		lines = mergeChecksums(cPath, lines)
 		sort.Strings(lines)
 		if err := os.WriteFile(cPath, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
 			fmt.Printf("ERROR writing checksums: %v\n", err)
 		}
 	}
 
-	perDrive := jfmt.FmtSize64(uint64(total.Load()) / uint64(len(dstRoots)))
+	perDrive := fmtSize(uint64(total.Load()) / uint64(len(dstRoots)))
 	fmt.Printf("\n%s copied and verified → %s\n", perDrive, missionSlug)
 }

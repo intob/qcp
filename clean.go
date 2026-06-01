@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/inneslabs/jfmt"
 )
 
 func runClean(cfg Config, skipConf bool, yearExplicit bool, year int) {
@@ -34,7 +33,7 @@ func runClean(cfg Config, skipConf bool, yearExplicit bool, year int) {
 		}
 		fmt.Printf("scanning %s...\n", d.name())
 
-		filepath.WalkDir(root, func(path string, de fs.DirEntry, err error) error {
+		if err := filepath.WalkDir(root, func(path string, de fs.DirEntry, err error) error {
 			if err != nil {
 				fmt.Printf("warning: %v\n", err)
 				return nil
@@ -53,7 +52,9 @@ func runClean(cfg Config, skipConf bool, yearExplicit bool, year int) {
 				}
 			}
 			return nil
-		})
+		}); err != nil {
+			fmt.Printf("warning: walk error on %s: %v\n", d.name(), err)
+		}
 	}
 
 	if len(items) == 0 {
@@ -70,12 +71,12 @@ func runClean(cfg Config, skipConf bool, yearExplicit bool, year int) {
 		} else {
 			fileCount++
 			totalFileSize += item.size
-			fmt.Printf("  [file] %s  (%s)\n", item.path, jfmt.FmtSize64(uint64(item.size)))
+			fmt.Printf("  [file] %s  (%s)\n", item.path, fmtSize(uint64(item.size)))
 		}
 	}
 	fmt.Printf("\n%d dir(s), %d file(s)", dirCount, fileCount)
 	if totalFileSize > 0 {
-		fmt.Printf(", %s in files", jfmt.FmtSize64(uint64(totalFileSize)))
+		fmt.Printf(", %s in files", fmtSize(uint64(totalFileSize)))
 	}
 	fmt.Println()
 

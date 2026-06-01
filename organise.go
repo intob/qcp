@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/inneslabs/jfmt"
 )
 
 // datePatterns extracts YYYY MM DD from common camera filename conventions.
@@ -314,7 +313,7 @@ func buildOrganisePlan(yearDir, driveName string, files []fileWithDate, seasonSl
 
 func printOrganisePlan(p organisePlan) {
 	for _, m := range p.missions {
-		fmt.Printf("  %s  (%d files, %s)\n", m.slug, len(m.files), jfmt.FmtSize64(uint64(m.size)))
+		fmt.Printf("  %s  (%d files, %s)\n", m.slug, len(m.files), fmtSize(uint64(m.size)))
 		shown := m.files
 		if len(shown) > 4 {
 			shown = shown[:4]

@@ -9,7 +9,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/inneslabs/jfmt"
 )
 
 func runStatus(cfg Config, year int) {
@@ -47,7 +46,7 @@ func runStatus(cfg Config, year int) {
 		bar := driveSpaceBar(used, total, barWidth)
 		fmt.Printf("  %s  %s  %s / %s  %s\n",
 			name, bar,
-			jfmt.FmtSize64(used), jfmt.FmtSize64(total),
+			fmtSize(used), fmtSize(total),
 			tags)
 	}
 

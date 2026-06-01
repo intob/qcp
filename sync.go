@@ -14,8 +14,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/inneslabs/fnpool"
-	"github.com/inneslabs/jfmt"
 	"github.com/vbauerster/mpb/v8"
 )
 
@@ -225,14 +223,13 @@ func runSync(cfg Config, year int, skipConf bool) {
 	var results []*result
 	var resultsMu sync.Mutex
 	var total atomic.Int64
-	var wg sync.WaitGroup
+	var copyPools []*pool
 	for vol, ops := range opsByVol {
-		pool := fnpool.NewPool(volInfo[vol].concurrency)
+		wp := newPool(volInfo[vol].concurrency)
+		copyPools = append(copyPools, wp)
 		for _, o := range ops {
-			wg.Add(1)
 			o := o
-			pool.Dispatch(func() {
-				defer wg.Done()
+			wp.run(func() {
 				if ctx.Err() != nil {
 					return
 				}
@@ -248,7 +245,9 @@ func runSync(cfg Config, year int, skipConf bool) {
 			})
 		}
 	}
-	wg.Wait()
+	for _, wp := range copyPools {
+		wp.wait()
+	}
 	for _, t := range copyBars {
 		t.flush()
 	}
@@ -293,14 +292,13 @@ func runSync(cfg Config, year int, skipConf bool) {
 		resultsByVol[dstDirToVol[r.dstRoot]] = append(resultsByVol[dstDirToVol[r.dstRoot]], r)
 	}
 
-	var wg2 sync.WaitGroup
+	var verifyPools []*pool
 	for vol, rs := range resultsByVol {
-		pool2 := fnpool.NewPool(volInfo[vol].concurrency)
+		wp := newPool(volInfo[vol].concurrency)
+		verifyPools = append(verifyPools, wp)
 		for _, r := range rs {
-			wg2.Add(1)
 			r := r
-			pool2.Dispatch(func() {
-				defer wg2.Done()
+			wp.run(func() {
 				if ctx.Err() != nil {
 					return
 				}
@@ -317,7 +315,9 @@ func runSync(cfg Config, year int, skipConf bool) {
 			})
 		}
 	}
-	wg2.Wait()
+	for _, wp := range verifyPools {
+		wp.wait()
+	}
 	for _, t := range verifyBars {
 		t.flush()
 	}
@@ -333,7 +333,7 @@ func runSync(cfg Config, year int, skipConf bool) {
 			[]byte(strings.Join(lines, "\n")+"\n"), 0644)
 	}
 
-	perArchive := jfmt.FmtSize64(uint64(total.Load()) / uint64(len(archiveSize)))
+	perArchive := fmtSize(uint64(total.Load()) / uint64(len(archiveSize)))
 	fmt.Printf("\n%s synced to %d archive(s)\n", perArchive, len(archiveSize))
 }
 

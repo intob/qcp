@@ -10,8 +10,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/inneslabs/fnpool"
-	"github.com/inneslabs/jfmt"
 	"github.com/vbauerster/mpb/v8"
 )
 
@@ -107,7 +105,7 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 	for _, f := range files {
 		totalSrc += f.size
 	}
-	fmt.Printf("pull: %s from %s (%s total)\n\n", slug, srcVol, jfmt.FmtSize64(uint64(totalSrc)))
+	fmt.Printf("pull: %s from %s (%s total)\n\n", slug, srcVol, fmtSize(uint64(totalSrc)))
 	allUpToDate := true
 	for _, d := range dsts {
 		avail := availableBytes(d.base)
@@ -121,11 +119,11 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 		if d.size > int64(avail) {
 			warn = " ⚠ insufficient space"
 		}
-		fmt.Printf("  %-12s %s to copy", d.name, jfmt.FmtSize64(uint64(d.size)))
+		fmt.Printf("  %-12s %s to copy", d.name, fmtSize(uint64(d.size)))
 		if alreadyBytes > 0 {
-			fmt.Printf(", %s already present", jfmt.FmtSize64(uint64(alreadyBytes)))
+			fmt.Printf(", %s already present", fmtSize(uint64(alreadyBytes)))
 		}
-		fmt.Printf("  (%s available)%s\n", jfmt.FmtSize64(avail), warn)
+		fmt.Printf("  (%s available)%s\n", fmtSize(avail), warn)
 	}
 	if allUpToDate {
 		fmt.Println("all hot drives already up to date")
@@ -139,10 +137,10 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 	// copy
 	fmt.Printf("\ncopying...\n\n")
 	p1 := mpb.New(mpb.WithWidth(64))
-	var wg sync.WaitGroup
 	var results []*result
 	var resultsMu sync.Mutex
 	var trackers []*barTracker
+	var copyPools []*pool
 
 	for _, d := range dsts {
 		if len(d.missing) == 0 {
@@ -151,14 +149,13 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 		info := probeDrive(d.base)
 		bar := addBar(p1, d.name, d.size)
 		trackers = append(trackers, bar)
-		pool := fnpool.NewPool(info.concurrency)
+		wp := newPool(info.concurrency)
+		copyPools = append(copyPools, wp)
 		for _, f := range d.missing {
-			wg.Add(1)
 			f, dstRoot, b := f, d.dir, bar
 			src := filepath.Join(srcDir, f.rel)
 			dst := filepath.Join(dstRoot, f.rel)
-			pool.Dispatch(func() {
-				defer wg.Done()
+			wp.run(func() {
 				r := job(src, dst, b)
 				r.dst = dst
 				r.rel = f.rel
@@ -172,7 +169,9 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 			})
 		}
 	}
-	wg.Wait()
+	for _, wp := range copyPools {
+		wp.wait()
+	}
 	for _, t := range trackers {
 		t.flush()
 	}
@@ -209,7 +208,6 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 	}
 
 	var verifyFailed atomic.Int64
-	var wg2 sync.WaitGroup
 	newHashes := make(map[string][]string)
 	var newHashesMu sync.Mutex
 	resultsByDst := make(map[string][]*result)
@@ -218,14 +216,14 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 			resultsByDst[r.dstRoot] = append(resultsByDst[r.dstRoot], r)
 		}
 	}
+	var verifyPools []*pool
 	for dstRoot, rs := range resultsByDst {
 		info := probeDrive(dstRootToBase[dstRoot])
-		pool2 := fnpool.NewPool(info.concurrency)
+		wp := newPool(info.concurrency)
+		verifyPools = append(verifyPools, wp)
 		for _, r := range rs {
-			wg2.Add(1)
 			r := r
-			pool2.Dispatch(func() {
-				defer wg2.Done()
+			wp.run(func() {
 				got, err := hashFile(r.dst, verifyTrackers[r.dstRoot])
 				if err != nil || got != r.srcHash {
 					fmt.Printf("\nFAIL: %s\n", r.dst)
@@ -238,7 +236,9 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 			})
 		}
 	}
-	wg2.Wait()
+	for _, wp := range verifyPools {
+		wp.wait()
+	}
 	for _, t := range verifyTrackers {
 		t.flush()
 	}

@@ -10,8 +10,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/inneslabs/fnpool"
-	"github.com/inneslabs/jfmt"
 	"github.com/vbauerster/mpb/v8"
 )
 
@@ -103,7 +101,7 @@ func runUpdate(cfg Config, missionNum int, year int, skipConf bool) {
 	}
 
 	for _, j := range jobs {
-		fmt.Printf("update: %d file(s) (%s) → %s\n", len(j.missing), jfmt.FmtSize64(uint64(j.size)), j.vol)
+		fmt.Printf("update: %d file(s) (%s) → %s\n", len(j.missing), fmtSize(uint64(j.size)), j.vol)
 	}
 	if !skipConf && !confirm() {
 		exit(0, "aborted")
@@ -121,21 +119,20 @@ func runUpdate(cfg Config, missionNum int, year int, skipConf bool) {
 		err     error
 	}
 	var resultsMu sync.Mutex
-	var wg sync.WaitGroup
 	var trackers []*barTracker
+	var copyPools []*pool
 
 	for _, j := range jobs {
 		info := probeDrive(j.base)
 		bar := addBar(p1, j.vol, j.size)
 		trackers = append(trackers, bar)
-		pool := fnpool.NewPool(info.concurrency)
+		wp := newPool(info.concurrency)
+		copyPools = append(copyPools, wp)
 		for _, f := range j.missing {
-			wg.Add(1)
 			f, dstRoot := f, j.dir
 			src := filepath.Join(primaryDir, f.rel)
 			dst := filepath.Join(dstRoot, f.rel)
-			pool.Dispatch(func() {
-				defer wg.Done()
+			wp.run(func() {
 				r := job(src, dst, bar)
 				resultsMu.Lock()
 				copyResults = append(copyResults, struct {
@@ -153,7 +150,9 @@ func runUpdate(cfg Config, missionNum int, year int, skipConf bool) {
 			})
 		}
 	}
-	wg.Wait()
+	for _, wp := range copyPools {
+		wp.wait()
+	}
 	for _, t := range trackers {
 		t.flush()
 	}
@@ -184,7 +183,6 @@ func runUpdate(cfg Config, missionNum int, year int, skipConf bool) {
 	}
 
 	var verifyFailed atomic.Int64
-	var wg2 sync.WaitGroup
 	newHashes := make(map[string][]string) // dstRoot → "hash  rel" lines
 	var newHashesMu sync.Mutex
 
@@ -204,13 +202,13 @@ func runUpdate(cfg Config, missionNum int, year int, skipConf bool) {
 		updateVolInfos[vol] = probeDrive(archiveBaseByVol[vol])
 	}
 
+	var verifyPools []*pool
 	for vol, rs := range resultsByVol {
-		pool2 := fnpool.NewPool(updateVolInfos[vol].concurrency)
+		wp := newPool(updateVolInfos[vol].concurrency)
+		verifyPools = append(verifyPools, wp)
 		for _, r := range rs {
-			wg2.Add(1)
 			r := r
-			pool2.Dispatch(func() {
-				defer wg2.Done()
+			wp.run(func() {
 				got, err := hashFile(r.dst, verifyTrackers[vol])
 				if err != nil || got != r.srcHash {
 					fmt.Printf("\nFAIL: %s\n", r.dst)
@@ -223,7 +221,9 @@ func runUpdate(cfg Config, missionNum int, year int, skipConf bool) {
 			})
 		}
 	}
-	wg2.Wait()
+	for _, wp := range verifyPools {
+		wp.wait()
+	}
 	for _, t := range verifyTrackers {
 		t.flush()
 	}
