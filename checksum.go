@@ -239,11 +239,11 @@ func runChecksumYear(cfg Config, year int) {
 	fmt.Printf("\n%s %d mission(s) checksummed\n", green("✓"), len(jobs))
 }
 
-func runChecksum(cfg Config, missionNum int, year int) {
+func runChecksum(cfg Config, query string, year int) {
 	yearStr := strconv.Itoa(year)
-	slug, err := findMissionSlug(cfg.Drives, yearStr, missionNum)
+	slug, err := resolveMission(cfg.Drives, yearStr, query)
 	if err != nil {
-		exit(1, "mission %03d not found: %v", missionNum, err)
+		exit(1, "%v", err)
 	}
 
 	type driveHashes struct {
@@ -290,7 +290,7 @@ func runChecksum(cfg Config, missionNum int, year int) {
 		}
 	}
 	if len(fileSet) == 0 {
-		exit(1, "no files found for mission %03d", missionNum)
+		exit(1, "no files found for mission %q", query)
 	}
 	var files []fileEntry
 	var totalSize int64
@@ -300,7 +300,7 @@ func runChecksum(cfg Config, missionNum int, year int) {
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].rel < files[j].rel })
 
-	fmt.Printf("checksumming mission %s (%s) on %s drive(s)\n", bold(fmt.Sprintf("%03d", missionNum)), slug, bold(strconv.Itoa(len(drives))))
+	fmt.Printf("checksumming %s on %s drive(s)\n", bold(slug), bold(strconv.Itoa(len(drives))))
 	driveInfos := make(map[string]driveInfo)
 	for _, d := range drives {
 		info := probeDrive(d.base)

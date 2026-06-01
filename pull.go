@@ -13,11 +13,11 @@ import (
 	"github.com/vbauerster/mpb/v8"
 )
 
-func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
+func runPull(cfg Config, query string, year int, sub string, skipConf bool) {
 	yearStr := strconv.Itoa(year)
-	slug, err := findMissionSlug(cfg.Drives, yearStr, missionNum)
+	slug, err := resolveMission(cfg.Drives, yearStr, query)
 	if err != nil {
-		exit(1, "mission %03d not found: %v", missionNum, err)
+		exit(1, "%v", err)
 	}
 
 	// find source on a cold drive
@@ -36,7 +36,7 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 		}
 	}
 	if srcDir == "" {
-		exit(1, "mission %03d not found on any cold drive", missionNum)
+		exit(1, "mission %q not found on any cold drive", query)
 	}
 
 	// scan source files, filtered by sub if set
@@ -44,7 +44,7 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 	if sub != "" {
 		subDir := filepath.Join(srcDir, sub)
 		if !dirExists(subDir) {
-			exit(1, "subfolder %q not found in mission %03d", sub, missionNum)
+			exit(1, "subfolder %q not found in mission %q", sub, query)
 		}
 		subFiles, err := findFiles(subDir)
 		if err != nil {
@@ -60,7 +60,7 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 		}
 	}
 	if len(files) == 0 {
-		exit(1, "no files found in mission %03d", missionNum)
+		exit(1, "no files found in mission %q", query)
 	}
 
 	// find destination hot drives where pull is allowed

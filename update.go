@@ -13,11 +13,11 @@ import (
 	"github.com/vbauerster/mpb/v8"
 )
 
-func runUpdate(cfg Config, missionNum int, year int, skipConf bool) {
+func runUpdate(cfg Config, query string, year int, skipConf bool) {
 	yearStr := strconv.Itoa(year)
-	slug, err := findMissionSlug(cfg.Drives, yearStr, missionNum)
+	slug, err := resolveMission(cfg.Drives, yearStr, query)
 	if err != nil {
-		exit(1, "mission %03d not found: %v", missionNum, err)
+		exit(1, "%v", err)
 	}
 
 	// find primary and archive drives
@@ -36,7 +36,7 @@ func runUpdate(cfg Config, missionNum int, year int, skipConf bool) {
 		dir := filepath.Join(base, d.Root, yearStr, slug)
 		if d.Role == "hot" {
 			if !dirExists(dir) {
-				exit(1, "mission %03d not found on hot drive %s", missionNum, d.name())
+				exit(1, "mission %q not found on hot drive %s", query, d.name())
 			}
 			primaryDir = dir
 		} else {
