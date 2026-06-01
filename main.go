@@ -1441,11 +1441,17 @@ func hashFile(path string, bar *barTracker) (string, error) {
 }
 
 func mountedCards(cfgs []CardConfig) []mountedCard {
+	volumes, _ := os.ReadDir("/Volumes")
 	var out []mountedCard
 	for _, c := range cfgs {
-		src := filepath.Join("/Volumes", c.Volume, c.Sub)
-		if dirExists(src) {
-			out = append(out, mountedCard{c, src})
+		for _, vol := range volumes {
+			if !strings.HasPrefix(vol.Name(), c.Volume) {
+				continue
+			}
+			src := filepath.Join("/Volumes", vol.Name(), c.Sub)
+			if dirExists(src) {
+				out = append(out, mountedCard{CardConfig{Volume: vol.Name(), Sub: c.Sub}, src})
+			}
 		}
 	}
 	return out
