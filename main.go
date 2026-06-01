@@ -447,7 +447,14 @@ func main() {
 }
 
 func addBar(p *mpb.Progress, name string, total int64) *barTracker {
-	bar := p.AddBar(total,
+	style := mpb.BarStyle().
+		Lbound("").
+		Filler("█").
+		Tip("▌").
+		Padding("░").
+		Rbound("")
+	bar := p.New(total,
+		style,
 		mpb.PrependDecorators(
 			decor.Name(fmt.Sprintf("%-12s", name)),
 			decor.CountersKibiByte("% .1f / % .1f  "),
