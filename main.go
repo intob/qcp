@@ -43,6 +43,7 @@ func usage() {
 
 	section("ARCHIVE")
 	row("-sync", "", "sync missions from hot drives to cold drives")
+	row("-replicate", "", "replicate missions between cold drives")
 	row("-pull", "n", "pull mission from cold storage to hot drives")
 	row("  -sub", "dir", "subdirectory within mission to pull")
 
@@ -86,6 +87,7 @@ func main() {
 	pullMissionStr := flag.String("pull", "", "pull a mission from cold storage to hot drives")
 	pullSub := flag.String("sub", "", "subdirectory within mission to pull (e.g. CFEXP_250_01)")
 	doSync := flag.Bool("sync", false, "sync missions from hot drives to cold drives")
+	doReplicate := flag.Bool("replicate", false, "replicate missions between cold drives")
 	doList := flag.Bool("list", false, "list missions across all mounted drives")
 	doStatus := flag.Bool("status", false, "show drive space and mission status")
 	checkMissionStr := flag.String("check", "", "check a specific mission for missing files across drives")
@@ -198,6 +200,19 @@ func main() {
 			}
 		} else {
 			runSyncAll(cfg, *skipConf)
+		}
+		return
+	}
+
+	if *doReplicate {
+		if yearExplicit {
+			if !runReplicate(cfg, *year, *skipConf) {
+				os.Exit(1)
+			}
+		} else {
+			if !runReplicateAll(cfg, *skipConf) {
+				os.Exit(1)
+			}
 		}
 		return
 	}

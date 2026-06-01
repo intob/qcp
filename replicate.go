@@ -17,37 +17,34 @@ import (
 	"github.com/vbauerster/mpb/v8"
 )
 
-func runSyncAll(cfg Config, skipConf bool) {
+func runReplicateAll(cfg Config, skipConf bool) bool {
 	years := allYears(cfg)
 	if len(years) == 0 {
 		fmt.Println(dim("no missions found"))
-		return
+		return true
 	}
+	ok := true
 	for _, year := range years {
 		fmt.Printf("%s\n\n", bold(strconv.Itoa(year)))
-		if !runSync(cfg, year, skipConf) {
-			break
+		if !runReplicate(cfg, year, skipConf) {
+			ok = false
 		}
 		fmt.Println()
 	}
+	return ok
 }
 
-func runSync(cfg Config, year int, skipConf bool) bool {
+func runReplicate(cfg Config, year int, skipConf bool) bool {
 	yearStr := strconv.Itoa(year)
 
-	// find mounted drives and their mission sets
 	type driveState struct {
 		DriveConfig
 		yearDir  string
 		missions map[string]bool
 	}
 
-	scanDrive := func(d DriveConfig) (driveState, bool) {
-		base := d.basePath()
-		if !dirExists(base) {
-			return driveState{}, false
-		}
-		yearDir := filepath.Join(base, d.Root, yearStr)
+	scanDrive := func(d DriveConfig) driveState {
+		yearDir := filepath.Join(d.basePath(), d.Root, yearStr)
 		missions := make(map[string]bool)
 		if entries, err := os.ReadDir(yearDir); err == nil {
 			for _, e := range entries {
@@ -56,44 +53,47 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 				}
 			}
 		}
-		return driveState{d, yearDir, missions}, true
+		return driveState{d, yearDir, missions}
 	}
 
-	var primaries []driveState
-	var archives []driveState
+	// collect all mounted cold drives; any can be a source regardless of scope
+	var coldDrives []driveState
 	for _, d := range cfg.Drives {
-		switch d.Role {
-		case "hot":
-			if !dirExists(d.basePath()) {
-				fmt.Printf("%s %s %s\n", yellow("warning:"), bold(d.name()), dim("not mounted, skipping"))
-				continue
-			}
-			state, _ := scanDrive(d)
-			primaries = append(primaries, state)
-		case "cold":
-			if !d.coversYear(year) {
-				continue // out of scope for this year
-			}
-			state, ok := scanDrive(d)
-			if !ok {
-				fmt.Printf("%s %s %s\n", yellow("warning:"), bold(d.name()), dim("not mounted, skipping"))
-				continue
-			}
-			archives = append(archives, state)
+		if d.Role != "cold" {
+			continue
 		}
+		if !dirExists(d.basePath()) {
+			if d.coversYear(year) {
+				fmt.Printf("%s %s %s\n", yellow("warning:"), bold(d.name()), dim("not mounted, skipping"))
+			}
+			continue
+		}
+		coldDrives = append(coldDrives, scanDrive(d))
 	}
-	if len(primaries) == 0 {
-		fmt.Println(red("no hot drives mounted"))
-		return false
-	}
-	if len(archives) == 0 {
+
+	if len(coldDrives) == 0 {
 		fmt.Println(red("no cold drives mounted"))
 		return false
 	}
 
-	// build mission → source map across all primaries.
-	// missions found on multiple primaries are cross-checked by file manifest;
-	// conflicts are skipped with a warning.
+	// destination drives: mounted cold drives scoped for this year
+	var dstDrives []driveState
+	for _, c := range coldDrives {
+		if c.coversYear(year) {
+			dstDrives = append(dstDrives, c)
+		}
+	}
+	if len(dstDrives) == 0 {
+		fmt.Printf(dim("no cold drives are scoped for %d\n"), year)
+		return true
+	}
+	if len(dstDrives) == 1 {
+		// check if any other cold drive could serve as a second copy
+		fmt.Println(dim("only one cold drive scoped for this year — nothing to replicate"))
+		return true
+	}
+
+	// build mission → source map: first cold drive that has it wins
 	type missionSource struct {
 		srcVol string
 		srcDir string
@@ -101,61 +101,52 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 		size   int64
 	}
 	missionSources := make(map[string]missionSource)
-	conflicted := make(map[string]bool)
-
-	for _, p := range primaries {
-		for slug := range p.missions {
-			if conflicted[slug] {
+	for _, c := range coldDrives {
+		for slug := range c.missions {
+			if _, seen := missionSources[slug]; seen {
 				continue
 			}
-			srcDir := filepath.Join(p.yearDir, slug)
+			srcDir := filepath.Join(c.yearDir, slug)
 			files, size, err := missionFiles(srcDir)
 			if err != nil {
-				fmt.Printf("%s scanning %s on %s: %v\n", red("ERROR"), slug, bold(p.Volume), err)
+				fmt.Printf("%s scanning %s on %s: %v\n", red("ERROR"), slug, bold(c.name()), err)
 				continue
 			}
-			if existing, ok := missionSources[slug]; ok {
-				if !missionManifestsMatch(existing.files, files) {
-					fmt.Printf("%s %s differs between %s and %s — skipping\n",
-						red("CONFLICT"), slug, bold(existing.srcVol), bold(p.Volume))
-					delete(missionSources, slug)
-					conflicted[slug] = true
-				}
-				// identical on both primaries — keep existing source
-				continue
-			}
-			missionSources[slug] = missionSource{p.Volume, srcDir, files, size}
+			missionSources[slug] = missionSource{c.name(), srcDir, files, size}
 		}
 	}
 
-	// find what primaries have that each archive is missing (wholly or partially)
-	type syncJob struct {
+	// build jobs: for each in-scope destination, find what it's missing
+	type replicateJob struct {
 		slug    string
 		srcDir  string
 		dstDir  string
-		dstVol  string // display name
-		dstBase string // base path for probeDrive
+		dstVol  string
+		dstBase string
 		files   []fileEntry
 		size    int64
 	}
-	var jobs []syncJob
-	for _, dst := range archives {
-		var slugs []string
-		for slug := range missionSources {
-			slugs = append(slugs, slug)
-		}
-		sort.Strings(slugs)
+	var jobs []replicateJob
+
+	var slugs []string
+	for slug := range missionSources {
+		slugs = append(slugs, slug)
+	}
+	sort.Strings(slugs)
+
+	for _, dst := range dstDrives {
 		for _, slug := range slugs {
 			ms := missionSources[slug]
 			dstDir := filepath.Join(dst.yearDir, slug)
+			if dstDir == ms.srcDir {
+				continue // source and destination are the same drive
+			}
 			var missing []fileEntry
 			var missingSize int64
 			if !dst.missions[slug] {
-				// mission entirely absent — copy everything
 				missing = ms.files
 				missingSize = ms.size
 			} else {
-				// mission exists — find files absent from dst
 				dstFiles, err := findFiles(dstDir)
 				if err != nil {
 					fmt.Printf("%s scanning %s on %s: %v\n", red("ERROR"), slug, bold(dst.name()), err)
@@ -173,7 +164,7 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 				}
 			}
 			if len(missing) > 0 {
-				jobs = append(jobs, syncJob{
+				jobs = append(jobs, replicateJob{
 					slug:    slug,
 					srcDir:  ms.srcDir,
 					dstDir:  dstDir,
@@ -187,36 +178,32 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 	}
 
 	if len(jobs) == 0 {
-		fmt.Println(dim("all drives are in sync"))
+		fmt.Println(dim("cold drives are in sync"))
 		return true
 	}
 
 	for _, j := range jobs {
-		fmt.Printf("sync: %s → %s\n", j.slug, bold(j.dstVol))
+		fmt.Printf("replicate: %s → %s\n", j.slug, bold(j.dstVol))
 	}
-	primaryNames := make([]string, len(primaries))
-	for i, p := range primaries {
-		primaryNames[i] = bold(p.Volume)
-	}
-	fmt.Printf("\n%d mission(s) to sync from %s\n", len(jobs), strings.Join(primaryNames, ", "))
+	fmt.Printf("\n%d mission(s) to replicate\n", len(jobs))
 	if !skipConf && !confirm() {
 		exit(0, "aborted")
 	}
 
-	// interrupt handler — clean up any dstDirs we create
+	// interrupt handler
 	ctx, cancel := context.WithCancel(context.Background())
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt)
-	var dstDirs []string
+	var partialDirs []string
 	for _, j := range jobs {
-		dstDirs = append(dstDirs, j.dstDir)
+		partialDirs = append(partialDirs, j.dstDir)
 	}
 	go func() {
 		<-sigCh
 		signal.Stop(sigCh)
 		cancel()
 		time.Sleep(150 * time.Millisecond)
-		fmt.Print("\r\033[2K\ninterrupted — delete partial sync dirs? (y/n): ")
+		fmt.Print("\r\033[2K\ninterrupted — delete partial replicate dirs? (y/n): ")
 		reader := bufio.NewReader(os.Stdin)
 		var resp string
 		for resp != "y" && resp != "n" {
@@ -224,7 +211,7 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 			resp = strings.TrimSpace(line)
 		}
 		if resp == "y" {
-			for _, d := range dstDirs {
+			for _, d := range partialDirs {
 				os.RemoveAll(d)
 				fmt.Printf("removed: %s\n", d)
 			}
@@ -232,18 +219,16 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 		os.Exit(130)
 	}()
 
-	// total bytes per archive drive (for bar totals)
 	archiveSize := make(map[string]int64)
 	for _, j := range jobs {
 		archiveSize[j.dstVol] += j.size
 	}
 
-	// probe each archive drive once and report
-	volInfo := make(map[string]driveInfo)
-	dstBaseByVol := make(map[string]string) // vol display name → base path
+	dstBaseByVol := make(map[string]string)
 	for _, j := range jobs {
 		dstBaseByVol[j.dstVol] = j.dstBase
 	}
+	volInfo := make(map[string]driveInfo)
 	fmt.Println()
 	for vol := range archiveSize {
 		info := probeDrive(dstBaseByVol[vol])
@@ -251,7 +236,7 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 		fmt.Printf("  %s: %s\n", bold(vol), info)
 	}
 
-	// Phase 1: copy — one bar per archive, all missions in parallel
+	// Phase 1: copy
 	fmt.Printf("\n%s\n\n", dim("copying..."))
 	p1 := mpb.NewWithContext(ctx, mpb.WithWidth(64))
 	copyBars := make(map[string]*barTracker)
@@ -259,10 +244,10 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 		copyBars[vol] = addBar(p1, vol, size)
 	}
 
-	// group ops by destination volume; each volume gets its own pool sized by drive type
 	opsByVol := make(map[string][]*op)
 	for _, j := range jobs {
-		opsByVol[j.dstVol] = append(opsByVol[j.dstVol], buildSyncOps(j.files, j.srcDir, j.dstDir, copyBars[j.dstVol])...)
+		opsByVol[j.dstVol] = append(opsByVol[j.dstVol],
+			buildSyncOps(j.files, j.srcDir, j.dstDir, copyBars[j.dstVol])...)
 	}
 
 	var results []*result
@@ -298,7 +283,7 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 	}
 	p1.Wait()
 	if ctx.Err() != nil {
-		select {} // interrupt handler will os.Exit after user responds
+		select {}
 	}
 
 	var copyFailed int
@@ -311,7 +296,7 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 		exit(1, "%d file(s) failed to copy", copyFailed)
 	}
 
-	// Phase 2: verify — one bar per archive
+	// Phase 2: verify
 	fmt.Printf("\n%s\n\n", dim("verifying..."))
 	p2 := mpb.NewWithContext(ctx, mpb.WithWidth(64))
 	verifyBars := make(map[string]*barTracker)
@@ -319,7 +304,7 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 		verifyBars[vol] = addBar(p2, vol, size)
 	}
 
-	dstDirToVol := make(map[string]string) // dstDir → display name
+	dstDirToVol := make(map[string]string)
 	for _, j := range jobs {
 		dstDirToVol[j.dstDir] = j.dstVol
 	}
@@ -328,7 +313,6 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 	checksums := make(map[string][]string)
 	var verifyFailed atomic.Int64
 
-	// group results by destination volume for per-drive concurrency
 	resultsByVol := make(map[string][]*result)
 	for _, r := range results {
 		if r == nil || r.err != nil {
@@ -376,20 +360,12 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 		cPath := filepath.Join(dstRoot, "checksums.b3")
 		lines = mergeChecksums(cPath, lines)
 		sort.Strings(lines)
-		os.WriteFile(cPath, []byte(strings.Join(lines, "\n")+"\n"), 0644)
+		if err := os.WriteFile(cPath, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
+			fmt.Printf("%s writing checksums: %v\n", red("ERROR"), err)
+		}
 	}
 
-	perArchive := fmtSize(uint64(total.Load()) / uint64(len(archiveSize)))
-	fmt.Printf("\n%s %s synced to %d archive(s)\n", green("✓"), perArchive, len(archiveSize))
+	perDrive := fmtSize(uint64(total.Load()) / uint64(len(archiveSize)))
+	fmt.Printf("\n%s %s replicated to %d cold drive(s)\n", green("✓"), perDrive, len(archiveSize))
 	return true
-}
-
-func buildSyncOps(files []fileEntry, srcDir, dstDir string, bar *barTracker) []*op {
-	var ops []*op
-	for _, f := range files {
-		src := filepath.Join(srcDir, f.rel)
-		dst := filepath.Join(dstDir, f.rel)
-		ops = append(ops, &op{src: src, dst: dst, do: prepJob(src, dst, f.rel, dstDir, bar)})
-	}
-	return ops
 }

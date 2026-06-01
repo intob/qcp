@@ -18,11 +18,24 @@ type CardConfig struct {
 }
 
 type DriveConfig struct {
-	Volume string `json:"volume"` // display name and /Volumes/<volume> path (if Path not set)
-	Path   string `json:"path"`   // explicit path, e.g. "~/Footage" (overrides Volume for path)
-	Root   string `json:"root"`
-	Role   string `json:"role"`  // "hot" or "cold"
-	Pull   *bool  `json:"pull"`  // nil/true = pull allowed (default), false = excluded from pull
+	Volume   string `json:"volume"`    // display name and /Volumes/<volume> path (if Path not set)
+	Path     string `json:"path"`      // explicit path, e.g. "~/Footage" (overrides Volume for path)
+	Root     string `json:"root"`
+	Role     string `json:"role"`      // "hot" or "cold"
+	Pull     *bool  `json:"pull"`      // nil/true = pull allowed (default), false = excluded from pull
+	YearFrom int    `json:"year_from"` // first year this drive is responsible for (0 = no lower bound)
+	YearTo   int    `json:"year_to"`   // last year this drive is responsible for (0 = no upper bound)
+}
+
+// coversYear reports whether this drive is responsible for the given year.
+func (d DriveConfig) coversYear(year int) bool {
+	if d.YearFrom > 0 && year < d.YearFrom {
+		return false
+	}
+	if d.YearTo > 0 && year > d.YearTo {
+		return false
+	}
+	return true
 }
 
 func (d DriveConfig) pullAllowed() bool {

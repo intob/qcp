@@ -8,22 +8,31 @@ import (
 	"strconv"
 )
 
+func anyColdMounted(cfg Config) bool {
+	for _, d := range cfg.Drives {
+		if d.Role == "cold" && dirExists(d.basePath()) {
+			return true
+		}
+	}
+	return false
+}
+
 func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bool {
-	var hotDrives, coldDrives []DriveConfig
+	var hotDrives, allColdDrives []DriveConfig
 	for _, d := range cfg.Drives {
 		if !dirExists(d.basePath()) {
 			continue
 		}
 		if d.Role == "hot" {
 			hotDrives = append(hotDrives, d)
-		} else {
-			coldDrives = append(coldDrives, d)
+		} else if d.Role == "cold" {
+			allColdDrives = append(allColdDrives, d)
 		}
 	}
 	if len(hotDrives) == 0 {
 		exit(1, "no hot drive mounted")
 	}
-	if len(coldDrives) == 0 {
+	if len(allColdDrives) == 0 {
 		exit(1, "no cold drives mounted")
 	}
 
@@ -37,18 +46,31 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 		}
 	}
 
-	allDrives := append(hotDrives, coldDrives...)
+	allDrives := append(hotDrives, allColdDrives...)
 	var slug, yearStr string
+	var foundYear int
 	for _, y := range searchYears {
 		ys := strconv.Itoa(y)
 		s, err := findMissionSlug(allDrives, ys, missionNum)
 		if err == nil {
-			slug, yearStr = s, ys
+			slug, yearStr, foundYear = s, ys, y
 			break
 		}
 	}
 	if slug == "" {
 		exit(1, "mission %03d not found", missionNum)
+	}
+
+	// filter cold drives to those scoped for this year
+	var coldDrives []DriveConfig
+	for _, c := range allColdDrives {
+		if c.coversYear(foundYear) {
+			coldDrives = append(coldDrives, c)
+		}
+	}
+	if len(coldDrives) == 0 {
+		fmt.Printf(dim("no cold drives are scoped for %s\n"), yearStr)
+		return true
 	}
 
 	// prefer a hot drive as reference; fall back to the first cold drive that has it
@@ -170,17 +192,23 @@ func runCheckAll(cfg Config) bool {
 func runCheck(cfg Config, year int) bool {
 	yearStr := strconv.Itoa(year)
 
-	// collect all mounted hot and cold drives
-	var hotDrives []DriveConfig
-	var coldDrives []DriveConfig
+	var hotDrives, coldDrives []DriveConfig
 	for _, d := range cfg.Drives {
-		if !dirExists(d.basePath()) {
-			fmt.Printf("%s %s %s\n", yellow("warning:"), bold(d.name()), dim("not mounted, skipping"))
-			continue
-		}
+		mounted := dirExists(d.basePath())
 		if d.Role == "hot" {
+			if !mounted {
+				fmt.Printf("%s %s %s\n", yellow("warning:"), bold(d.name()), dim("not mounted, skipping"))
+				continue
+			}
 			hotDrives = append(hotDrives, d)
-		} else {
+		} else if d.Role == "cold" {
+			if !d.coversYear(year) {
+				continue // out of scope for this year, silently skip
+			}
+			if !mounted {
+				fmt.Printf("%s %s %s\n", yellow("warning:"), bold(d.name()), dim("not mounted, skipping"))
+				continue
+			}
 			coldDrives = append(coldDrives, d)
 		}
 	}
@@ -189,6 +217,10 @@ func runCheck(cfg Config, year int) bool {
 		return false
 	}
 	if len(coldDrives) == 0 {
+		if anyColdMounted(cfg) {
+			fmt.Printf(dim("no cold drives are scoped for %d\n"), year)
+			return true
+		}
 		fmt.Println(red("no cold drives mounted"))
 		return false
 	}
@@ -331,7 +363,6 @@ func runCheck(cfg Config, year int) bool {
 		}
 	}
 
-	// summary header
 	checked := len(slugs)
 	incomplete := len(reports)
 	fmt.Printf("checked %s in %d", bold(fmt.Sprintf("%d mission(s)", checked)), year)
