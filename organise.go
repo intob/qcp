@@ -135,15 +135,8 @@ func runOrganise(cfg Config, year int, skipConf bool, regroup bool) {
 		return
 	}
 
-	// phase 3: assign a globally consistent slug to every season.
-	// Start from the global max across all years so mission numbers never repeat.
-	nextNum := 0
-	for _, v := range seq {
-		if v > nextNum {
-			nextNum = v
-		}
-	}
-	nextNum++
+	// phase 3: assign slugs starting after the highest mission already in this year.
+	nextNum := seq[year] + 1
 	for _, df := range allDriveFiles {
 		probe := make(map[int]int)
 		scanYearDir(df.yearDir, year, probe)
