@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/vbauerster/mpb/v8"
@@ -127,4 +129,173 @@ func runVerify(cfg Config, missionNum int, year int) {
 		total += len(j.entries)
 	}
 	fmt.Printf("\n%s all %d files ok across %d drive(s)\n", green("✓"), total, len(jobs))
+}
+
+func runVerifyAll(cfg Config) bool {
+	years := allYears(cfg)
+	if len(years) == 0 {
+		fmt.Println(dim("no missions found"))
+		return true
+	}
+	ok := true
+	for _, year := range years {
+		fmt.Printf("%s\n\n", bold(strconv.Itoa(year)))
+		if !runVerifyYear(cfg, year) {
+			ok = false
+		}
+		fmt.Println()
+	}
+	return ok
+}
+
+func runVerifyYear(cfg Config, year int) bool {
+	yearStr := strconv.Itoa(year)
+
+	slugSet := make(map[string]bool)
+	for _, d := range cfg.Drives {
+		base := d.basePath()
+		if !dirExists(base) {
+			continue
+		}
+		entries, err := os.ReadDir(filepath.Join(base, d.Root, yearStr))
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() && isNumberedMission(e.Name()) {
+				slugSet[e.Name()] = true
+			}
+		}
+	}
+	var slugs []string
+	for s := range slugSet {
+		slugs = append(slugs, s)
+	}
+	if len(slugs) == 0 {
+		fmt.Println(dim("no missions found"))
+		return true
+	}
+	sort.Strings(slugs)
+
+	// probe each mounted drive once so verifySlug doesn't repeat diskutil calls
+	volInfos := make(map[string]driveInfo)
+	for _, d := range cfg.Drives {
+		base := d.basePath()
+		if !dirExists(base) {
+			continue
+		}
+		if _, seen := volInfos[d.name()]; !seen {
+			volInfos[d.name()] = probeDrive(base)
+		}
+	}
+
+	ok := true
+	for _, slug := range slugs {
+		if !verifySlug(cfg, slug, yearStr, volInfos) {
+			ok = false
+		}
+	}
+	return ok
+}
+
+// verifySlug verifies all checksums.b3 entries for a slug across all drives.
+// It is the batch-mode counterpart to runVerify: no progress bars, one line of
+// output per mission, continues on failure rather than calling exit.
+func verifySlug(cfg Config, slug, yearStr string, volInfos map[string]driveInfo) bool {
+	type entry struct{ hash, rel string }
+	type driveJob struct {
+		vol     string
+		dir     string
+		entries []entry
+	}
+
+	var jobs []driveJob
+	for _, d := range cfg.Drives {
+		base := d.basePath()
+		if !dirExists(base) {
+			continue
+		}
+		dir := filepath.Join(base, d.Root, yearStr, slug)
+		if !dirExists(dir) {
+			continue
+		}
+		f, err := os.Open(filepath.Join(dir, "checksums.b3"))
+		if err != nil {
+			continue
+		}
+		var entries []entry
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			parts := strings.SplitN(scanner.Text(), "  ", 2)
+			if len(parts) == 2 {
+				entries = append(entries, entry{parts[0], parts[1]})
+			}
+		}
+		f.Close()
+		if len(entries) > 0 {
+			jobs = append(jobs, driveJob{d.name(), dir, entries})
+		}
+	}
+
+	if len(jobs) == 0 {
+		fmt.Printf("  %s %s\n", dim("—"), dim(slug+" (no checksums.b3)"))
+		return true
+	}
+
+	type failure struct {
+		vol string
+		rel string
+		err error
+	}
+	var mu sync.Mutex
+	var failures []failure
+
+	var drivePools []*pool
+	for _, job := range jobs {
+		info := volInfos[job.vol]
+		if info.concurrency == 0 {
+			info.concurrency = 1
+		}
+		wp := newPool(info.concurrency)
+		drivePools = append(drivePools, wp)
+		for _, e := range job.entries {
+			e, j := e, job
+			wp.run(func() {
+				got, err := hashFile(filepath.Join(j.dir, e.rel), nil)
+				if err != nil || got != e.hash {
+					mu.Lock()
+					failures = append(failures, failure{j.vol, e.rel, err})
+					mu.Unlock()
+				}
+			})
+		}
+	}
+	for _, wp := range drivePools {
+		wp.wait()
+	}
+
+	if len(failures) > 0 {
+		fmt.Printf("  %s %s\n", red("✗"), bold(slug))
+		sort.Slice(failures, func(i, j int) bool {
+			if failures[i].vol != failures[j].vol {
+				return failures[i].vol < failures[j].vol
+			}
+			return failures[i].rel < failures[j].rel
+		})
+		for _, f := range failures {
+			if f.err != nil {
+				fmt.Printf("      [%s] %s: %v\n", f.vol, f.rel, f.err)
+			} else {
+				fmt.Printf("      %s [%s] %s\n", red("FAIL"), f.vol, f.rel)
+			}
+		}
+		return false
+	}
+
+	total := 0
+	for _, j := range jobs {
+		total += len(j.entries)
+	}
+	fmt.Printf("  %s %s\n", green("✓"), dim(fmt.Sprintf("%s (%d files, %d drive(s))", slug, total, len(jobs))))
+	return true
 }
