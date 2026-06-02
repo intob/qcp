@@ -88,22 +88,33 @@ func runChecksumYear(cfg Config, year int) {
 		if len(mDrives) == 0 {
 			continue
 		}
-		// build file union from ALL mounted drives (not just unchecksummed ones) so
-		// files on an already-checksummed drive are not silently omitted from the job
+		// build file union from unchecksummed drives only — workers hash paths
+		// under md.dir, so files that only exist on already-checksummed drives
+		// cannot be hashed and must not be included in the job
 		fileSet := make(map[string]fileEntry)
-		for _, dy := range drives {
-			dir := filepath.Join(dy.yearDir, slug)
-			if !dirExists(dir) {
-				continue
-			}
-			fs, _, _, err := missionFiles(dir)
+		for _, md := range mDrives {
+			fs, _, _, err := missionFiles(md.dir)
 			if err != nil {
-				fmt.Printf("%s error scanning %s on %s: %v\n", yellow("warning:"), slug, dy.d.name(), err)
+				fmt.Printf("%s error scanning %s on %s: %v\n", yellow("warning:"), slug, md.vol, err)
 				continue
 			}
 			for _, f := range fs {
 				if _, exists := fileSet[f.rel]; !exists {
 					fileSet[f.rel] = f
+				}
+			}
+		}
+		// warn about files present on checksummed drives but absent from unchecksummed ones
+		for _, dy := range drives {
+			dir := filepath.Join(dy.yearDir, slug)
+			if !dirExists(dir) || !isFullyChecksummed(dir) {
+				continue
+			}
+			fs, _, _, _ := missionFiles(dir)
+			for _, f := range fs {
+				if _, exists := fileSet[f.rel]; !exists {
+					fmt.Printf("%s %s: %s only on %s — run -sync to copy to other drives\n",
+						yellow("warning:"), slug, f.rel, dy.d.name())
 				}
 			}
 		}
@@ -271,8 +282,8 @@ func runChecksum(cfg Config, missionNum int, year int) {
 			fmt.Printf("%s mission not found on %s, %s\n", yellow("warning:"), bold(d.name()), dim("skipping"))
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(dir, "checksums.b3")); err == nil {
-			fmt.Printf("%s %s already has checksums.b3, %s\n", yellow("warning:"), bold(d.name()), dim("skipping"))
+		if isFullyChecksummed(dir) {
+			fmt.Printf("%s %s already fully checksummed, %s\n", yellow("warning:"), bold(d.name()), dim("skipping"))
 			continue
 		}
 		drives = append(drives, driveHashes{vol: d.name(), dir: dir, base: base, hashes: make(map[string]string)})

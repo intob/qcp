@@ -193,9 +193,13 @@ func runOrganise(cfg Config, year int, skipConf bool, regroup bool) {
 		fmt.Println(yellow("some files could not be moved — check errors above"))
 	}
 
-	seq[year] = nextNum + len(seasons) - 1
-	if err := writeSeq(seq); err != nil {
-		fmt.Printf("%s writing seq: %v\n", red("ERROR"), err)
+	if anyFailed {
+		fmt.Println(yellow("seq not updated — re-run -organise after resolving errors"))
+	} else {
+		seq[year] = nextNum + len(seasons) - 1
+		if err := writeSeq(seq); err != nil {
+			fmt.Printf("%s writing seq: %v\n", red("ERROR"), err)
+		}
 	}
 }
 
@@ -302,15 +306,29 @@ func buildOrganisePlan(yearDir, driveName string, files []fileWithDate, seasonSl
 		for _, mf := range m.files {
 			count[filepath.Base(mf.f.rel)]++
 		}
+		used := make(map[string]bool)
 		for i, mf := range m.files {
 			base := filepath.Base(mf.f.rel)
 			if count[base] > 1 {
-				// prefix with the full parent directory path to guarantee uniqueness
-				// (top-level-only prefix fails when two files share both folder and name)
+				// prefix with the full parent directory path to disambiguate
 				if dir := filepath.Dir(mf.f.rel); dir != "." {
 					base = strings.ReplaceAll(dir, string(os.PathSeparator), "_") + "_" + base
 				}
 			}
+			// resolve any remaining collision (e.g. dir name contains _ and aligns
+			// with a separator-replaced path) with a numeric suffix
+			if used[base] {
+				ext := filepath.Ext(base)
+				stem := strings.TrimSuffix(base, ext)
+				for n := 2; ; n++ {
+					candidate := fmt.Sprintf("%s_%d%s", stem, n, ext)
+					if !used[candidate] {
+						base = candidate
+						break
+					}
+				}
+			}
+			used[base] = true
 			m.files[i].dest = base
 		}
 		missions = append(missions, *m)
@@ -376,9 +394,20 @@ func executeOrganisePlan(p organisePlan) bool {
 	}
 	for _, f := range p.unsorted {
 		src := filepath.Join(p.yearDir, f.rel)
-		// use full rel path (separators replaced) to avoid basename collisions
+		// use full rel path (separators replaced) to avoid basename collisions;
+		// if separator-replacement itself creates a collision, add a numeric suffix
 		safeName := strings.ReplaceAll(f.rel, string(os.PathSeparator), "_")
 		dst := filepath.Join(p.yearDir, "_unsorted", safeName)
+		if _, statErr := os.Stat(dst); statErr == nil {
+			ext := filepath.Ext(safeName)
+			stem := strings.TrimSuffix(safeName, ext)
+			for n := 2; ; n++ {
+				dst = filepath.Join(p.yearDir, "_unsorted", fmt.Sprintf("%s_%d%s", stem, n, ext))
+				if _, statErr := os.Stat(dst); statErr != nil {
+					break
+				}
+			}
+		}
 		if src == dst {
 			continue
 		}
