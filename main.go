@@ -66,7 +66,7 @@ func usage() {
 	row("-clean", "", "find and remove junk files from all mounted drives")
 
 	section("FLAGS")
-	row("-year", "year", fmt.Sprintf("year override (default: %d)", time.Now().Year()))
+	row("-year", "year|all", fmt.Sprintf("year to operate on (default: %d)", time.Now().Year()))
 	row("-y", "", "skip confirmation prompts")
 	row("-version", "", "print version and exit")
 
@@ -78,7 +78,7 @@ func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	skipConf := flag.Bool("y", false, "skip confirmation")
 	missionFlag := flag.String("ingest", "", "mission name or number")
-	year := flag.Int("year", time.Now().Year(), "year override")
+	yearFlag := flag.String("year", "", `year to operate on (default: current year, "all" for all years)`)
 	verifyMissionStr := flag.String("verify", "", `re-verify mission(s) across all mounted drives (use "all" for all missions)`)
 	checksumMissionStr := flag.String("checksum", "", `generate checksums.b3 for a mission (use "all" for all missions in year)`)
 	pullMissionStr := flag.String("pull", "", "pull a mission from cold storage to hot drives")
@@ -100,12 +100,19 @@ func main() {
 		return
 	}
 
-	yearExplicit := false
-	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "year" {
-			yearExplicit = true
+	year := time.Now().Year()
+	yearAll := false
+	if yf := *yearFlag; yf != "" {
+		if yf == "all" {
+			yearAll = true
+		} else {
+			y, err := strconv.Atoi(yf)
+			if err != nil || y < 2000 || y > 2100 {
+				exit(1, "invalid year %q — use a year number or \"all\"", yf)
+			}
+			year = y
 		}
-	})
+	}
 
 	parseMission := func(s string) (int, bool) {
 		if s == "" {
@@ -125,75 +132,75 @@ func main() {
 
 	switch {
 	case *checkMissionStr == "all":
-		if yearExplicit {
-			if !runCheck(cfg, *year) {
+		if yearAll {
+			if !runCheckAll(cfg) {
 				os.Exit(1)
 			}
 		} else {
-			if !runCheckAll(cfg) {
+			if !runCheck(cfg, year) {
 				os.Exit(1)
 			}
 		}
 		return
 	case *checkMissionStr != "":
 		n, _ := parseMission(*checkMissionStr)
-		if !runCheckMission(cfg, n, *year, yearExplicit) {
+		if !runCheckMission(cfg, n, year, !yearAll) {
 			os.Exit(1)
 		}
 		return
 	}
 
 	if *doClean {
-		runClean(cfg, *skipConf, yearExplicit, *year)
+		runClean(cfg, *skipConf, !yearAll, year)
 		return
 	}
 
 	if *doInit {
-		runInit(cfg, *year, yearExplicit)
+		runInit(cfg, year, !yearAll)
 		return
 	}
 
 	if *doOrganise {
-		runOrganise(cfg, *year, *skipConf, false)
+		runOrganise(cfg, year, *skipConf, false)
 		return
 	}
 
 	if *doReorganise {
-		runOrganise(cfg, *year, *skipConf, true)
+		runOrganise(cfg, year, *skipConf, true)
 		return
 	}
 
 	if *doRenumber {
-		runRenumber(cfg, *year, *skipConf)
+		runRenumber(cfg, year, *skipConf)
 		return
 	}
 
 	if *doList {
-		if yearExplicit {
-			runList(cfg, *year)
-		} else {
+		if yearAll {
 			runListAll(cfg)
+		} else {
+			runList(cfg, year)
 		}
 		return
 	}
 
 	if *doStatus {
-		runStatus(cfg, *year)
+		runStatus(cfg, year)
 		return
 	}
 
 	if hasPull {
-		runPull(cfg, pullMission, *year, *pullSub, *skipConf)
+		runPull(cfg, pullMission, year, *pullSub, *skipConf)
 		return
 	}
 
 	if *doSync {
-		if yearExplicit {
-			if !runSync(cfg, *year, *skipConf) {
+		if yearAll {
+			if !runSyncAll(cfg, *skipConf) {
 				os.Exit(1)
 			}
 		} else {
-			if !runSyncAll(cfg, *skipConf) {
+			if !runSync(cfg, year, *skipConf) {
 				os.Exit(1)
 			}
 		}
@@ -201,12 +208,12 @@ func main() {
 	}
 
 	if *doReplicate {
-		if yearExplicit {
-			if !runReplicate(cfg, *year, *skipConf) {
+		if yearAll {
+			if !runReplicateAll(cfg, *skipConf) {
 				os.Exit(1)
 			}
 		} else {
-			if !runReplicateAll(cfg, *skipConf) {
+			if !runReplicate(cfg, year, *skipConf) {
 				os.Exit(1)
 			}
 		}
@@ -216,10 +223,10 @@ func main() {
 	switch {
 	case *verifyMissionStr == "all":
 		var ok bool
-		if yearExplicit {
-			ok = runVerifyYear(cfg, *year)
-		} else {
+		if yearAll {
 			ok = runVerifyAll(cfg)
+		} else {
+			ok = runVerifyYear(cfg, year)
 		}
 		if !ok {
 			os.Exit(1)
@@ -227,17 +234,17 @@ func main() {
 		return
 	case *verifyMissionStr != "":
 		n, _ := parseMission(*verifyMissionStr)
-		runVerify(cfg, n, *year)
+		runVerify(cfg, n, year)
 		return
 	}
 
 	switch {
 	case *checksumMissionStr == "all":
 		var ok bool
-		if yearExplicit {
-			ok = runChecksumYear(cfg, *year)
-		} else {
+		if yearAll {
 			ok = runChecksumAll(cfg)
+		} else {
+			ok = runChecksumYear(cfg, year)
 		}
 		if !ok {
 			os.Exit(1)
@@ -245,7 +252,7 @@ func main() {
 		return
 	case *checksumMissionStr != "":
 		n, _ := parseMission(*checksumMissionStr)
-		runChecksum(cfg, n, *year)
+		runChecksum(cfg, n, year)
 		return
 	}
 
@@ -258,7 +265,7 @@ func main() {
 		exit(3, "-ingest is required")
 	}
 
-	yearStr := strconv.Itoa(*year)
+	yearStr := strconv.Itoa(year)
 	var missionSlug string
 	var isAppend bool
 	var missionNum int
@@ -271,7 +278,7 @@ func main() {
 		}
 		missionSlug = slug
 	} else {
-		num, err := peekMission(*year)
+		num, err := peekMission(year)
 		if err != nil {
 			exit(4, "err reading mission counter: %v", err)
 		}
@@ -331,7 +338,7 @@ func main() {
 	}
 
 	if !isAppend {
-		if err := commitMission(*year, missionNum); err != nil {
+		if err := commitMission(year, missionNum); err != nil {
 			exit(9, "err updating mission counter: %v", err)
 		}
 	}
@@ -361,7 +368,7 @@ func main() {
 				fmt.Printf("removed: %s\n", d)
 			}
 			if !isAppend {
-				if err := revertMission(*year); err != nil {
+				if err := revertMission(year); err != nil {
 					fmt.Printf("err reverting counter: %v\n", err)
 				} else {
 					fmt.Println("mission counter reverted")
