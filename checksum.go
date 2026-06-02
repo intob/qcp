@@ -75,8 +75,8 @@ func runChecksumYear(cfg Config, year int) {
 			if !dirExists(dir) {
 				continue
 			}
-			if _, err := os.Stat(filepath.Join(dir, "checksums.b3")); err == nil {
-				continue // already checksummed
+			if isFullyChecksummed(dir) {
+				continue // already fully checksummed
 			}
 			mDrives = append(mDrives, missionDrive{
 				vol:    dy.d.name(),
@@ -88,11 +88,17 @@ func runChecksumYear(cfg Config, year int) {
 		if len(mDrives) == 0 {
 			continue
 		}
+		// build file union from ALL mounted drives (not just unchecksummed ones) so
+		// files on an already-checksummed drive are not silently omitted from the job
 		fileSet := make(map[string]fileEntry)
-		for _, md := range mDrives {
-			fs, _, _, err := missionFiles(md.dir)
+		for _, dy := range drives {
+			dir := filepath.Join(dy.yearDir, slug)
+			if !dirExists(dir) {
+				continue
+			}
+			fs, _, _, err := missionFiles(dir)
 			if err != nil {
-				fmt.Printf("%s error scanning %s on %s: %v\n", yellow("warning:"), slug, md.vol, err)
+				fmt.Printf("%s error scanning %s on %s: %v\n", yellow("warning:"), slug, dy.d.name(), err)
 				continue
 			}
 			for _, f := range fs {

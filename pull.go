@@ -81,7 +81,11 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 			continue
 		}
 		dir := filepath.Join(base, d.Root, yearStr, slug)
-		existing, _ := findFiles(dir)
+		existing, scanErr := findFiles(dir)
+		if scanErr != nil {
+			fmt.Printf("%s scanning %s: %v\n", red("ERROR"), d.name(), scanErr)
+			continue
+		}
 		existingSet := make(map[string]bool, len(existing))
 		for _, f := range existing {
 			existingSet[f.rel] = true
@@ -248,19 +252,12 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 		exit(1, "%d file(s) failed verification", verifyFailed.Load())
 	}
 
-	// append to checksums.b3
+	// merge into checksums.b3
 	for dstRoot, lines := range newHashes {
 		cPath := filepath.Join(dstRoot, "checksums.b3")
-		existing, _ := os.ReadFile(cPath)
-		all := append(strings.Split(strings.TrimRight(string(existing), "\n"), "\n"), lines...)
-		var clean []string
-		for _, l := range all {
-			if l != "" {
-				clean = append(clean, l)
-			}
-		}
-		sort.Strings(clean)
-		if err := os.WriteFile(cPath, []byte(strings.Join(clean, "\n")+"\n"), 0644); err != nil {
+		lines = mergeChecksums(cPath, lines)
+		sort.Strings(lines)
+		if err := os.WriteFile(cPath, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
 			fmt.Printf("%s writing checksums: %v\n", red("ERROR"), err)
 		}
 	}

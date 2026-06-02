@@ -106,6 +106,11 @@ func runRenumber(cfg Config, year int, skipConf bool) {
 			dst := filepath.Join(dy.yearDir, r.to)
 			if err := os.Rename(tmp, dst); err != nil {
 				fmt.Printf("%s rename %s on %s: %v\n", red("ERROR"), r.from, dy.d.name(), err)
+				// restore original name so the dir isn't stranded as __rnm_...
+				if restoreErr := os.Rename(tmp, filepath.Join(dy.yearDir, r.from)); restoreErr != nil {
+					fmt.Printf("%s could not restore %s — directory stuck as %s\n",
+						red("ERROR"), r.from, "__rnm_"+r.from)
+				}
 				continue
 			}
 			// remove stale checksums.b3 — path has changed

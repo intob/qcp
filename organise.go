@@ -183,8 +183,14 @@ func runOrganise(cfg Config, year int, skipConf bool, regroup bool) {
 	}
 
 	// phase 5: execute on every drive
+	var anyFailed bool
 	for _, p := range plans {
-		executeOrganisePlan(p)
+		if !executeOrganisePlan(p) {
+			anyFailed = true
+		}
+	}
+	if anyFailed {
+		fmt.Println(yellow("some files could not be moved — check errors above"))
 	}
 
 	seq[year] = nextNum + len(seasons) - 1
@@ -299,9 +305,10 @@ func buildOrganisePlan(yearDir, driveName string, files []fileWithDate, seasonSl
 		for i, mf := range m.files {
 			base := filepath.Base(mf.f.rel)
 			if count[base] > 1 {
-				// prefix with the top-level source subfolder if one exists
-				if parts := strings.SplitN(mf.f.rel, string(os.PathSeparator), 2); len(parts) > 1 {
-					base = parts[0] + "_" + base
+				// prefix with the full parent directory path to guarantee uniqueness
+				// (top-level-only prefix fails when two files share both folder and name)
+				if dir := filepath.Dir(mf.f.rel); dir != "." {
+					base = strings.ReplaceAll(dir, string(os.PathSeparator), "_") + "_" + base
 				}
 			}
 			m.files[i].dest = base
@@ -333,9 +340,10 @@ func printOrganisePlan(p organisePlan) {
 	}
 }
 
-func executeOrganisePlan(p organisePlan) {
+func executeOrganisePlan(p organisePlan) bool {
 	// track dirs that have files moved in or out — their checksums.b3 becomes stale
 	affected := make(map[string]bool)
+	var moveFailed int
 
 	markAffected := func(rel, destDir string) {
 		// source: the top-level mission dir the file came from (if any)
@@ -360,6 +368,7 @@ func executeOrganisePlan(p organisePlan) {
 			}
 			if err := os.Rename(src, dst); err != nil {
 				fmt.Printf("%s move %s: %v\n", red("ERROR"), mf.f.rel, err)
+				moveFailed++
 				continue
 			}
 			markAffected(mf.f.rel, destDir)
@@ -367,7 +376,9 @@ func executeOrganisePlan(p organisePlan) {
 	}
 	for _, f := range p.unsorted {
 		src := filepath.Join(p.yearDir, f.rel)
-		dst := filepath.Join(p.yearDir, "_unsorted", filepath.Base(f.rel))
+		// use full rel path (separators replaced) to avoid basename collisions
+		safeName := strings.ReplaceAll(f.rel, string(os.PathSeparator), "_")
+		dst := filepath.Join(p.yearDir, "_unsorted", safeName)
 		if src == dst {
 			continue
 		}
@@ -377,6 +388,7 @@ func executeOrganisePlan(p organisePlan) {
 		}
 		if err := os.Rename(src, dst); err != nil {
 			fmt.Printf("%s move %s: %v\n", red("ERROR"), f.rel, err)
+			moveFailed++
 			continue
 		}
 		markAffected(f.rel, filepath.Join(p.yearDir, "_unsorted"))
@@ -391,7 +403,13 @@ func executeOrganisePlan(p organisePlan) {
 	}
 
 	removeEmptyDirs(p.yearDir)
+	if moveFailed > 0 {
+		fmt.Printf("%s %s: organised %d mission(s), %d file(s) failed to move\n",
+			yellow("!"), bold(p.driveName), len(p.missions), moveFailed)
+		return false
+	}
 	fmt.Printf("%s %s: organised %d mission(s)\n", green("✓"), bold(p.driveName), len(p.missions))
+	return true
 }
 
 func extractFileDate(path, name string) (time.Time, string) {

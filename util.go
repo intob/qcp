@@ -208,6 +208,26 @@ func readChecksumFile(path string) map[string]string {
 	return out
 }
 
+// isFullyChecksummed reports whether every file currently on disk in dir has
+// an entry in its checksums.b3. Returns false if checksums.b3 is absent or
+// doesn't cover all files (e.g. from a partial previous run or new ingest).
+func isFullyChecksummed(dir string) bool {
+	manifest := readChecksumFile(filepath.Join(dir, "checksums.b3"))
+	if len(manifest) == 0 {
+		return false
+	}
+	files, err := findFiles(dir)
+	if err != nil || len(files) == 0 {
+		return false
+	}
+	for _, f := range files {
+		if manifest[f.rel] == "" {
+			return false
+		}
+	}
+	return true
+}
+
 func dirExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
