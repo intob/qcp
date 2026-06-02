@@ -120,7 +120,7 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 		}
 	}
 
-	var totalMissing, totalExtra, scanErrors, coldChecked int
+	var totalMissing, totalExtra, scanErrors, coldChecked, coldGhostCount int
 	for _, cold := range coldDrives {
 		if cold.name() == refColdVol {
 			continue // this drive is the reference, skip
@@ -142,6 +142,16 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 		for _, f := range coldFiles {
 			coldSet[f.rel] = true
 		}
+
+		// check cold drive's own manifest for files gone missing from its disk
+		var coldGhosts []string
+		for rel := range readChecksumFile(filepath.Join(coldDir, "checksums.b3")) {
+			if !coldSet[rel] {
+				coldGhosts = append(coldGhosts, rel)
+			}
+		}
+		sort.Strings(coldGhosts)
+
 		var missing, extra []string
 		for _, f := range refFiles {
 			if !coldSet[f.rel] {
@@ -153,8 +163,11 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 				extra = append(extra, f.rel)
 			}
 		}
-		if len(missing) > 0 || len(extra) > 0 {
+		if len(missing) > 0 || len(extra) > 0 || len(coldGhosts) > 0 {
 			fmt.Printf("  %s\n", yellow(cold.name()))
+			for _, f := range coldGhosts {
+				fmt.Printf("    %s %s\n", yellow("!"), f)
+			}
 			for _, f := range missing {
 				fmt.Printf("    %s %s\n", red("−"), f)
 			}
@@ -163,6 +176,7 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 			}
 			totalMissing += len(missing)
 			totalExtra += len(extra)
+			coldGhostCount += len(coldGhosts)
 		}
 	}
 
@@ -171,7 +185,7 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 			yellow("!"), bold(slug), refVol)
 		return false
 	}
-	if totalMissing == 0 && totalExtra == 0 && scanErrors == 0 && len(ghosts) == 0 {
+	if totalMissing == 0 && totalExtra == 0 && scanErrors == 0 && len(ghosts) == 0 && coldGhostCount == 0 {
 		fmt.Printf("%s %s complete on all cold drives\n", green("✓"), bold(slug))
 		return true
 	}
@@ -296,8 +310,9 @@ func runCheck(cfg Config, year int) bool {
 
 	type gap struct {
 		vol     string
-		missing []string
-		extra   []string
+		missing []string // missing from cold relative to reference
+		extra   []string // extra on cold relative to reference
+		ghosts  []string // in cold's checksums.b3 but absent from cold's disk
 	}
 	type missionReport struct {
 		slug   string
@@ -361,6 +376,15 @@ func runCheck(cfg Config, year int) bool {
 				coldSet[f.rel] = true
 			}
 
+			// check cold drive's own manifest for files gone missing from its disk
+			var coldGhosts []string
+			for rel := range readChecksumFile(filepath.Join(coldDir, "checksums.b3")) {
+				if !coldSet[rel] {
+					coldGhosts = append(coldGhosts, rel)
+				}
+			}
+			sort.Strings(coldGhosts)
+
 			var missing, extra []string
 			for _, f := range refFiles {
 				if !coldSet[f.rel] {
@@ -372,8 +396,8 @@ func runCheck(cfg Config, year int) bool {
 					extra = append(extra, f.rel)
 				}
 			}
-			if len(missing) > 0 || len(extra) > 0 {
-				gaps = append(gaps, gap{cold.name(), missing, extra})
+			if len(missing) > 0 || len(extra) > 0 || len(coldGhosts) > 0 {
+				gaps = append(gaps, gap{cold.name(), missing, extra, coldGhosts})
 				totalMissing += len(missing)
 				totalExtra += len(extra)
 			}
@@ -410,6 +434,9 @@ func runCheck(cfg Config, year int) bool {
 		}
 		for _, g := range r.gaps {
 			fmt.Printf("    %s\n", yellow(g.vol))
+			for _, f := range g.ghosts {
+				fmt.Printf("      %s %s\n", yellow("!"), f)
+			}
 			for _, f := range g.missing {
 				fmt.Printf("      %s %s\n", red("−"), f)
 			}
