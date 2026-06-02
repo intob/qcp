@@ -104,6 +104,22 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 		refSet[f.rel] = true
 	}
 
+	// check manifest: files listed in checksums.b3 but absent from disk
+	var ghosts []string
+	manifest := readChecksumFile(filepath.Join(refDir, "checksums.b3"))
+	for rel := range manifest {
+		if !refSet[rel] {
+			ghosts = append(ghosts, rel)
+		}
+	}
+	sort.Strings(ghosts)
+	if len(ghosts) > 0 {
+		fmt.Printf("  %s %s\n", yellow("!"), dim(refVol+" — in checksums.b3 but missing from disk:"))
+		for _, f := range ghosts {
+			fmt.Printf("    %s %s\n", yellow("!"), f)
+		}
+	}
+
 	var totalMissing, totalExtra, scanErrors, coldChecked int
 	for _, cold := range coldDrives {
 		if cold.name() == refColdVol {
@@ -155,7 +171,7 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 			yellow("!"), bold(slug), refVol)
 		return false
 	}
-	if totalMissing == 0 && totalExtra == 0 && scanErrors == 0 {
+	if totalMissing == 0 && totalExtra == 0 && scanErrors == 0 && len(ghosts) == 0 {
 		fmt.Printf("%s %s complete on all cold drives\n", green("✓"), bold(slug))
 		return true
 	}
@@ -284,8 +300,10 @@ func runCheck(cfg Config, year int) bool {
 		extra   []string
 	}
 	type missionReport struct {
-		slug string
-		gaps []gap
+		slug   string
+		refVol string
+		ghosts []string // in checksums.b3 but missing from disk on ref drive
+		gaps   []gap
 	}
 
 	var reports []missionReport
@@ -302,6 +320,16 @@ func runCheck(cfg Config, year int) bool {
 		for _, f := range refFiles {
 			refSet[f.rel] = true
 		}
+
+		// check manifest: files listed in checksums.b3 but absent from disk
+		var ghosts []string
+		manifest := readChecksumFile(filepath.Join(rm.dir, "checksums.b3"))
+		for rel := range manifest {
+			if !refSet[rel] {
+				ghosts = append(ghosts, rel)
+			}
+		}
+		sort.Strings(ghosts)
 
 		var gaps []gap
 		var coldChecked int
@@ -358,8 +386,8 @@ func runCheck(cfg Config, year int) bool {
 			})
 		}
 
-		if len(gaps) > 0 {
-			reports = append(reports, missionReport{slug, gaps})
+		if len(gaps) > 0 || len(ghosts) > 0 {
+			reports = append(reports, missionReport{slug: slug, refVol: rm.vol, ghosts: ghosts, gaps: gaps})
 		}
 	}
 
@@ -374,6 +402,12 @@ func runCheck(cfg Config, year int) bool {
 
 	for _, r := range reports {
 		fmt.Printf("  %s\n", bold(r.slug))
+		if len(r.ghosts) > 0 {
+			fmt.Printf("    %s\n", yellow(r.refVol+" — in checksums.b3 but missing from disk:"))
+			for _, f := range r.ghosts {
+				fmt.Printf("      %s %s\n", yellow("!"), f)
+			}
+		}
 		for _, g := range r.gaps {
 			fmt.Printf("    %s\n", yellow(g.vol))
 			for _, f := range g.missing {
