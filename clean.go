@@ -59,14 +59,46 @@ func runClean(cfg Config, skipConf bool, yearExplicit bool, year int) {
 		}
 	}
 
-	if len(items) == 0 {
-		pruned := 0
+	// minDepth: minimum path depth (separator count) from the scan root at which
+	// an empty directory is safe to remove. We only remove dirs inside a mission
+	// folder, never the mission or year dirs themselves.
+	//   root = driveRoot       → year/mission/subdir → minDepth 2
+	//   root = driveRoot/year  → mission/subdir      → minDepth 1
+	minDepth := 2
+	if yearExplicit {
+		minDepth = 1
+	}
+
+	postCleanup := func() {
+		var pruned int
 		for _, root := range scanRoots {
 			pruned += pruneChecksums(root)
 		}
 		if pruned > 0 {
 			fmt.Printf("%s pruned %d junk entry/entries from checksums.b3\n", green("✓"), pruned)
-		} else {
+		}
+		var emptyRemoved int
+		for _, root := range scanRoots {
+			emptyRemoved += removeEmptyDirsBelow(root, minDepth)
+		}
+		if emptyRemoved > 0 {
+			fmt.Printf("%s removed %d empty dir(s) inside missions\n", green("✓"), emptyRemoved)
+		}
+	}
+
+	if len(items) == 0 {
+		before := struct{ pruned, empty int }{}
+		for _, root := range scanRoots {
+			before.pruned += pruneChecksums(root)
+			before.empty += removeEmptyDirsBelow(root, minDepth)
+		}
+		if before.pruned > 0 {
+			fmt.Printf("%s pruned %d junk entry/entries from checksums.b3\n", green("✓"), before.pruned)
+		}
+		if before.empty > 0 {
+			fmt.Printf("%s removed %d empty dir(s) inside missions\n", green("✓"), before.empty)
+		}
+		if before.pruned == 0 && before.empty == 0 {
 			fmt.Println(dim("nothing to clean"))
 		}
 		return
@@ -113,14 +145,35 @@ func runClean(cfg Config, skipConf bool, yearExplicit bool, year int) {
 	}
 	fmt.Printf("%s removed %d item(s)\n", green("✓"), len(items))
 
-	// rewrite checksums.b3 on each scanned root to remove junk entries
-	var pruned int
-	for _, root := range scanRoots {
-		pruned += pruneChecksums(root)
+	postCleanup()
+}
+
+// removeEmptyDirsBelow removes empty directories under root whose path is at
+// least minDepth separators deep relative to root. Deepest dirs are removed
+// first so nested empties collapse correctly. Returns the number removed.
+func removeEmptyDirsBelow(root string, minDepth int) int {
+	var dirs []string
+	filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || !d.IsDir() || path == root {
+			return nil
+		}
+		rel := strings.TrimPrefix(path, root+string(os.PathSeparator))
+		if strings.Count(rel, string(os.PathSeparator)) >= minDepth {
+			dirs = append(dirs, path)
+		}
+		return nil
+	})
+	sort.Slice(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
+	var removed int
+	for _, d := range dirs {
+		entries, err := os.ReadDir(d)
+		if err == nil && len(entries) == 0 {
+			if os.Remove(d) == nil {
+				removed++
+			}
+		}
 	}
-	if pruned > 0 {
-		fmt.Printf("%s pruned %d junk entry/entries from checksums.b3\n", green("✓"), pruned)
-	}
+	return removed
 }
 
 // pruneChecksums walks root, finds every checksums.b3, and removes entries
