@@ -233,7 +233,15 @@ func main() {
 
 	switch {
 	case *checksumMissionStr == "all":
-		runChecksumYear(cfg, *year)
+		var ok bool
+		if yearExplicit {
+			ok = runChecksumYear(cfg, *year)
+		} else {
+			ok = runChecksumAll(cfg)
+		}
+		if !ok {
+			os.Exit(1)
+		}
 		return
 	case *checksumMissionStr != "":
 		n, _ := parseMission(*checksumMissionStr)

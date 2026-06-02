@@ -13,7 +13,24 @@ import (
 	"github.com/vbauerster/mpb/v8"
 )
 
-func runChecksumYear(cfg Config, year int) {
+func runChecksumAll(cfg Config) bool {
+	years := allYears(cfg)
+	if len(years) == 0 {
+		fmt.Println(dim("no missions found"))
+		return true
+	}
+	ok := true
+	for _, year := range years {
+		fmt.Printf("%s\n\n", bold(strconv.Itoa(year)))
+		if !runChecksumYear(cfg, year) {
+			ok = false
+		}
+		fmt.Println()
+	}
+	return ok
+}
+
+func runChecksumYear(cfg Config, year int) bool {
 	yearStr := strconv.Itoa(year)
 
 	// collect all missions in the year across all mounted drives
@@ -33,7 +50,8 @@ func runChecksumYear(cfg Config, year int) {
 		}
 	}
 	if len(drives) == 0 {
-		exit(1, "no drives with a %s directory mounted", yearStr)
+		fmt.Printf(red("no drives with a %s directory mounted\n"), yearStr)
+		return false
 	}
 
 	allSlugs := make(map[string]bool)
@@ -135,7 +153,7 @@ func runChecksumYear(cfg Config, year int) {
 	already := len(slugs) - len(jobs)
 	if len(jobs) == 0 {
 		fmt.Printf("%s\n", dim(fmt.Sprintf("all %d mission(s) already checksummed", already)))
-		return
+		return true
 	}
 
 	// total bytes per drive across all missions
@@ -251,9 +269,11 @@ func runChecksumYear(cfg Config, year int) {
 	p.Wait()
 
 	if n := totalFailed.Load(); n > 0 {
-		exit(1, "%d error(s) — some missions may be incomplete", n)
+		fmt.Printf("\n%s %d error(s) — some missions may be incomplete\n", red("ERROR:"), n)
+		return false
 	}
 	fmt.Printf("\n%s %d mission(s) checksummed\n", green("✓"), len(jobs))
+	return true
 }
 
 func runChecksum(cfg Config, missionNum int, year int) {
