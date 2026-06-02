@@ -90,7 +90,7 @@ func runChecksumYear(cfg Config, year int) {
 		}
 		fileSet := make(map[string]fileEntry)
 		for _, md := range mDrives {
-			fs, _, err := missionFiles(md.dir)
+			fs, _, _, err := missionFiles(md.dir)
 			if err != nil {
 				fmt.Printf("%s error scanning %s on %s: %v\n", yellow("warning:"), slug, md.vol, err)
 				continue
@@ -278,7 +278,7 @@ func runChecksum(cfg Config, missionNum int, year int) {
 	// union file lists from all drives so files absent from drives[0] are not silently omitted
 	fileSet := make(map[string]fileEntry)
 	for _, d := range drives {
-		fs, _, err := missionFiles(d.dir)
+		fs, _, _, err := missionFiles(d.dir)
 		if err != nil {
 			fmt.Printf("%s error scanning %s: %v\n", yellow("warning:"), d.vol, err)
 			continue

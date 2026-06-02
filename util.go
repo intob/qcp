@@ -102,13 +102,16 @@ func findFiles(root string) ([]fileEntry, error) {
 
 // missionFiles returns files for a mission dir, using checksums.b3 as the
 // manifest if present (preserves sizes for progress), otherwise walks the dir.
-func missionFiles(dir string) ([]fileEntry, int64, error) {
+// The third return value is the number of files listed in checksums.b3 but
+// absent from disk; callers should treat a non-zero value as an error.
+func missionFiles(dir string) ([]fileEntry, int64, int, error) {
 	cPath := filepath.Join(dir, "checksums.b3")
 	f, err := os.Open(cPath)
 	if err == nil {
 		defer f.Close()
 		var files []fileEntry
 		var total int64
+		var ghosts int
 		scanner := bufio.NewScanner(f)
 		for scanner.Scan() {
 			parts := strings.SplitN(scanner.Text(), "  ", 2)
@@ -118,24 +121,25 @@ func missionFiles(dir string) ([]fileEntry, int64, error) {
 			rel := parts[1]
 			info, err := os.Stat(filepath.Join(dir, rel))
 			if err != nil {
-				fmt.Printf("%s %s listed in checksums.b3 but missing on disk\n", yellow("warning:"), rel)
+				fmt.Printf("%s %s listed in checksums.b3 but missing on disk\n", red("ERROR:"), rel)
+				ghosts++
 				continue
 			}
 			files = append(files, fileEntry{rel: rel, size: info.Size()})
 			total += info.Size()
 		}
-		return files, total, scanner.Err()
+		return files, total, ghosts, scanner.Err()
 	}
 	// fallback: walk
 	files, err := findFiles(dir)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	var total int64
 	for _, f := range files {
 		total += f.size
 	}
-	return files, total, nil
+	return files, total, 0, nil
 }
 
 func missionManifestsMatch(a, b []fileEntry) bool {

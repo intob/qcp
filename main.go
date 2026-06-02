@@ -199,7 +199,9 @@ func main() {
 				os.Exit(1)
 			}
 		} else {
-			runSyncAll(cfg, *skipConf)
+			if !runSyncAll(cfg, *skipConf) {
+				os.Exit(1)
+			}
 		}
 		return
 	}

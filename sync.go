@@ -17,19 +17,21 @@ import (
 	"github.com/vbauerster/mpb/v8"
 )
 
-func runSyncAll(cfg Config, skipConf bool) {
+func runSyncAll(cfg Config, skipConf bool) bool {
 	years := allYears(cfg)
 	if len(years) == 0 {
 		fmt.Println(dim("no missions found"))
-		return
+		return true
 	}
+	ok := true
 	for _, year := range years {
 		fmt.Printf("%s\n\n", bold(strconv.Itoa(year)))
 		if !runSync(cfg, year, skipConf) {
-			break
+			ok = false
 		}
 		fmt.Println()
 	}
+	return ok
 }
 
 func runSync(cfg Config, year int, skipConf bool) bool {
@@ -102,6 +104,7 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 	}
 	missionSources := make(map[string]missionSource)
 	conflicted := make(map[string]bool)
+	var hasGhosts bool
 
 	for _, p := range primaries {
 		for slug := range p.missions {
@@ -109,10 +112,15 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 				continue
 			}
 			srcDir := filepath.Join(p.yearDir, slug)
-			files, size, err := missionFiles(srcDir)
+			files, size, ghosts, err := missionFiles(srcDir)
 			if err != nil {
 				fmt.Printf("%s scanning %s on %s: %v\n", red("ERROR"), slug, bold(p.Volume), err)
 				continue
+			}
+			if ghosts > 0 {
+				fmt.Printf("%s %s on %s: %d file(s) in checksums.b3 missing from disk — cold drives will be incomplete\n",
+					red("ERROR"), slug, bold(p.Volume), ghosts)
+				hasGhosts = true
 			}
 			if existing, ok := missionSources[slug]; ok {
 				if !missionManifestsMatch(existing.files, files) {
@@ -128,6 +136,13 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 		}
 	}
 
+	// build sorted slug list once — reused across all archive drives
+	var slugs []string
+	for slug := range missionSources {
+		slugs = append(slugs, slug)
+	}
+	sort.Strings(slugs)
+
 	// find what primaries have that each archive is missing (wholly or partially)
 	type syncJob struct {
 		slug    string
@@ -140,11 +155,6 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 	}
 	var jobs []syncJob
 	for _, dst := range archives {
-		var slugs []string
-		for slug := range missionSources {
-			slugs = append(slugs, slug)
-		}
-		sort.Strings(slugs)
 		for _, slug := range slugs {
 			ms := missionSources[slug]
 			dstDir := filepath.Join(dst.yearDir, slug)
@@ -188,7 +198,7 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 
 	if len(jobs) == 0 {
 		fmt.Println(dim("all drives are in sync"))
-		return true
+		return !hasGhosts
 	}
 
 	for _, j := range jobs {
@@ -203,13 +213,16 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 		exit(0, "aborted")
 	}
 
-	// interrupt handler — clean up any dstDirs we create
+	// interrupt handler — only offer to delete dirs this run will create,
+	// not dirs that already existed (partial-diff jobs).
 	ctx, cancel := context.WithCancel(context.Background())
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt)
 	var dstDirs []string
 	for _, j := range jobs {
-		dstDirs = append(dstDirs, j.dstDir)
+		if !dirExists(j.dstDir) {
+			dstDirs = append(dstDirs, j.dstDir)
+		}
 	}
 	go func() {
 		<-sigCh
@@ -220,8 +233,11 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 		reader := bufio.NewReader(os.Stdin)
 		var resp string
 		for resp != "y" && resp != "n" {
-			line, _ := reader.ReadString('\n')
+			line, err := reader.ReadString('\n')
 			resp = strings.TrimSpace(line)
+			if err != nil {
+				break // stdin closed; don't delete
+			}
 		}
 		if resp == "y" {
 			for _, d := range dstDirs {
@@ -376,12 +392,14 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 		cPath := filepath.Join(dstRoot, "checksums.b3")
 		lines = mergeChecksums(cPath, lines)
 		sort.Strings(lines)
-		os.WriteFile(cPath, []byte(strings.Join(lines, "\n")+"\n"), 0644)
+		if err := os.WriteFile(cPath, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
+			fmt.Printf("%s writing checksums: %v\n", red("ERROR"), err)
+		}
 	}
 
 	perArchive := fmtSize(uint64(total.Load()) / uint64(len(archiveSize)))
 	fmt.Printf("\n%s %s synced to %d archive(s)\n", green("✓"), perArchive, len(archiveSize))
-	return true
+	return !hasGhosts
 }
 
 func buildSyncOps(files []fileEntry, srcDir, dstDir string, bar *barTracker) []*op {

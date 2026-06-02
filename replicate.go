@@ -101,16 +101,22 @@ func runReplicate(cfg Config, year int, skipConf bool) bool {
 		size   int64
 	}
 	missionSources := make(map[string]missionSource)
+	var hasGhosts bool
 	for _, c := range coldDrives {
 		for slug := range c.missions {
 			if _, seen := missionSources[slug]; seen {
 				continue
 			}
 			srcDir := filepath.Join(c.yearDir, slug)
-			files, size, err := missionFiles(srcDir)
+			files, size, ghosts, err := missionFiles(srcDir)
 			if err != nil {
 				fmt.Printf("%s scanning %s on %s: %v\n", red("ERROR"), slug, bold(c.name()), err)
 				continue
+			}
+			if ghosts > 0 {
+				fmt.Printf("%s %s on %s: %d file(s) in checksums.b3 missing from disk — replicated drives will be incomplete\n",
+					red("ERROR"), slug, bold(c.name()), ghosts)
+				hasGhosts = true
 			}
 			missionSources[slug] = missionSource{c.name(), srcDir, files, size}
 		}
@@ -179,7 +185,7 @@ func runReplicate(cfg Config, year int, skipConf bool) bool {
 
 	if len(jobs) == 0 {
 		fmt.Println(dim("cold drives are in sync"))
-		return true
+		return !hasGhosts
 	}
 
 	for _, j := range jobs {
@@ -194,9 +200,12 @@ func runReplicate(cfg Config, year int, skipConf bool) bool {
 	ctx, cancel := context.WithCancel(context.Background())
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt)
+	// only offer to delete dirs this run will create, not pre-existing ones
 	var partialDirs []string
 	for _, j := range jobs {
-		partialDirs = append(partialDirs, j.dstDir)
+		if !dirExists(j.dstDir) {
+			partialDirs = append(partialDirs, j.dstDir)
+		}
 	}
 	go func() {
 		<-sigCh
@@ -207,8 +216,11 @@ func runReplicate(cfg Config, year int, skipConf bool) bool {
 		reader := bufio.NewReader(os.Stdin)
 		var resp string
 		for resp != "y" && resp != "n" {
-			line, _ := reader.ReadString('\n')
+			line, err := reader.ReadString('\n')
 			resp = strings.TrimSpace(line)
+			if err != nil {
+				break // stdin closed; don't delete
+			}
 		}
 		if resp == "y" {
 			for _, d := range partialDirs {
@@ -367,5 +379,5 @@ func runReplicate(cfg Config, year int, skipConf bool) bool {
 
 	perDrive := fmtSize(uint64(total.Load()) / uint64(len(archiveSize)))
 	fmt.Printf("\n%s %s replicated to %d cold drive(s)\n", green("✓"), perDrive, len(archiveSize))
-	return true
+	return !hasGhosts
 }
