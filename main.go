@@ -334,8 +334,11 @@ func main() {
 		var resp string
 		for resp != "y" && resp != "n" {
 			fmt.Print("\r\033[2K\ninterrupted — delete partial mission and revert counter? (y/n): ")
-			line, _ := reader.ReadString('\n')
+			line, err := reader.ReadString('\n')
 			resp = strings.TrimSpace(line)
+			if err != nil {
+				break
+			}
 		}
 		if resp == "y" {
 			for _, d := range dstRoots {
@@ -444,11 +447,6 @@ func main() {
 
 	// Phase 2: verify — per-drive pool
 	fmt.Printf("\n%s\n\n", dim("verifying..."))
-	p2 := mpb.NewWithContext(ctx, mpb.WithWidth(64))
-	verifyBars := make(map[string]*barTracker)
-	for _, dstRoot := range dstRoots {
-		verifyBars[dstRoot] = addBar(p2, dstNames[dstRoot], totalSize)
-	}
 
 	var mu sync.Mutex
 	newChecksums := make(map[string][]string)
@@ -459,6 +457,17 @@ func main() {
 			resultsByDst[r.dstRoot] = append(resultsByDst[r.dstRoot], r)
 		}
 	}
+
+	p2 := mpb.NewWithContext(ctx, mpb.WithWidth(64))
+	verifyBars := make(map[string]*barTracker)
+	for dstRoot, rs := range resultsByDst {
+		var size int64
+		for _, r := range rs {
+			size += r.n
+		}
+		verifyBars[dstRoot] = addBar(p2, dstNames[dstRoot], size)
+	}
+
 	var verifyPools []*pool
 	for dstRoot, rs := range resultsByDst {
 		wp := newPool(dstInfos[dstRoot].concurrency)

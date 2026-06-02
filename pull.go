@@ -20,19 +20,27 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 		exit(1, "mission %03d not found: %v", missionNum, err)
 	}
 
-	// find source on a cold drive
-	var srcDir string
-	var srcVol string
+	// find source on a cold drive — prefer the drive with the most files to
+	// avoid silently pulling from a partially-synced cold drive
+	var srcDir, srcVol string
+	var srcCount int
 	for _, d := range cfg.Drives {
 		if d.Role != "cold" {
 			continue
 		}
 		base := d.basePath()
 		dir := filepath.Join(base, d.Root, yearStr, slug)
-		if dirExists(dir) {
+		if !dirExists(dir) {
+			continue
+		}
+		files, err := findFiles(dir)
+		if err != nil {
+			continue
+		}
+		if len(files) > srcCount {
 			srcDir = dir
 			srcVol = d.name()
-			break
+			srcCount = len(files)
 		}
 	}
 	if srcDir == "" {

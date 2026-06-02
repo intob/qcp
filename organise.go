@@ -392,22 +392,32 @@ func executeOrganisePlan(p organisePlan) bool {
 			markAffected(mf.f.rel, destDir)
 		}
 	}
+	unsortedUsed := make(map[string]bool)
 	for _, f := range p.unsorted {
 		src := filepath.Join(p.yearDir, f.rel)
 		// use full rel path (separators replaced) to avoid basename collisions;
 		// if separator-replacement itself creates a collision, add a numeric suffix
 		safeName := strings.ReplaceAll(f.rel, string(os.PathSeparator), "_")
-		dst := filepath.Join(p.yearDir, "_unsorted", safeName)
-		if _, statErr := os.Stat(dst); statErr == nil {
+		conflicts := func(name string) bool {
+			if unsortedUsed[name] {
+				return true
+			}
+			_, err := os.Stat(filepath.Join(p.yearDir, "_unsorted", name))
+			return err == nil
+		}
+		if conflicts(safeName) {
 			ext := filepath.Ext(safeName)
 			stem := strings.TrimSuffix(safeName, ext)
 			for n := 2; ; n++ {
-				dst = filepath.Join(p.yearDir, "_unsorted", fmt.Sprintf("%s_%d%s", stem, n, ext))
-				if _, statErr := os.Stat(dst); statErr != nil {
+				candidate := fmt.Sprintf("%s_%d%s", stem, n, ext)
+				if !conflicts(candidate) {
+					safeName = candidate
 					break
 				}
 			}
 		}
+		unsortedUsed[safeName] = true
+		dst := filepath.Join(p.yearDir, "_unsorted", safeName)
 		if src == dst {
 			continue
 		}

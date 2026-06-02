@@ -181,7 +181,7 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 	}
 
 	if refColdVol != "" && coldChecked == 0 {
-		fmt.Printf("%s %s exists on %s only — not replicated to any other cold drive\n",
+		fmt.Printf("%s %s exists on %s only — not found on any other mounted cold drive\n",
 			yellow("!"), bold(slug), refVol)
 		return false
 	}
@@ -406,7 +406,7 @@ func runCheck(cfg Config, year int) bool {
 		if rm.coldVol != "" && coldChecked == 0 {
 			gaps = append(gaps, gap{
 				vol:     rm.vol,
-				missing: []string{"(only copy — not replicated to any other cold drive)"},
+				missing: []string{"(only copy — not found on any other mounted cold drive)"},
 			})
 		}
 

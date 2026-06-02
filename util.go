@@ -221,6 +221,9 @@ func isFullyChecksummed(dir string) bool {
 		return false
 	}
 	for _, f := range files {
+		if f.rel == "checksums.b3" {
+			continue // manifest never lists itself
+		}
 		if manifest[f.rel] == "" {
 			return false
 		}

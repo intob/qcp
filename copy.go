@@ -52,11 +52,19 @@ func job(src, dst string, bar *barTracker) *result {
 	}
 	buf := make([]byte, 4*1024*1024)
 	n, err := io.CopyBuffer(w, io.TeeReader(rd, h), buf)
-	wr.Sync()
-	wr.Close()
+	syncErr := wr.Sync()
+	closeErr := wr.Close()
 	if err != nil {
 		os.Remove(dst)
 		return &result{err: err}
+	}
+	if syncErr != nil {
+		os.Remove(dst)
+		return &result{err: syncErr}
+	}
+	if closeErr != nil {
+		os.Remove(dst)
+		return &result{err: closeErr}
 	}
 
 	if err := os.Chmod(dst, perm); err != nil {
