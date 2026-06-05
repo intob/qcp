@@ -64,6 +64,7 @@ func usage() {
 
 	section("MAINTENANCE")
 	row("-clean", "", "find and remove junk files from all mounted drives")
+	row("-eject", "", "eject all mounted cards and drives")
 
 	section("FLAGS")
 	row("-year", "year|all", fmt.Sprintf("year to operate on (default: %d)", time.Now().Year()))
@@ -93,6 +94,7 @@ func main() {
 	doOrganise := flag.Bool("organise", false, "group unorganised files into seasonal mission folders")
 	doReorganise := flag.Bool("reorganise", false, "regroup already-organised missions by season (re-runs organise over existing numbered folders)")
 	doRenumber := flag.Bool("renumber", false, "fix mission numbers to be sequential with no gaps or duplicates")
+	doEject := flag.Bool("eject", false, "eject all mounted cards and drives")
 	flag.Parse()
 
 	if *showVersion {
@@ -147,6 +149,11 @@ func main() {
 		if !runCheckMission(cfg, n, year, !yearAll) {
 			os.Exit(1)
 		}
+		return
+	}
+
+	if *doEject {
+		runEject(cfg)
 		return
 	}
 
