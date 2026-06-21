@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -153,4 +154,51 @@ func promptMissionForDay(cfg Config, year, nextNum int, date, suggestion string)
 		// Name → new mission using the pre-computed nextNum
 		return fmt.Sprintf("%03d_%s", nextNum, sanitizeMission(line)), true, nextNum, nil
 	}
+}
+
+// checkDuplicateIngest walks the year directory on each mounted drive and
+// returns a map of mission slug → number of card filenames already present
+// in that mission. Only missions with at least one match are returned.
+func checkDuplicateIngest(drives []DriveConfig, yearStr string, scanned []scannedCard) map[string]int {
+	// Collect all base filenames from the cards.
+	cardFiles := make(map[string]bool, len(scanned)*100)
+	for _, sc := range scanned {
+		for _, f := range sc.files {
+			cardFiles[filepath.Base(f.rel)] = true
+		}
+	}
+
+	hits := map[string]int{}
+	seen := map[string]bool{} // deduplicate across drives
+
+	for _, d := range drives {
+		base := d.basePath()
+		yearDir := filepath.Join(base, d.Root, yearStr)
+		if !dirExists(yearDir) {
+			continue
+		}
+		entries, err := os.ReadDir(yearDir)
+		if err != nil {
+			continue
+		}
+		for _, mission := range entries {
+			if !mission.IsDir() {
+				continue
+			}
+			slug := mission.Name()
+			fs.WalkDir(os.DirFS(filepath.Join(yearDir, slug)), ".", func(path string, de fs.DirEntry, err error) error {
+				if err != nil || de.IsDir() {
+					return nil
+				}
+				name := filepath.Base(path)
+				key := slug + "/" + name
+				if cardFiles[name] && !seen[key] {
+					seen[key] = true
+					hits[slug]++
+				}
+				return nil
+			})
+		}
+	}
+	return hits
 }

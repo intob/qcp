@@ -286,6 +286,15 @@ func main() {
 		exit(7, "no files found on mounted cards")
 	}
 
+	// Warn if card files are already present in an existing mission.
+	if dups := checkDuplicateIngest(cfg.Drives, yearStr, scanned); len(dups) > 0 {
+		fmt.Printf("%s card files already found in:\n", yellow("warning:"))
+		for slug, n := range dups {
+			fmt.Printf("  %s  %s\n", bold(slug), dim(fmt.Sprintf("%d file(s)", n)))
+		}
+		fmt.Println()
+	}
+
 	// Group files by recording date.
 	days := groupAllByDate(scanned)
 
