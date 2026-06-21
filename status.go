@@ -50,6 +50,16 @@ func runStatus(cfg Config, year int) {
 			tags)
 	}
 
+	// cards section
+	fmt.Printf("\n%s\n", bold("CARDS"))
+	cards := mountedCards(cfg)
+	if len(cards) == 0 {
+		fmt.Printf("  %s\n", dim("none mounted"))
+	}
+	for _, c := range cards {
+		fmt.Printf("  %s  %s\n", c.Volume, dim("mounted"))
+	}
+
 	// missions section — same logic as runList
 	fmt.Printf("\n%s  %d\n", bold("MISSIONS"), year)
 

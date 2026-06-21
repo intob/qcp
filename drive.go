@@ -157,21 +157,64 @@ func usbSpeedFromTree(node map[string]interface{}, mediaName string) string {
 	return ""
 }
 
-func mountedCards(cfgs []CardConfig) []mountedCard {
+func mountedCards(cfg Config) []mountedCard {
+	// Build set of volume roots used by configured drives so we can exclude them.
+	driveRoots := map[string]bool{}
+	for _, d := range cfg.Drives {
+		base := d.basePath()
+		if strings.HasPrefix(base, "/Volumes/") {
+			driveRoots[filepath.Clean(base)] = true
+		}
+	}
+
+	// Device ID of the boot volume — we skip any volume on the same filesystem.
+	var rootStat syscall.Statfs_t
+	syscall.Statfs("/", &rootStat)
+
 	volumes, _ := os.ReadDir("/Volumes")
 	var out []mountedCard
-	for _, c := range cfgs {
-		for _, vol := range volumes {
-			if !strings.HasPrefix(vol.Name(), c.Volume) {
-				continue
-			}
-			src := filepath.Join("/Volumes", vol.Name(), c.Sub)
+	for _, vol := range volumes {
+		volPath := filepath.Join("/Volumes", vol.Name())
+
+		if driveRoots[volPath] {
+			continue
+		}
+
+		var vStat syscall.Statfs_t
+		if err := syscall.Statfs(volPath, &vStat); err != nil {
+			continue
+		}
+		if vStat.Fsid == rootStat.Fsid {
+			continue
+		}
+		if !isRemovable(volPath) {
+			continue
+		}
+
+		for _, c := range cfg.Cards {
+			src := filepath.Join(volPath, c.Sub)
 			if dirExists(src) {
 				out = append(out, mountedCard{CardConfig{Volume: vol.Name(), Sub: c.Sub}, src})
+				break
 			}
 		}
 	}
 	return out
+}
+
+func isRemovable(volPath string) bool {
+	out, err := exec.Command("diskutil", "info", volPath).Output()
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Removable Media:") {
+			val := strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
+			return val == "Yes" || val == "Removable"
+		}
+	}
+	return false
 }
 
 func availableBytes(path string) uint64 {

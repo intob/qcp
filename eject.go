@@ -10,11 +10,9 @@ import (
 func runEject(cfg Config) {
 	var targets []struct{ name, path string }
 
-	for _, c := range cfg.Cards {
+	for _, c := range mountedCards(cfg) {
 		p := filepath.Join("/Volumes", c.Volume)
-		if dirExists(p) {
-			targets = append(targets, struct{ name, path string }{c.Volume, p})
-		}
+		targets = append(targets, struct{ name, path string }{c.Volume, p})
 	}
 	for _, d := range cfg.Drives {
 		base := d.basePath()

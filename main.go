@@ -263,9 +263,9 @@ func main() {
 		return
 	}
 
-	cards := mountedCards(cfg.Cards)
+	cards := mountedCards(cfg)
 	if len(cards) == 0 {
-		exit(1, "no configured cards mounted")
+		exit(1, "no cards mounted")
 	}
 
 	yearStr := strconv.Itoa(year)
