@@ -341,6 +341,10 @@ func main() {
 		<-sigCh
 		signal.Stop(sigCh)
 		cancel()
+		if len(intrDstRoots) == 0 {
+			fmt.Println()
+			os.Exit(130)
+		}
 		time.Sleep(150 * time.Millisecond)
 		reader := bufio.NewReader(os.Stdin)
 		var resp string
