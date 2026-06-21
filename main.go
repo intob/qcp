@@ -38,6 +38,7 @@ func usage() {
 	}
 
 	section("INGEST")
+	row("-ingest", "", "ingest cards, prompting for mission name")
 	row("-ingest", "name", `create new mission (e.g. "Altissimo with Anton")`)
 	row("-ingest", "n", "append cards to existing mission number")
 
@@ -530,29 +531,37 @@ func main() {
 	}
 
 	if len(days) == 1 {
-		// ── Single-day path: existing behaviour ──────────────────────────────
-		if *missionFlag == "" {
-			exit(3, "-ingest is required")
+		// ── Single-day path ───────────────────────────────────────────────────
+		nextNum, err := peekMission(year)
+		if err != nil {
+			exit(4, "err reading mission counter: %v", err)
 		}
 
 		var missionSlug string
 		var isAppend bool
 		var missionNum int
 
-		if n, err := strconv.Atoi(*missionFlag); err == nil && n > 0 {
-			isAppend = true
-			slug, err := findMissionSlug(cfg.Drives, yearStr, n)
+		if *missionFlag != "" {
+			// Value provided on CLI — parse directly without prompting.
+			if n, err := strconv.Atoi(*missionFlag); err == nil && n > 0 {
+				isAppend = true
+				slug, err := findMissionSlug(cfg.Drives, yearStr, n)
+				if err != nil {
+					exit(2, "mission %03d not found: %v", n, err)
+				}
+				missionSlug = slug
+			} else {
+				missionNum = nextNum
+				missionSlug = fmt.Sprintf("%03d_%s", nextNum, sanitizeMission(*missionFlag))
+			}
+		} else {
+			slug, isNew, num, err := promptMissionForDay(cfg, year, nextNum, days[0].date, "")
 			if err != nil {
-				exit(2, "mission %03d not found: %v", n, err)
+				exit(4, "err prompting for mission: %v", err)
 			}
 			missionSlug = slug
-		} else {
-			num, err := peekMission(year)
-			if err != nil {
-				exit(4, "err reading mission counter: %v", err)
-			}
+			isAppend = !isNew
 			missionNum = num
-			missionSlug = fmt.Sprintf("%03d_%s", num, sanitizeMission(*missionFlag))
 		}
 
 		dstRoots, dstNames, dstBase := buildDst(missionSlug)
