@@ -35,6 +35,14 @@ type scannedCard struct {
 	files []fileEntry
 }
 
+func (sc scannedCard) totalSize() int64 {
+	var n int64
+	for _, f := range sc.files {
+		n += f.size
+	}
+	return n
+}
+
 type mountedCard struct {
 	CardConfig
 	src string
@@ -252,7 +260,7 @@ func expandPath(p string) (string, error) {
 }
 
 func confirm() bool {
-	fmt.Print("enter \"y\" to confirm: ")
+	fmt.Print("  Confirm? [y/n]  ")
 	var resp string
 	fmt.Scan(&resp)
 	return resp == "y"

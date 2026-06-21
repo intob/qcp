@@ -288,9 +288,9 @@ func main() {
 
 	// Warn if card files are already present in an existing mission.
 	if dups := checkDuplicateIngest(cfg.Drives, yearStr, scanned); len(dups) > 0 {
-		fmt.Printf("%s card files already found in:\n", yellow("warning:"))
+		fmt.Printf("\n  %s\n\n", yellow("⚠  These cards may already be ingested:"))
 		for slug, n := range dups {
-			fmt.Printf("  %s  %s\n", bold(slug), dim(fmt.Sprintf("%d file(s)", n)))
+			fmt.Printf("     %s  %s\n", bold(slug), dim(fmt.Sprintf("%d file(s) matched", n)))
 		}
 		fmt.Println()
 	}
@@ -407,7 +407,7 @@ func main() {
 			}
 		}
 
-		fmt.Printf("\n%s %d files (%s) to %d drive(s)\n\n", dim("copying..."), dayFiles, fmtSize(uint64(dayTotal)), len(dstRoots))
+		fmt.Printf("\n  %s  %s  %s\n\n", blue("↓"), bold("Copying"), dim(fmt.Sprintf("%d files  %s  →  %d drive(s)", dayFiles, fmtSize(uint64(dayTotal)), len(dstRoots))))
 
 		p1 := mpb.NewWithContext(ctx, mpb.WithWidth(64))
 		copyBars := make(map[string]*barTracker)
@@ -426,7 +426,7 @@ func main() {
 		for _, dstRoot := range dstRoots {
 			missing := missingByDst[dstRoot]
 			if len(missing) == 0 {
-				fmt.Printf("%s: %s\n", bold(dstNames[dstRoot]), dim("already up to date"))
+				fmt.Printf("  %s  %s  %s\n", dim("─"), dim(dstNames[dstRoot]), dim("already up to date"))
 				continue
 			}
 			wp := newPool(dstInfos[dstRoot].concurrency)
@@ -468,7 +468,7 @@ func main() {
 			exit(10, "%d file(s) failed to copy", copyFailed)
 		}
 
-		fmt.Printf("\n%s\n\n", dim("verifying..."))
+		fmt.Printf("\n  %s  %s\n\n", magenta("◇"), bold("Verifying"))
 
 		var mu sync.Mutex
 		newChecksums := make(map[string][]string)
@@ -540,7 +540,7 @@ func main() {
 		}
 
 		copied := fmtSize(uint64(total.Load()) / uint64(len(dstRoots)))
-		fmt.Printf("\n%s %s copied and verified → %s\n", green("✓"), copied, bold(missionSlug))
+		fmt.Printf("\n  %s  %s  %s  %s\n", green("✓"), bold("Done"), dim(copied+" copied and verified  →"), bold(missionSlug))
 	}
 
 	if len(days) == 1 {
@@ -569,9 +569,13 @@ func main() {
 			}
 		} else {
 			d := days[0]
-			fmt.Printf("%d card(s)  ·  %d files  ·  %s  ·  %s\n\n",
-				len(scanned), d.fileCount, fmtSize(uint64(d.totalSize)), d.date)
-			fmt.Printf("Enter a name (new mission) or number (append to existing):\n\n")
+			fmt.Printf("  %s  %s  %s  %s  %s  %s  %s\n\n",
+				cyan("◆"),
+				bold(fmt.Sprintf("%d card(s)", len(scanned))),
+				dim("·"), dim(fmt.Sprintf("%d files", d.fileCount)),
+				dim("·"), dim(fmtSize(uint64(d.totalSize))),
+				dim("·  "+d.date))
+			fmt.Printf("  Name or number:\n\n")
 			slug, isNew, num, err := promptMissionForDay(cfg, year, nextNum, days[0].date, "")
 			if err != nil {
 				exit(4, "err prompting for mission: %v", err)
@@ -583,14 +587,15 @@ func main() {
 
 		dstRoots, dstNames, dstBase := buildDst(missionSlug)
 
+		fmt.Println()
 		for _, sc := range scanned {
-			fmt.Printf("%s → %s\n", sc.src, strings.Join(dstRoots, ", "))
-			for _, f := range sc.files {
-				fmt.Printf("  %s\n", f.rel)
-			}
+			fmt.Printf("  %s  %s  %s\n", dim("source "), cyan(sc.src), dim(fmt.Sprintf("(%d files, %s)", len(sc.files), fmtSize(uint64(sc.totalSize())))))
 		}
-		fmt.Printf("\nmission:      %s\n", missionSlug)
-		fmt.Printf("destinations: %s\n", strings.Join(dstRoots, "\n              "))
+		fmt.Printf("  %s  %s\n", dim("mission"), bold(missionSlug))
+		for _, r := range dstRoots {
+			fmt.Printf("  %s  %s\n", dim("dest   "), dim(r))
+		}
+		fmt.Println()
 		if !*skipConf && !confirm() {
 			exit(8, "aborted by user")
 		}
@@ -608,13 +613,16 @@ func main() {
 
 	} else {
 		// ── Multi-day path: prompt for each day ──────────────────────────────
-		fmt.Printf("Cards have footage from %s days:\n\n", bold(strconv.Itoa(len(days))))
+		fmt.Printf("  %s  %s across %s days:\n\n",
+			cyan("◆"),
+			dim(fmt.Sprintf("%d cards", len(scanned))),
+			bold(strconv.Itoa(len(days))))
 		for _, d := range days {
-			fmt.Printf("  %s  %d files  %s\n", bold(d.date), d.fileCount, dim(fmtSize(uint64(d.totalSize))))
+			fmt.Printf("     %s  %s  %s\n", bold(d.date), dim(fmt.Sprintf("%d files", d.fileCount)), dim(fmtSize(uint64(d.totalSize))))
 		}
 
 		suggestion := *missionFlag // use -ingest value as hint for first day if provided
-		fmt.Printf("\nEnter a name (new mission) or number (append to existing) for each day:\n\n")
+		fmt.Printf("\n  Name or number for each day:\n\n")
 
 		// Pre-compute the next available mission number so each new mission
 		// in the same run gets a unique sequential number.
@@ -650,18 +658,19 @@ func main() {
 			plan = append(plan, dayPlan{d, slug, isNew, num, dstRoots, dstNames, dstBase})
 		}
 
-		fmt.Printf("\n%s\n", bold("Plan:"))
+		rule := strings.Repeat("─", 56)
+		fmt.Printf("\n  %s\n  %s\n", bold("Plan"), dim(rule))
 		for _, p := range plan {
-			tag := dim(" (new)")
+			tag := green("new")
 			if !p.isNew {
-				tag = dim(" (append)")
+				tag = cyan("append")
 			}
-			fmt.Printf("  %s → %s%s\n", p.day.date, bold(p.slug), tag)
+			fmt.Printf("  %s  →  %s  %s\n", dim(p.day.date), bold(p.slug), dim("["+tag+dim("]")))
 			for _, r := range p.dstRoots {
-				fmt.Printf("             %s\n", r)
+				fmt.Printf("  %s      %s\n", strings.Repeat(" ", len(p.day.date)), dim(r))
 			}
 		}
-		fmt.Println()
+		fmt.Printf("  %s\n\n", dim(rule))
 
 		if !*skipConf && !confirm() {
 			exit(8, "aborted by user")
@@ -677,7 +686,7 @@ func main() {
 		}
 
 		for _, p := range plan {
-			fmt.Printf("\n%s %s\n", dim("ingesting"), bold(p.slug))
+			fmt.Printf("\n  %s  %s\n", blue("▶"), bold(p.slug))
 			intrDstRoots = p.dstRoots
 			intrIsNew = p.isNew
 			runDay(p.day.cards, p.slug, p.dstRoots, p.dstNames, p.dstBase)
