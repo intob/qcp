@@ -555,6 +555,10 @@ func main() {
 				missionSlug = fmt.Sprintf("%03d_%s", nextNum, sanitizeMission(*missionFlag))
 			}
 		} else {
+			d := days[0]
+			fmt.Printf("%d card(s)  ·  %d files  ·  %s  ·  %s\n\n",
+				len(scanned), d.fileCount, fmtSize(uint64(d.totalSize)), d.date)
+			fmt.Printf("Enter a name (new mission) or number (append to existing):\n\n")
 			slug, isNew, num, err := promptMissionForDay(cfg, year, nextNum, days[0].date, "")
 			if err != nil {
 				exit(4, "err prompting for mission: %v", err)
