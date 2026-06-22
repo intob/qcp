@@ -187,7 +187,7 @@ func mountedCards(cfg Config) []mountedCard {
 		if vStat.Fsid == rootStat.Fsid {
 			continue
 		}
-		if !isRemovable(volPath) {
+		if !isExternalMedia(volPath) {
 			continue
 		}
 
@@ -202,7 +202,7 @@ func mountedCards(cfg Config) []mountedCard {
 	return out
 }
 
-func isRemovable(volPath string) bool {
+func isExternalMedia(volPath string) bool {
 	out, err := exec.Command("diskutil", "info", volPath).Output()
 	if err != nil {
 		return false
@@ -211,7 +211,16 @@ func isRemovable(volPath string) bool {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "Removable Media:") {
 			val := strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
-			return val == "Yes" || val == "Removable"
+			if val == "Yes" || val == "Removable" {
+				return true
+			}
+		}
+		// CFexpress and some SSDs report as "Fixed" but are still external USB devices.
+		if strings.HasPrefix(line, "Protocol:") {
+			val := strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
+			if val == "USB" {
+				return true
+			}
 		}
 	}
 	return false
