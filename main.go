@@ -575,10 +575,14 @@ func main() {
 				dim("·"), dim(fmt.Sprintf("%d files", d.fileCount)),
 				dim("·"), dim(fmtSize(uint64(d.totalSize))),
 				dim("·  "+d.date))
-			fmt.Printf("  Name or number:\n\n")
-			slug, isNew, num, err := promptMissionForDay(cfg, year, nextNum, days[0].date, "")
+			fmt.Printf("  Name or number  %s:\n\n", dim("(- to skip)"))
+			slug, isNew, num, skipped, err := promptMissionForDay(cfg, year, nextNum, days[0].date, "")
 			if err != nil {
 				exit(4, "err prompting for mission: %v", err)
+			}
+			if skipped {
+				fmt.Printf("\n  %s\n", dim("skipped"))
+				return
 			}
 			missionSlug = slug
 			isAppend = !isNew
@@ -622,7 +626,7 @@ func main() {
 		}
 
 		suggestion := *missionFlag // use -ingest value as hint for first day if provided
-		fmt.Printf("\n  Name or number for each day:\n\n")
+		fmt.Printf("\n  Name or number for each day  %s:\n\n", dim("(- to skip)"))
 
 		// Pre-compute the next available mission number so each new mission
 		// in the same run gets a unique sequential number.
@@ -647,15 +651,23 @@ func main() {
 			if i == 0 {
 				hint = suggestion
 			}
-			slug, isNew, num, err := promptMissionForDay(cfg, year, nextNum, d.date, hint)
+			slug, isNew, num, skipped, err := promptMissionForDay(cfg, year, nextNum, d.date, hint)
 			if err != nil {
 				exit(4, "err reading mission counter: %v", err)
+			}
+			if skipped {
+				continue
 			}
 			if isNew {
 				nextNum++
 			}
 			dstRoots, dstNames, dstBase := buildDst(slug)
 			plan = append(plan, dayPlan{d, slug, isNew, num, dstRoots, dstNames, dstBase})
+		}
+
+		if len(plan) == 0 {
+			fmt.Printf("\n  %s\n", dim("all days skipped"))
+			return
 		}
 
 		rule := strings.Repeat("─", 56)

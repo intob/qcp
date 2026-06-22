@@ -123,8 +123,8 @@ func groupAllByDate(scanned []scannedCard) []dayGroup {
 // promptMissionForDay asks the user to assign a recording day to a mission.
 // nextNum is the mission number to use if a new mission is created (caller increments between days).
 // suggestion is shown in brackets and accepted on empty input.
-// Returns slug, whether it's a new mission, and the new mission number (0 if appending).
-func promptMissionForDay(cfg Config, year, nextNum int, date, suggestion string) (slug string, isNew bool, num int, err error) {
+// Returns slug, whether it's a new mission, the new mission number (0 if appending), and whether the day was skipped.
+func promptMissionForDay(cfg Config, year, nextNum int, date, suggestion string) (slug string, isNew bool, num int, skip bool, err error) {
 	reader := bufio.NewReader(os.Stdin)
 	yearStr := strconv.Itoa(year)
 	for {
@@ -142,6 +142,10 @@ func promptMissionForDay(cfg Config, year, nextNum int, date, suggestion string)
 				continue
 			}
 		}
+		// - → skip this day
+		if line == "-" {
+			return "", false, 0, true, nil
+		}
 		// Number → append to existing mission
 		if n, e := strconv.Atoi(line); e == nil && n > 0 {
 			s, e := findMissionSlug(cfg.Drives, yearStr, n)
@@ -149,10 +153,10 @@ func promptMissionForDay(cfg Config, year, nextNum int, date, suggestion string)
 				fmt.Printf("  mission %03d not found\n", n)
 				continue
 			}
-			return s, false, 0, nil
+			return s, false, 0, false, nil
 		}
 		// Name → new mission using the pre-computed nextNum
-		return fmt.Sprintf("%03d_%s", nextNum, sanitizeMission(line)), true, nextNum, nil
+		return fmt.Sprintf("%03d_%s", nextNum, sanitizeMission(line)), true, nextNum, false, nil
 	}
 }
 
