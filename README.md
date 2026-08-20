@@ -231,3 +231,20 @@ qcp -check all
 # periodic integrity check across the whole archive
 qcp -verify all -year all
 ```
+
+## Known inefficiencies
+
+**Copying to N destinations reads the source N times.** Every copy job opens the
+source file independently, so copying a 22GB mission to two hot drives reads
+44GB. This affects `-ingest`, `-sync`, `-replicate`, `-pull` and `-copy` alike.
+
+It only bites when the source cannot supply N× the destinations' write
+bandwidth — two SSDs writing at 1GB/s each need 2GB/s of reads, so a 1GB/s
+source becomes the ceiling. With one destination, or a source much faster than
+the destinations, it costs nothing.
+
+Fixing it means reading each file once in `job()` (`copy.go`) and fanning the
+bytes out to N writers, hashing once on the way through. The awkward part is
+error handling: a single read currently fails or succeeds for one destination,
+and a shared read has to record a per-destination result so one failing drive
+does not abort the others.

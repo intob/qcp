@@ -24,6 +24,9 @@ func prepJob(src, dst, rel, dstRoot string, bar *barTracker) func() <-chan *resu
 	}
 }
 
+// job copies one file and returns its BLAKE3 hash. Note that it opens src per
+// destination, so copying to N drives reads the source N times — see "Known
+// inefficiencies" in the README for what fixing that would involve.
 func job(src, dst string, bar *barTracker) *result {
 	rd, err := os.Open(src)
 	if err != nil {
