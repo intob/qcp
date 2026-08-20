@@ -89,14 +89,16 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 			continue
 		}
 		dir := filepath.Join(base, d.Root, yearStr, slug)
-		existing, scanErr := findFiles(dir)
-		if scanErr != nil {
-			fmt.Printf("%s scanning %s: %v\n", red("ERROR"), d.name(), scanErr)
-			continue
-		}
-		existingSet := make(map[string]bool, len(existing))
-		for _, f := range existing {
-			existingSet[f.rel] = true
+		existingSet := make(map[string]bool)
+		if dirExists(dir) {
+			existing, scanErr := findFiles(dir)
+			if scanErr != nil {
+				fmt.Printf("%s scanning %s: %v\n", red("ERROR"), d.name(), scanErr)
+				continue
+			}
+			for _, f := range existing {
+				existingSet[f.rel] = true
+			}
 		}
 		var missing []fileEntry
 		var size int64
