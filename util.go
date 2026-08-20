@@ -191,6 +191,14 @@ func mergeChecksums(path string, newLines []string) []string {
 			existing[parts[1]] = parts[0]
 		}
 	}
+	// A manifest cannot describe itself. checksums.b3 is copied like any other
+	// file, so a transfer hashes it, records that hash, and then overwrites the
+	// file with this merge — leaving an entry that can never match. Readers
+	// ignore such an entry too, so manifests written before this are harmless;
+	// this only stops new ones being created, and clears any that are still
+	// there the next time the manifest is written.
+	delete(existing, "checksums.b3")
+
 	merged := make([]string, 0, len(existing))
 	for rel, hash := range existing {
 		merged = append(merged, fmt.Sprintf("%s  %s", hash, rel))

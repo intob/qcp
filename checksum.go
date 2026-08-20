@@ -257,6 +257,9 @@ func runChecksumYear(cfg Config, year int) bool {
 		for _, md := range j.drives {
 			var lines []string
 			for _, f := range j.files {
+				if f.rel == "checksums.b3" {
+					continue // a manifest never lists itself
+				}
 				lines = append(lines, fmt.Sprintf("%s  %s", md.hashes[f.rel], f.rel))
 			}
 			sort.Strings(lines)
@@ -424,6 +427,9 @@ func runChecksum(cfg Config, missionNum int, year int) bool {
 	for _, d := range drives {
 		var lines []string
 		for _, f := range files {
+			if f.rel == "checksums.b3" {
+				continue // a manifest never lists itself
+			}
 			lines = append(lines, fmt.Sprintf("%s  %s", d.hashes[f.rel], f.rel))
 		}
 		sort.Strings(lines)

@@ -70,6 +70,9 @@ func runVerify(cfg Config, missionNum int, year int) bool {
 		for scanner.Scan() {
 			parts := strings.SplitN(scanner.Text(), "  ", 2)
 			if len(parts) == 2 {
+				if parts[1] == "checksums.b3" {
+					continue // a manifest cannot describe itself; see mergeChecksums
+				}
 				entries = append(entries, entry{parts[0], parts[1]})
 				if info, err := os.Stat(filepath.Join(de.dir, parts[1])); err == nil {
 					totalSize += info.Size()
@@ -239,7 +242,7 @@ func verifySlug(cfg Config, slug, yearStr string, volInfos map[string]driveInfo)
 		scanner := bufio.NewScanner(f)
 		for scanner.Scan() {
 			parts := strings.SplitN(scanner.Text(), "  ", 2)
-			if len(parts) == 2 {
+			if len(parts) == 2 && parts[1] != "checksums.b3" {
 				entries = append(entries, entry{parts[0], parts[1]})
 			}
 		}

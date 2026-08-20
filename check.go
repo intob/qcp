@@ -17,6 +17,42 @@ func anyColdMounted(cfg Config) bool {
 	return false
 }
 
+// hashConflict is one file whose recorded hash differs between two drives.
+type hashConflict struct {
+	rel       string
+	refHash   string
+	otherHash string
+}
+
+// manifestConflicts compares two checksums.b3 manifests, returning the files
+// whose recorded hashes disagree. Only files listed in both are compared — one
+// absent from either manifest is a missing, extra or ghost finding instead.
+//
+// This is the check -verify cannot make: it holds each drive to its own
+// manifest, so two copies that differ but are each self-consistent both pass.
+// Comparing the stored manifests costs nothing beyond reading them.
+func manifestConflicts(ref, other map[string]string) []hashConflict {
+	var out []hashConflict
+	for rel, hash := range ref {
+		if rel == "checksums.b3" {
+			continue // a manifest never describes itself; legacy entries do not compare
+		}
+		if h, ok := other[rel]; ok && h != hash {
+			out = append(out, hashConflict{rel, hash, h})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].rel < out[j].rel })
+	return out
+}
+
+// shortHash trims a hash for display; a manifest may hold an unexpected value.
+func shortHash(h string) string {
+	if len(h) > 8 {
+		return h[:8]
+	}
+	return h
+}
+
 func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bool {
 	var hotDrives, allColdDrives []DriveConfig
 	for _, d := range cfg.Drives {
@@ -136,7 +172,7 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 		}
 	}
 
-	var totalMissing, totalExtra, scanErrors, coldChecked, coldGhostCount int
+	var totalMissing, totalExtra, scanErrors, coldChecked, coldGhostCount, totalConflicts int
 	for _, cold := range coldDrives {
 		if cold.name() == refColdVol {
 			continue // this drive is the reference, skip
@@ -161,14 +197,18 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 			coldSet[f.rel] = true
 		}
 
+		coldManifest := readChecksumFile(filepath.Join(coldDir, "checksums.b3"))
+
 		// check cold drive's own manifest for files gone missing from its disk
 		var coldGhosts []string
-		for rel := range readChecksumFile(filepath.Join(coldDir, "checksums.b3")) {
+		for rel := range coldManifest {
 			if !coldSet[rel] {
 				coldGhosts = append(coldGhosts, rel)
 			}
 		}
 		sort.Strings(coldGhosts)
+
+		conflicts := manifestConflicts(manifest, coldManifest)
 
 		var missing, extra []string
 		for _, f := range refFiles {
@@ -181,11 +221,15 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 				extra = append(extra, f.rel)
 			}
 		}
-		if len(missing) > 0 || len(extra) > 0 || len(coldGhosts) > 0 {
+		if len(missing) > 0 || len(extra) > 0 || len(coldGhosts) > 0 || len(conflicts) > 0 {
 			header()
 			fmt.Printf("  %s\n", yellow(cold.name()))
 			for _, f := range coldGhosts {
 				fmt.Printf("    %s %s\n", yellow("!"), f)
+			}
+			for _, c := range conflicts {
+				fmt.Printf("    %s %s  %s\n", red("≠"), c.rel,
+					dim(fmt.Sprintf("%s %s · %s %s", refVol, shortHash(c.refHash), cold.name(), shortHash(c.otherHash))))
 			}
 			for _, f := range missing {
 				fmt.Printf("    %s %s\n", red("−"), f)
@@ -196,6 +240,7 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 			totalMissing += len(missing)
 			totalExtra += len(extra)
 			coldGhostCount += len(coldGhosts)
+			totalConflicts += len(conflicts)
 		}
 	}
 
@@ -204,7 +249,7 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 			yellow("!"), bold(slug), refVol)
 		return false
 	}
-	if totalMissing == 0 && totalExtra == 0 && scanErrors == 0 && len(ghosts) == 0 && coldGhostCount == 0 {
+	if totalMissing == 0 && totalExtra == 0 && scanErrors == 0 && len(ghosts) == 0 && coldGhostCount == 0 && totalConflicts == 0 {
 		fmt.Printf("%s %s complete on all cold drives\n", green("✓"), bold(slug))
 		return true
 	}
@@ -217,6 +262,11 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 		fmt.Println()
 	} else if totalExtra > 0 {
 		fmt.Printf("  %s extra files on cold drives\n", dim(strconv.Itoa(totalExtra)))
+	}
+	if totalConflicts > 0 {
+		fmt.Printf("  %s file(s) recorded with different hashes on different drives\n",
+			red(strconv.Itoa(totalConflicts)))
+		fmt.Printf("%s\n", dim(fmt.Sprintf("  run -verify %03d to find which copy is wrong", missionNum)))
 	}
 	return false
 }
@@ -328,10 +378,11 @@ func runCheck(cfg Config, year int) bool {
 	sort.Strings(slugs)
 
 	type gap struct {
-		vol     string
-		missing []string // missing from cold relative to reference
-		extra   []string // extra on cold relative to reference
-		ghosts  []string // in cold's checksums.b3 but absent from cold's disk
+		vol       string
+		missing   []string // missing from cold relative to reference
+		extra     []string // extra on cold relative to reference
+		ghosts    []string // in cold's checksums.b3 but absent from cold's disk
+		conflicts []hashConflict
 	}
 	type missionReport struct {
 		slug   string
@@ -341,7 +392,7 @@ func runCheck(cfg Config, year int) bool {
 	}
 
 	var reports []missionReport
-	var totalMissing, totalExtra int
+	var totalMissing, totalExtra, totalConflicts int
 
 	for _, slug := range slugs {
 		rm := refBySlug[slug]
@@ -395,14 +446,18 @@ func runCheck(cfg Config, year int) bool {
 				coldSet[f.rel] = true
 			}
 
+			coldManifest := readChecksumFile(filepath.Join(coldDir, "checksums.b3"))
+
 			// check cold drive's own manifest for files gone missing from its disk
 			var coldGhosts []string
-			for rel := range readChecksumFile(filepath.Join(coldDir, "checksums.b3")) {
+			for rel := range coldManifest {
 				if !coldSet[rel] {
 					coldGhosts = append(coldGhosts, rel)
 				}
 			}
 			sort.Strings(coldGhosts)
+
+			conflicts := manifestConflicts(manifest, coldManifest)
 
 			var missing, extra []string
 			for _, f := range refFiles {
@@ -415,10 +470,11 @@ func runCheck(cfg Config, year int) bool {
 					extra = append(extra, f.rel)
 				}
 			}
-			if len(missing) > 0 || len(extra) > 0 || len(coldGhosts) > 0 {
-				gaps = append(gaps, gap{cold.name(), missing, extra, coldGhosts})
+			if len(missing) > 0 || len(extra) > 0 || len(coldGhosts) > 0 || len(conflicts) > 0 {
+				gaps = append(gaps, gap{cold.name(), missing, extra, coldGhosts, conflicts})
 				totalMissing += len(missing)
 				totalExtra += len(extra)
+				totalConflicts += len(conflicts)
 			}
 		}
 
@@ -456,6 +512,10 @@ func runCheck(cfg Config, year int) bool {
 			for _, f := range g.ghosts {
 				fmt.Printf("      %s %s\n", yellow("!"), f)
 			}
+			for _, c := range g.conflicts {
+				fmt.Printf("      %s %s  %s\n", red("≠"), c.rel,
+					dim(fmt.Sprintf("%s %s · %s %s", r.refVol, shortHash(c.refHash), g.vol, shortHash(c.otherHash))))
+			}
 			for _, f := range g.missing {
 				fmt.Printf("      %s %s\n", red("−"), f)
 			}
@@ -473,6 +533,11 @@ func runCheck(cfg Config, year int) bool {
 		}
 		fmt.Println()
 		fmt.Print(dim("  run -sync to copy missing files to cold drives\n"))
+	}
+	if totalConflicts > 0 {
+		fmt.Printf("  %s file(s) recorded with different hashes on different drives\n",
+			red(strconv.Itoa(totalConflicts)))
+		fmt.Print(dim("  run -verify on the affected missions to find which copy is wrong\n"))
 	}
 	return false
 }
