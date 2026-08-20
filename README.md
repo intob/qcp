@@ -121,6 +121,10 @@ qcp -pull 42 -year 2025
 qcp -copy 42                          # copy mission to every other hot drive
 qcp -copy 42 -to SSD2                 # ...or just one
 qcp -copy 42-48 -to SSD2,LAPTOP       # ...or a named list
+
+qcp -evict 42                         # free hot space, keeping the cold copy
+qcp -evict 42-48 -copies 2            # require two verified cold copies
+qcp -evict 42 -from LAPTOP            # only from one hot drive
 ```
 
 `-sync` copies from hot drives to cold drives — only cold drives whose `year_from`/`year_to` range covers the target year receive data. Cross-checks file manifests across hot drives before copying; conflicts are reported and skipped. Partial missions are handled: only missing files are copied, so it's safe to run again after adding files to an existing mission (e.g. edit exports).
@@ -133,7 +137,9 @@ Missions can be given as a number, a comma-separated list, an inclusive range, o
 
 `-copy` moves missions between hot drives. The source is whichever mounted hot drive holds the most files for that mission; destinations default to every other mounted hot drive, honouring `pull: false`. Naming drives with `-to` is explicit, so it overrides `pull: false`. Use `-sync` to reach cold drives.
 
-All of `-pull`, `-copy`, `-verify`, `-checksum` and `-check` take the same mission selection: a single number (`42`), a comma-separated list (`42,44`), an inclusive range (`42-48`), or any combination (`42-44,48`). Ranges are capped at 500 missions. Each mission is reported separately and the run continues past failures, exiting non-zero at the end if any failed.
+`-evict` deletes missions from hot drives once the cold copy is proven good, to free space. It is the only command that removes data, so the bar is high. For each cold copy it relies on: every file on the hot copy must be present on the cold drive *and* listed in its `checksums.b3`, the two manifests must agree wherever both mention a file, and every file the manifest lists is then re-read from the cold drive and hashed. Nothing is deleted unless all of that passes for every mission in the batch — a single failure aborts the whole run. `-copies N` demands that many independent cold copies clear the bar. `-quick` skips the re-read and trusts the cold manifest, which is much faster but only proves the manifests agree, not that the archived bytes are still readable.
+
+All of `-pull`, `-copy`, `-evict`, `-verify`, `-checksum` and `-check` take the same mission selection: a single number (`42`), a comma-separated list (`42,44`), an inclusive range (`42-48`), or any combination (`42-44,48`). Ranges are capped at 500 missions. Each mission is reported separately and the run continues past failures, exiting non-zero at the end if any failed.
 
 Copy concurrency is limited per source drive as well as per destination. Sizing the pool by the destination alone means one read stream per destination worker — and one per worker per destination when several are mounted — so a single archive HDD would serve many interleaved streams, losing far more to seeks than the parallelism gains. Every copy takes a read slot on its source drive, so an HDD source is read by one worker at a time no matter how many destinations it feeds.
 

@@ -89,7 +89,7 @@ func runTransfer(cfg Config, spec transferSpec, missions []int, year int, sub st
 	// find destination drives, and work out what each is missing across the batch
 	wanted := make(map[string]bool, len(spec.dstNames))
 	for _, n := range spec.dstNames {
-		wanted[strings.ToLower(strings.TrimSpace(n))] = true
+		wanted[normaliseVol(n)] = true
 	}
 	var jobs []transferJob
 	var dstVols []string // display names, in config order
@@ -102,7 +102,7 @@ func runTransfer(cfg Config, spec transferSpec, missions []int, year int, sub st
 		}
 		vol := d.name()
 		if len(wanted) > 0 {
-			if !wanted[strings.ToLower(vol)] {
+			if !wanted[normaliseVol(vol)] {
 				continue
 			}
 		} else if !d.pullAllowed() {

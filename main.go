@@ -49,6 +49,10 @@ func usage() {
 	row("-copy", "n|list", "copy mission(s) between hot drives")
 	row("  -to", "drives", "destination drives (default: all other hot drives)")
 	row("  -sub", "dir", "subdirectory within mission to pull or copy")
+	row("-evict", "n|list", "delete mission(s) from hot drives, keeping the cold copy")
+	row("  -from", "drives", "hot drives to evict from (default: all)")
+	row("  -copies", "n", "cold copies required before deleting (default: 1)")
+	row("  -quick", "", "trust cold checksums.b3 instead of re-reading the files")
 
 	section("VERIFY")
 	row("-verify", "n|list|all", "re-verify mission(s) across all mounted drives")
@@ -75,6 +79,13 @@ func usage() {
 	row("-version", "", "print version and exit")
 
 	fmt.Fprintln(w)
+}
+
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // maxMissionRange caps how many missions a single a-b range may expand to, so
@@ -144,6 +155,10 @@ func main() {
 	pullMissionStr := flag.String("pull", "", `pull mission(s) from cold storage to hot drives (e.g. "42", "42,44", "42-48")`)
 	copyMissionStr := flag.String("copy", "", `copy mission(s) from one hot drive to the others (e.g. "42", "42,44", "42-48")`)
 	copyTo := flag.String("to", "", `destination drives for -copy, comma-separated (default: all other hot drives)`)
+	evictMissionStr := flag.String("evict", "", `delete mission(s) from hot drives once the cold copy is proven good (e.g. "42", "42-48")`)
+	evictFrom := flag.String("from", "", "hot drives to evict from, comma-separated (default: all)")
+	evictCopies := flag.Int("copies", 1, "cold copies that must verify before -evict deletes anything")
+	evictQuick := flag.Bool("quick", false, "-evict: trust the cold checksums.b3 instead of re-reading every file")
 	pullSub := flag.String("sub", "", "subdirectory within mission to pull or copy (e.g. CFEXP_250_01)")
 	doSync := flag.Bool("sync", false, "sync missions from hot drives to cold drives")
 	doReplicate := flag.Bool("replicate", false, "replicate missions between cold drives")
@@ -179,8 +194,24 @@ func main() {
 
 	pullMissions, hasPull := parseMissionList(*pullMissionStr)
 	copyMissions, hasCopy := parseMissionList(*copyMissionStr)
-	if hasPull && hasCopy {
-		exit(1, "-pull and -copy cannot be combined")
+	evictMissions, hasEvict := parseMissionList(*evictMissionStr)
+	if n := btoi(hasPull) + btoi(hasCopy) + btoi(hasEvict); n > 1 {
+		exit(1, "-pull, -copy and -evict cannot be combined")
+	}
+	if *evictFrom != "" && !hasEvict {
+		exit(1, "-from only applies to -evict")
+	}
+	if (*evictQuick || *evictCopies != 1) && !hasEvict {
+		exit(1, "-copies and -quick only apply to -evict")
+	}
+	if *evictCopies < 1 {
+		exit(1, "-copies must be at least 1")
+	}
+	var evictDrives []string
+	for _, name := range strings.Split(*evictFrom, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			evictDrives = append(evictDrives, name)
+		}
 	}
 	if n := len(pullMissions) + len(copyMissions); *pullSub != "" && n > 1 {
 		exit(1, "-sub applies to a single mission, but %d were given", n)
@@ -278,6 +309,11 @@ func main() {
 
 	if hasCopy {
 		runCopy(cfg, copyMissions, year, *pullSub, copyDrives, *skipConf)
+		return
+	}
+
+	if hasEvict {
+		runEvict(cfg, evictMissions, year, evictDrives, *evictCopies, *evictQuick, *skipConf)
 		return
 	}
 

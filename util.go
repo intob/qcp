@@ -254,6 +254,12 @@ func dirExists(path string) bool {
 	return err == nil && info.IsDir()
 }
 
+// normaliseVol canonicalises a drive name for matching against -to/-from,
+// so drives can be named without worrying about case or stray spaces.
+func normaliseVol(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
 func sanitizeMission(name string) string {
 	return strings.ReplaceAll(strings.TrimSpace(name), " ", "_")
 }
