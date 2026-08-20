@@ -6,7 +6,6 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
 	"strings"
 )
@@ -183,7 +182,6 @@ func findMissionSlug(drives []DriveConfig, yearStr string, num int) (string, err
 	return "", fmt.Errorf("no mission %s found on any mounted drive", prefix)
 }
 
-
 func mergeChecksums(path string, newLines []string) []string {
 	existing := readChecksumFile(path)
 	for _, line := range newLines {
@@ -250,11 +248,11 @@ func sanitizeMission(name string) string {
 
 func expandPath(p string) (string, error) {
 	if strings.HasPrefix(p, "~") {
-		usr, err := user.Current()
+		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", err
 		}
-		return filepath.Join(usr.HomeDir, p[1:]), nil
+		return filepath.Join(home, p[1:]), nil
 	}
 	return filepath.Abs(p)
 }
