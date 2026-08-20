@@ -453,7 +453,7 @@ func runCheck(cfg Config, year int) bool {
 			fmt.Printf("  ·  %s extra files on cold drives", dim(strconv.Itoa(totalExtra)))
 		}
 		fmt.Println()
-		fmt.Printf(dim("  run -sync to copy missing files to cold drives\n"))
+		fmt.Print(dim("  run -sync to copy missing files to cold drives\n"))
 	}
 	return false
 }
