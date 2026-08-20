@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -108,46 +109,48 @@ func findFiles(root string) ([]fileEntry, error) {
 	return files, err
 }
 
-// missionFiles returns files for a mission dir, using checksums.b3 as the
-// manifest if present (preserves sizes for progress), otherwise walks the dir.
-// The third return value is the number of files listed in checksums.b3 but
-// absent from disk; callers should treat a non-zero value as an error.
+// missionFiles returns the mission's files as they are on disk, excluding
+// checksums.b3 itself. The third return value is the number of files listed in
+// checksums.b3 but absent from disk; callers should treat a non-zero value as
+// an error.
+//
+// The listing must come from the disk, not from checksums.b3. Reading the
+// manifest instead makes every caller blind to files it does not mention: a
+// card ingested into an existing mission after the manifest was written would
+// be invisible to -checksum, which would then rewrite the manifest without it,
+// and to -sync, which would never copy it to a cold drive.
 func missionFiles(dir string) ([]fileEntry, int64, int, error) {
-	cPath := filepath.Join(dir, "checksums.b3")
-	f, err := os.Open(cPath)
-	if err == nil {
-		defer f.Close()
-		var files []fileEntry
-		var total int64
-		var ghosts int
-		scanner := bufio.NewScanner(f)
-		for scanner.Scan() {
-			parts := strings.SplitN(scanner.Text(), "  ", 2)
-			if len(parts) != 2 {
-				continue
-			}
-			rel := parts[1]
-			info, err := os.Stat(filepath.Join(dir, rel))
-			if err != nil {
-				fmt.Printf("%s %s listed in checksums.b3 but missing on disk\n", red("ERROR:"), rel)
-				ghosts++
-				continue
-			}
-			files = append(files, fileEntry{rel: rel, size: info.Size()})
-			total += info.Size()
-		}
-		return files, total, ghosts, scanner.Err()
-	}
-	// fallback: walk
-	files, err := findFiles(dir)
+	all, err := findFiles(dir)
 	if err != nil {
 		return nil, 0, 0, err
 	}
+	files := make([]fileEntry, 0, len(all))
+	onDisk := make(map[string]bool, len(all))
 	var total int64
-	for _, f := range files {
+	for _, f := range all {
+		if f.rel == "checksums.b3" {
+			continue
+		}
+		files = append(files, f)
+		onDisk[f.rel] = true
 		total += f.size
 	}
-	return files, total, 0, nil
+
+	var ghosts int
+	manifest := readChecksumFile(filepath.Join(dir, "checksums.b3"))
+	rels := make([]string, 0, len(manifest))
+	for rel := range manifest {
+		rels = append(rels, rel)
+	}
+	sort.Strings(rels)
+	for _, rel := range rels {
+		if rel == "checksums.b3" || onDisk[rel] {
+			continue
+		}
+		fmt.Printf("%s %s listed in checksums.b3 but missing on disk\n", red("ERROR:"), rel)
+		ghosts++
+	}
+	return files, total, ghosts, nil
 }
 
 func missionManifestsMatch(a, b []fileEntry) bool {
