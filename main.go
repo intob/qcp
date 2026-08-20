@@ -45,7 +45,7 @@ func usage() {
 	section("ARCHIVE")
 	row("-sync", "", "sync missions from hot drives to cold drives")
 	row("-replicate", "", "replicate missions between cold drives")
-	row("-pull", "n", "pull mission from cold storage to hot drives")
+	row("-pull", "n|list", "pull mission(s) from cold storage to hot drives")
 	row("  -sub", "dir", "subdirectory within mission to pull")
 
 	section("VERIFY")
@@ -75,6 +75,62 @@ func usage() {
 	fmt.Fprintln(w)
 }
 
+// maxMissionRange caps how many missions a single a-b range may expand to, so
+// a typo like "1-99999" fails loudly instead of scanning every drive.
+const maxMissionRange = 500
+
+// parseMissionList parses a mission selection into a sorted, deduplicated list
+// of mission numbers. Accepts a single number ("42"), a comma-separated list
+// ("42,44"), an inclusive range ("42-48"), or any combination ("42-44,48").
+func parseMissionList(s string) ([]int, bool) {
+	if s == "" {
+		return nil, false
+	}
+	parseNum := func(v string) int {
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil || n <= 0 {
+			exit(1, "invalid mission number: %s", v)
+		}
+		return n
+	}
+	seen := make(map[int]bool)
+	var nums []int
+	add := func(n int) {
+		if !seen[n] {
+			seen[n] = true
+			nums = append(nums, n)
+		}
+	}
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if i := strings.Index(part, "-"); i > 0 {
+			if strings.TrimSpace(part[i+1:]) == "" {
+				exit(1, "invalid mission range: %s", part)
+			}
+			lo, hi := parseNum(part[:i]), parseNum(part[i+1:])
+			if hi < lo {
+				exit(1, "invalid mission range: %s", part)
+			}
+			if hi-lo+1 > maxMissionRange {
+				exit(1, "mission range %s covers more than %d missions", part, maxMissionRange)
+			}
+			for n := lo; n <= hi; n++ {
+				add(n)
+			}
+			continue
+		}
+		add(parseNum(part))
+	}
+	if len(nums) == 0 {
+		exit(1, "invalid mission number: %s", s)
+	}
+	sort.Ints(nums)
+	return nums, true
+}
+
 func main() {
 	flag.Usage = usage
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -83,7 +139,7 @@ func main() {
 	yearFlag := flag.String("year", "", `year to operate on (default: current year, "all" for all years)`)
 	verifyMissionStr := flag.String("verify", "", `re-verify mission(s) across all mounted drives (use "all" for all missions)`)
 	checksumMissionStr := flag.String("checksum", "", `generate checksums.b3 for a mission (use "all" for all missions in year)`)
-	pullMissionStr := flag.String("pull", "", "pull a mission from cold storage to hot drives")
+	pullMissionStr := flag.String("pull", "", `pull mission(s) from cold storage to hot drives (e.g. "42", "42,44", "42-48")`)
 	pullSub := flag.String("sub", "", "subdirectory within mission to pull (e.g. CFEXP_250_01)")
 	doSync := flag.Bool("sync", false, "sync missions from hot drives to cold drives")
 	doReplicate := flag.Bool("replicate", false, "replicate missions between cold drives")
@@ -128,7 +184,10 @@ func main() {
 		return n, true
 	}
 
-	pullMission, hasPull := parseMission(*pullMissionStr)
+	pullMissions, hasPull := parseMissionList(*pullMissionStr)
+	if hasPull && *pullSub != "" && len(pullMissions) > 1 {
+		exit(1, "-sub applies to a single mission, but %d were given", len(pullMissions))
+	}
 
 	cfg := loadConfig()
 	keepAwake()
@@ -198,7 +257,7 @@ func main() {
 	}
 
 	if hasPull {
-		runPull(cfg, pullMission, year, *pullSub, *skipConf)
+		runPull(cfg, pullMissions, year, *pullSub, *skipConf)
 		return
 	}
 

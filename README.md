@@ -112,6 +112,9 @@ qcp -replicate -y
 qcp -replicate -year all
 
 qcp -pull 42                          # pull mission back to hot drives
+qcp -pull 42,44,50                    # pull several missions in one batch
+qcp -pull 42-48                       # pull an inclusive range
+qcp -pull 42-44,48 -y
 qcp -pull 42 -sub CFEXP_250_01        # pull only one card's subfolder
 qcp -pull 42 -year 2025
 ```
@@ -121,6 +124,8 @@ qcp -pull 42 -year 2025
 `-replicate` copies missions between cold drives. Any mounted cold drive with the data is a valid source; only cold drives scoped for the year are destinations. Use this to populate a second cold drive from an existing one, or to catch up a drive that wasn't present during `-sync`.
 
 `-pull` selects whichever cold drive has the most files as the source, avoiding partial copies from an incompletely synced drive.
+
+Missions can be given as a number, a comma-separated list, an inclusive range, or any combination. Every mission is resolved before anything is copied, so a bad number is reported up front; the rest of the batch still runs and the exit status is non-zero. Sizes and free-space warnings are totalled per hot drive across the whole batch, and only missing files are copied, so re-running a batch is cheap. `-sub` applies to a single mission only. Interrupting a pull offers to remove the mission directories that run created, leaving pre-existing ones alone.
 
 ### Verify
 

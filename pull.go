@@ -1,85 +1,69 @@
 package main
 
 import (
+	"bufio"
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/vbauerster/mpb/v8"
 )
 
-func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
+// pullSource is one resolved mission on the cold drive it will be pulled from.
+type pullSource struct {
+	num    int
+	slug   string
+	srcDir string
+	srcVol string
+	files  []fileEntry
+	size   int64
+}
+
+// pullJob is the set of files one mission is missing on one hot drive.
+type pullJob struct {
+	slug   string
+	srcDir string
+	dstDir string
+	dstVol string
+	files  []fileEntry
+	size   int64
+}
+
+func runPull(cfg Config, missions []int, year int, sub string, skipConf bool) {
 	yearStr := strconv.Itoa(year)
-	slug, err := findMissionSlug(cfg.Drives, yearStr, missionNum)
-	if err != nil {
-		exit(1, "mission %03d not found: %v", missionNum, err)
-	}
 
-	// find source on a cold drive — prefer the drive with the most files to
-	// avoid silently pulling from a partially-synced cold drive
-	var srcDir, srcVol string
-	var srcCount int
-	for _, d := range cfg.Drives {
-		if d.Role != "cold" {
+	// resolve every requested mission before copying anything, so typos and
+	// unmounted archives surface up front rather than mid-batch
+	var sources []pullSource
+	unresolved := 0
+	for _, num := range missions {
+		s, err := resolvePullSource(cfg, yearStr, num, sub)
+		if err != nil {
+			fmt.Printf("%s mission %03d: %v\n", red("ERROR"), num, err)
+			unresolved++
 			continue
 		}
-		base := d.basePath()
-		dir := filepath.Join(base, d.Root, yearStr, slug)
-		if !dirExists(dir) {
-			continue
-		}
-		files, err := findFiles(dir)
-		if err != nil {
-			continue
-		}
-		if len(files) > srcCount {
-			srcDir = dir
-			srcVol = d.name()
-			srcCount = len(files)
-		}
+		sources = append(sources, s)
 	}
-	if srcDir == "" {
-		exit(1, "mission %03d not found on any cold drive", missionNum)
+	if len(sources) == 0 {
+		exit(1, "nothing to pull")
 	}
 
-	// scan source files, filtered by sub if set
-	var files []fileEntry
-	if sub != "" {
-		subDir := filepath.Join(srcDir, sub)
-		if !dirExists(subDir) {
-			exit(1, "subfolder %q not found in mission %03d", sub, missionNum)
-		}
-		subFiles, err := findFiles(subDir)
-		if err != nil {
-			exit(1, "error scanning %s: %v", subDir, err)
-		}
-		for _, f := range subFiles {
-			files = append(files, fileEntry{rel: filepath.Join(sub, f.rel), size: f.size})
-		}
-	} else {
-		files, err = findFiles(srcDir)
-		if err != nil {
-			exit(1, "error scanning source: %v", err)
-		}
-	}
-	if len(files) == 0 {
-		exit(1, "no files found in mission %03d", missionNum)
-	}
-
-	// find destination hot drives where pull is allowed
-	type pullDst struct {
-		name    string
-		base    string
-		dir     string
-		missing []fileEntry
-		size    int64
-	}
-	var dsts []pullDst
+	// find destination hot drives where pull is allowed, and work out what
+	// each is missing across the whole batch
+	var jobs []pullJob
+	var dstVols []string // display names, in config order
+	dstBase := make(map[string]string)
+	toCopy := make(map[string]int64)
+	already := make(map[string]int64)
 	for _, d := range cfg.Drives {
 		if d.Role != "hot" || !d.pullAllowed() {
 			continue
@@ -88,59 +72,49 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 		if !dirExists(base) {
 			continue
 		}
-		dir := filepath.Join(base, d.Root, yearStr, slug)
-		existingSet := make(map[string]bool)
-		if dirExists(dir) {
-			existing, scanErr := findFiles(dir)
-			if scanErr != nil {
-				fmt.Printf("%s scanning %s: %v\n", red("ERROR"), d.name(), scanErr)
-				continue
+		vol := d.name()
+		dstVols = append(dstVols, vol)
+		dstBase[vol] = base
+		for _, s := range sources {
+			dir := filepath.Join(base, d.Root, yearStr, s.slug)
+			existing := make(map[string]bool)
+			if dirExists(dir) {
+				found, scanErr := findFiles(dir)
+				if scanErr != nil {
+					fmt.Printf("%s scanning %s on %s: %v\n", red("ERROR"), s.slug, bold(vol), scanErr)
+					unresolved++
+					continue
+				}
+				for _, f := range found {
+					existing[f.rel] = true
+				}
 			}
-			for _, f := range existing {
-				existingSet[f.rel] = true
-			}
-		}
-		var missing []fileEntry
-		var size int64
-		for _, f := range files {
-			if !existingSet[f.rel] {
+			var missing []fileEntry
+			var size int64
+			for _, f := range s.files {
+				if existing[f.rel] {
+					already[vol] += f.size
+					continue
+				}
 				missing = append(missing, f)
 				size += f.size
 			}
+			toCopy[vol] += size
+			if len(missing) > 0 {
+				jobs = append(jobs, pullJob{s.slug, s.srcDir, dir, vol, missing, size})
+			}
 		}
-		dsts = append(dsts, pullDst{d.name(), base, dir, missing, size})
 	}
-	if len(dsts) == 0 {
+	if len(dstVols) == 0 {
 		exit(1, "no pull-enabled hot drives mounted")
 	}
 
-	// size warning
-	var totalSrc int64
-	for _, f := range files {
-		totalSrc += f.size
-	}
-	fmt.Printf("pull: %s from %s (%s total)\n\n", bold(slug), bold(srcVol), dim(fmtSize(uint64(totalSrc))))
-	allUpToDate := true
-	for _, d := range dsts {
-		avail := availableBytes(d.base)
-		alreadyBytes := totalSrc - d.size
-		if d.size == 0 {
-			fmt.Printf("  %-12s %s\n", d.name, dim("already up to date"))
-			continue
-		}
-		allUpToDate = false
-		warn := ""
-		if d.size > int64(avail) {
-			warn = " ⚠ insufficient space"
-		}
-		fmt.Printf("  %-12s %s to copy", d.name, dim(fmtSize(uint64(d.size))))
-		if alreadyBytes > 0 {
-			fmt.Printf(", %s already present", dim(fmtSize(uint64(alreadyBytes))))
-		}
-		fmt.Printf("  (%s available)%s\n", dim(fmtSize(avail)), warn)
-	}
-	if allUpToDate {
+	printPullPlan(sources, dstVols, dstBase, toCopy, already)
+	if len(jobs) == 0 {
 		fmt.Println(dim("all hot drives already up to date"))
+		if unresolved > 0 {
+			os.Exit(1)
+		}
 		return
 	}
 	fmt.Println()
@@ -148,48 +122,89 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 		exit(0, "aborted")
 	}
 
-	// copy
+	// interrupt handler — only offer to delete dirs this run will create,
+	// not dirs that already existed (partial-diff jobs)
+	ctx, cancel := context.WithCancel(context.Background())
+	var newDirs []string
+	for _, j := range jobs {
+		if !dirExists(j.dstDir) {
+			newDirs = append(newDirs, j.dstDir)
+		}
+	}
+	watchInterrupt(ctx, cancel, newDirs)
+
+	// bar totals are per drive across the whole batch
+	sizeByVol := make(map[string]int64)
+	for _, j := range jobs {
+		sizeByVol[j.dstVol] += j.size
+	}
+	var volOrder []string
+	for _, vol := range dstVols {
+		if sizeByVol[vol] > 0 {
+			volOrder = append(volOrder, vol)
+		}
+	}
+
+	// probe each destination drive once
+	volInfo := make(map[string]driveInfo)
+	fmt.Println()
+	for _, vol := range volOrder {
+		volInfo[vol] = probeDrive(dstBase[vol])
+		fmt.Printf("  %s: %s\n", bold(vol), volInfo[vol])
+	}
+
+	// copy — one bar per drive, all missions in parallel
 	fmt.Printf("\n%s\n\n", dim("copying..."))
-	p1 := mpb.New(mpb.WithWidth(64))
+	p1 := mpb.NewWithContext(ctx, mpb.WithWidth(64))
+	copyBars := make(map[string]*barTracker, len(volOrder))
+	for _, vol := range volOrder {
+		copyBars[vol] = addBar(p1, vol, sizeByVol[vol])
+	}
+
+	jobsByVol := make(map[string][]pullJob)
+	for _, j := range jobs {
+		jobsByVol[j.dstVol] = append(jobsByVol[j.dstVol], j)
+	}
+
 	var results []*result
 	var resultsMu sync.Mutex
-	var trackers []*barTracker
 	var copyPools []*pool
-
-	for _, d := range dsts {
-		if len(d.missing) == 0 {
-			continue
-		}
-		info := probeDrive(d.base)
-		bar := addBar(p1, d.name, d.size)
-		trackers = append(trackers, bar)
-		wp := newPool(info.concurrency)
+	for vol, volJobs := range jobsByVol {
+		bar := copyBars[vol]
+		wp := newPool(volInfo[vol].concurrency)
 		copyPools = append(copyPools, wp)
-		for _, f := range d.missing {
-			f, dstRoot, b := f, d.dir, bar
-			src := filepath.Join(srcDir, f.rel)
-			dst := filepath.Join(dstRoot, f.rel)
-			wp.run(func() {
-				r := job(src, dst, b)
-				r.dst = dst
-				r.rel = f.rel
-				r.dstRoot = dstRoot
-				resultsMu.Lock()
-				results = append(results, r)
-				resultsMu.Unlock()
-				if r.err != nil {
-					fmt.Printf("\n%s %v\n", red("ERROR:"), r.err)
-				}
-			})
+		for _, j := range volJobs {
+			for _, f := range j.files {
+				f, srcDir, dstRoot := f, j.srcDir, j.dstDir
+				wp.run(func() {
+					if ctx.Err() != nil {
+						return
+					}
+					dst := filepath.Join(dstRoot, f.rel)
+					r := job(filepath.Join(srcDir, f.rel), dst, bar)
+					r.dst = dst
+					r.rel = f.rel
+					r.dstRoot = dstRoot
+					resultsMu.Lock()
+					results = append(results, r)
+					resultsMu.Unlock()
+					if r.err != nil {
+						fmt.Printf("\n%s %v\n", red("ERROR:"), r.err)
+					}
+				})
+			}
 		}
 	}
 	for _, wp := range copyPools {
 		wp.wait()
 	}
-	for _, t := range trackers {
+	for _, t := range copyBars {
 		t.flush()
 	}
 	p1.Wait()
+	if ctx.Err() != nil {
+		select {} // interrupt handler will os.Exit once the user responds
+	}
 
 	var copyFailed int
 	for _, r := range results {
@@ -201,44 +216,45 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 		exit(1, "%d file(s) failed to copy", copyFailed)
 	}
 
-	// verify
+	// verify — one bar per drive
 	fmt.Printf("\n%s\n\n", dim("verifying..."))
-	p2 := mpb.New(mpb.WithWidth(64))
-	verifyTrackers := make(map[string]*barTracker)
-	verifySize := make(map[string]int64)
-	dstRootToName := make(map[string]string)
-	dstRootToBase := make(map[string]string)
-	for _, d := range dsts {
-		dstRootToName[d.dir] = d.name
-		dstRootToBase[d.dir] = d.base
+	p2 := mpb.NewWithContext(ctx, mpb.WithWidth(64))
+	dstRootToVol := make(map[string]string)
+	for _, j := range jobs {
+		dstRootToVol[j.dstDir] = j.dstVol
 	}
+	verifySize := make(map[string]int64)
 	for _, r := range results {
 		if r.err == nil {
-			verifySize[r.dstRoot] += r.n
+			verifySize[dstRootToVol[r.dstRoot]] += r.n
 		}
 	}
-	for dstRoot, size := range verifySize {
-		verifyTrackers[dstRoot] = addBar(p2, dstRootToName[dstRoot], size)
+	verifyBars := make(map[string]*barTracker, len(volOrder))
+	for _, vol := range volOrder {
+		verifyBars[vol] = addBar(p2, vol, verifySize[vol])
 	}
 
 	var verifyFailed atomic.Int64
 	newHashes := make(map[string][]string)
 	var newHashesMu sync.Mutex
-	resultsByDst := make(map[string][]*result)
+	resultsByVol := make(map[string][]*result)
 	for _, r := range results {
 		if r.err == nil {
-			resultsByDst[r.dstRoot] = append(resultsByDst[r.dstRoot], r)
+			resultsByVol[dstRootToVol[r.dstRoot]] = append(resultsByVol[dstRootToVol[r.dstRoot]], r)
 		}
 	}
 	var verifyPools []*pool
-	for dstRoot, rs := range resultsByDst {
-		info := probeDrive(dstRootToBase[dstRoot])
-		wp := newPool(info.concurrency)
+	for vol, rs := range resultsByVol {
+		bar := verifyBars[vol]
+		wp := newPool(volInfo[vol].concurrency)
 		verifyPools = append(verifyPools, wp)
 		for _, r := range rs {
 			r := r
 			wp.run(func() {
-				got, err := hashFile(r.dst, verifyTrackers[r.dstRoot])
+				if ctx.Err() != nil {
+					return
+				}
+				got, err := hashFile(r.dst, bar)
 				if err != nil || got != r.srcHash {
 					fmt.Printf("\n%s %s\n", red("FAIL:"), r.dst)
 					verifyFailed.Add(1)
@@ -253,16 +269,19 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 	for _, wp := range verifyPools {
 		wp.wait()
 	}
-	for _, t := range verifyTrackers {
+	for _, t := range verifyBars {
 		t.flush()
 	}
 	p2.Wait()
+	if ctx.Err() != nil {
+		select {} // interrupt handler will os.Exit once the user responds
+	}
 
 	if verifyFailed.Load() > 0 {
 		exit(1, "%d file(s) failed verification", verifyFailed.Load())
 	}
 
-	// merge into checksums.b3
+	// merge into each mission's checksums.b3
 	for dstRoot, lines := range newHashes {
 		cPath := filepath.Join(dstRoot, "checksums.b3")
 		lines = mergeChecksums(cPath, lines)
@@ -272,11 +291,149 @@ func runPull(cfg Config, missionNum int, year int, sub string, skipConf bool) {
 		}
 	}
 
+	pulled := make(map[string]bool)
+	for _, j := range jobs {
+		pulled[j.slug] = true
+	}
 	total := 0
 	for _, r := range results {
 		if r.err == nil {
 			total++
 		}
 	}
-	fmt.Printf("\n%s %d file(s) copied and verified\n", green("✓"), total)
+	if len(pulled) == 1 {
+		fmt.Printf("\n%s %d file(s) copied and verified\n", green("✓"), total)
+	} else {
+		fmt.Printf("\n%s %d file(s) copied and verified across %d mission(s)\n", green("✓"), total, len(pulled))
+	}
+	if unresolved > 0 {
+		os.Exit(1)
+	}
+}
+
+// resolvePullSource locates a mission on the fullest cold drive holding it and
+// lists the files to pull, restricted to sub if set.
+func resolvePullSource(cfg Config, yearStr string, num int, sub string) (pullSource, error) {
+	slug, err := findMissionSlug(cfg.Drives, yearStr, num)
+	if err != nil {
+		return pullSource{}, err
+	}
+
+	// prefer the cold drive with the most files, so a partially-synced drive
+	// is never silently used as the source
+	var srcDir, srcVol string
+	var files []fileEntry
+	for _, d := range cfg.Drives {
+		if d.Role != "cold" {
+			continue
+		}
+		dir := filepath.Join(d.basePath(), d.Root, yearStr, slug)
+		if !dirExists(dir) {
+			continue
+		}
+		found, err := findFiles(dir)
+		if err != nil {
+			continue
+		}
+		if len(found) > len(files) {
+			srcDir, srcVol, files = dir, d.name(), found
+		}
+	}
+	if srcDir == "" {
+		return pullSource{}, fmt.Errorf("not found on any cold drive")
+	}
+
+	if sub != "" {
+		if !dirExists(filepath.Join(srcDir, sub)) {
+			return pullSource{}, fmt.Errorf("subfolder %q not found", sub)
+		}
+		prefix := sub + string(os.PathSeparator)
+		var filtered []fileEntry
+		for _, f := range files {
+			if strings.HasPrefix(f.rel, prefix) {
+				filtered = append(filtered, f)
+			}
+		}
+		files = filtered
+	}
+	if len(files) == 0 {
+		return pullSource{}, fmt.Errorf("no files found")
+	}
+
+	var size int64
+	for _, f := range files {
+		size += f.size
+	}
+	return pullSource{num, slug, srcDir, srcVol, files, size}, nil
+}
+
+func printPullPlan(sources []pullSource, dstVols []string, dstBase map[string]string, toCopy, already map[string]int64) {
+	var totalSrc int64
+	for _, s := range sources {
+		totalSrc += s.size
+	}
+	if len(sources) == 1 {
+		s := sources[0]
+		fmt.Printf("pull: %s from %s (%s total)\n\n", bold(s.slug), bold(s.srcVol), dim(fmtSize(uint64(s.size))))
+	} else {
+		fmt.Printf("pull: %s mission(s) (%s total)\n\n", bold(strconv.Itoa(len(sources))), dim(fmtSize(uint64(totalSrc))))
+		width := 0
+		for _, s := range sources {
+			width = max(width, len(s.slug))
+		}
+		for _, s := range sources {
+			fmt.Printf("  %-*s  %8s  %s\n", width, s.slug, fmtSize(uint64(s.size)), dim("from "+s.srcVol))
+		}
+		fmt.Println()
+	}
+	for _, vol := range dstVols {
+		if toCopy[vol] == 0 {
+			fmt.Printf("  %-12s %s\n", vol, dim("already up to date"))
+			continue
+		}
+		avail := availableBytes(dstBase[vol])
+		warn := ""
+		if toCopy[vol] > int64(avail) {
+			warn = " ⚠ insufficient space"
+		}
+		fmt.Printf("  %-12s %s to copy", vol, dim(fmtSize(uint64(toCopy[vol]))))
+		if already[vol] > 0 {
+			fmt.Printf(", %s already present", dim(fmtSize(uint64(already[vol]))))
+		}
+		fmt.Printf("  (%s available)%s\n", dim(fmtSize(avail)), warn)
+	}
+}
+
+// watchInterrupt cancels ctx on SIGINT, then offers to remove the directories
+// this run created before exiting.
+func watchInterrupt(ctx context.Context, cancel context.CancelFunc, newDirs []string) {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt)
+	go func() {
+		<-sigCh
+		signal.Stop(sigCh)
+		cancel()
+		time.Sleep(150 * time.Millisecond)
+		if len(newDirs) == 0 {
+			fmt.Print("\r\033[2K\ninterrupted\n")
+			os.Exit(130)
+		}
+		fmt.Print("\r\033[2K\ninterrupted — delete partial mission dirs? (y/n): ")
+		reader := bufio.NewReader(os.Stdin)
+		var resp string
+		for resp != "y" && resp != "n" {
+			line, err := reader.ReadString('\n')
+			resp = strings.TrimSpace(line)
+			if err != nil {
+				break // stdin closed; don't delete
+			}
+		}
+		if resp == "y" {
+			for _, d := range newDirs {
+				os.RemoveAll(d)
+				fmt.Printf("removed: %s\n", d)
+			}
+		}
+		os.Exit(130)
+	}()
 }
