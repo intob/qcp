@@ -46,7 +46,9 @@ func usage() {
 	row("-sync", "", "sync missions from hot drives to cold drives")
 	row("-replicate", "", "replicate missions between cold drives")
 	row("-pull", "n|list", "pull mission(s) from cold storage to hot drives")
-	row("  -sub", "dir", "subdirectory within mission to pull")
+	row("-copy", "n|list", "copy mission(s) between hot drives")
+	row("  -to", "drives", "destination drives (default: all other hot drives)")
+	row("  -sub", "dir", "subdirectory within mission to pull or copy")
 
 	section("VERIFY")
 	row("-verify", "n|list|all", "re-verify mission(s) across all mounted drives")
@@ -140,7 +142,9 @@ func main() {
 	verifyMissionStr := flag.String("verify", "", `re-verify mission(s) across all mounted drives (e.g. "42", "42,44", "42-48", "all")`)
 	checksumMissionStr := flag.String("checksum", "", `generate checksums.b3 for mission(s) (e.g. "42", "42,44", "42-48", "all")`)
 	pullMissionStr := flag.String("pull", "", `pull mission(s) from cold storage to hot drives (e.g. "42", "42,44", "42-48")`)
-	pullSub := flag.String("sub", "", "subdirectory within mission to pull (e.g. CFEXP_250_01)")
+	copyMissionStr := flag.String("copy", "", `copy mission(s) from one hot drive to the others (e.g. "42", "42,44", "42-48")`)
+	copyTo := flag.String("to", "", `destination drives for -copy, comma-separated (default: all other hot drives)`)
+	pullSub := flag.String("sub", "", "subdirectory within mission to pull or copy (e.g. CFEXP_250_01)")
 	doSync := flag.Bool("sync", false, "sync missions from hot drives to cold drives")
 	doReplicate := flag.Bool("replicate", false, "replicate missions between cold drives")
 	doList := flag.Bool("list", false, "list missions across all mounted drives")
@@ -174,8 +178,21 @@ func main() {
 	}
 
 	pullMissions, hasPull := parseMissionList(*pullMissionStr)
-	if hasPull && *pullSub != "" && len(pullMissions) > 1 {
-		exit(1, "-sub applies to a single mission, but %d were given", len(pullMissions))
+	copyMissions, hasCopy := parseMissionList(*copyMissionStr)
+	if hasPull && hasCopy {
+		exit(1, "-pull and -copy cannot be combined")
+	}
+	if n := len(pullMissions) + len(copyMissions); *pullSub != "" && n > 1 {
+		exit(1, "-sub applies to a single mission, but %d were given", n)
+	}
+	if *copyTo != "" && !hasCopy {
+		exit(1, "-to only applies to -copy")
+	}
+	var copyDrives []string
+	for _, name := range strings.Split(*copyTo, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			copyDrives = append(copyDrives, name)
+		}
 	}
 
 	cfg := loadConfig()
@@ -256,6 +273,11 @@ func main() {
 
 	if hasPull {
 		runPull(cfg, pullMissions, year, *pullSub, *skipConf)
+		return
+	}
+
+	if hasCopy {
+		runCopy(cfg, copyMissions, year, *pullSub, copyDrives, *skipConf)
 		return
 	}
 

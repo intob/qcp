@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 )
 
@@ -158,6 +159,100 @@ func allYears(cfg Config) []int {
 	return years
 }
 
+// missionScan is what -list reports about one mission on one drive.
+type missionScan struct {
+	size        int64
+	files       int
+	checksummed bool // checksums.b3 exists and covers every file on this drive
+}
+
+// scanMissions walks each mission on each mounted drive, returning
+// scan[slug][drive name]. Missions hold a handful of large video files rather
+// than many small ones, so the walk stays cheap; the per-drive pools keep an
+// HDD from being seek-thrashed by parallel walks of the same platter.
+func scanMissions(drives []DriveConfig, yearStr string, slugs []string) map[string]map[string]missionScan {
+	out := make(map[string]map[string]missionScan)
+	var mu sync.Mutex
+	var pools []*pool
+	var submitters []func()
+	for _, d := range drives {
+		base := d.basePath()
+		if !dirExists(base) {
+			continue
+		}
+		wp := newPool(probeDrive(base).concurrency)
+		pools = append(pools, wp)
+		vol, root := d.name(), d.Root
+		submitters = append(submitters, func() {
+			for _, slug := range slugs {
+				dir := filepath.Join(base, root, yearStr, slug)
+				if !dirExists(dir) {
+					continue
+				}
+				wp.run(func() {
+					files, err := findFiles(dir)
+					if err != nil {
+						return
+					}
+					manifest := readChecksumFile(filepath.Join(dir, "checksums.b3"))
+					sc := missionScan{checksummed: len(manifest) > 0}
+					for _, f := range files {
+						if f.rel == "checksums.b3" {
+							continue // the manifest never lists itself
+						}
+						sc.size += f.size
+						sc.files++
+						if manifest[f.rel] == "" {
+							sc.checksummed = false
+						}
+					}
+					if sc.files == 0 {
+						sc.checksummed = false
+					}
+					mu.Lock()
+					if out[slug] == nil {
+						out[slug] = make(map[string]missionScan)
+					}
+					out[slug][vol] = sc
+					mu.Unlock()
+				})
+			}
+		})
+	}
+	submitAll(submitters)
+	for _, wp := range pools {
+		wp.wait()
+	}
+	return out
+}
+
+// listCell centres a one-character marker in a column. The marker carries ANSI
+// colour, so it is padded by hand — %-*s would count the escape bytes.
+func listCell(marker string, width int) string {
+	if width <= 1 {
+		return marker
+	}
+	left := (width - 1) / 2
+	return strings.Repeat(" ", left) + marker + strings.Repeat(" ", width-1-left)
+}
+
+// listMarker renders one mission/drive cell: checksummed, present but not
+// checksummed, or absent.
+func listMarker(sc missionScan, present, mounted bool) string {
+	switch {
+	case present && sc.checksummed:
+		return green("✓")
+	case present:
+		return yellow("·")
+	case mounted:
+		return red("−")
+	default:
+		return dim("−")
+	}
+}
+
+const listLegend = "✓ checksummed   · not checksummed   − absent"
+
 func runListAll(cfg Config) {
 	var driveNames []string
 	mountedDrives := make(map[string]bool)
@@ -227,15 +322,29 @@ func runListAll(cfg Config) {
 			}
 		}
 
+		scans := scanMissions(cfg.Drives, yearStr, allSlugs)
+		sizes := make(map[string]string, len(allSlugs))
+		maxSize := 0
+		var yearTotal int64
+		for _, slug := range allSlugs {
+			size := missionSize(scans[slug], driveNames)
+			yearTotal += size
+			sizes[slug] = fmtSize(uint64(size))
+			if len(sizes[slug]) > maxSize {
+				maxSize = len(sizes[slug])
+			}
+		}
+
 		if i > 0 {
 			fmt.Println()
 		}
-		fmt.Printf("%s  %s\n", bold(yearStr), dim(fmt.Sprintf("%d missions", len(allSlugs))))
+		fmt.Printf("%s  %s\n", bold(yearStr),
+			dim(fmt.Sprintf("%d missions · %s", len(allSlugs), fmtSize(uint64(yearTotal)))))
 
 		// header row
-		fmt.Printf("  %-*s", maxSlug, "")
+		fmt.Printf("  %-*s  %*s", maxSlug, "", maxSize, "size")
 		for _, name := range driveNames {
-			fmt.Printf("  %-*s", maxName, name)
+			fmt.Printf("  %s", name)
 		}
 		fmt.Println()
 
@@ -252,19 +361,26 @@ func runListAll(cfg Config) {
 			if !allPresent {
 				label = yellow(slug)
 			}
-			fmt.Printf("  %s%-*s", label, maxSlug-len(slug), "")
+			fmt.Printf("  %s%-*s  %s", label, maxSlug-len(slug), "",
+				dim(fmt.Sprintf("%*s", maxSize, sizes[slug])))
 			for _, name := range driveNames {
-				if drives[name] {
-					fmt.Printf("  %-*s", maxName, dim(name))
-				} else if mountedDrives[name] {
-					fmt.Printf("  %-*s", maxName, red("--"))
-				} else {
-					fmt.Printf("  %-*s", maxName, dim("--"))
-				}
+				fmt.Printf("  %s", listCell(listMarker(scans[slug][name], drives[name], mountedDrives[name]), len(name)))
 			}
 			fmt.Println()
 		}
 	}
+	fmt.Printf("\n%s\n", dim(listLegend))
+}
+
+// missionSize returns the mission's size from the first drive that has it.
+// Copies should agree; -check is the tool for finding out when they do not.
+func missionSize(byDrive map[string]missionScan, order []string) int64 {
+	for _, name := range order {
+		if sc, ok := byDrive[name]; ok {
+			return sc.size
+		}
+	}
+	return 0
 }
 
 func runList(cfg Config, year int) {
@@ -309,25 +425,38 @@ func runList(cfg Config, year int) {
 	sort.Strings(allSlugs)
 
 	// column widths
-	maxSlug := 0
+	maxSlug := len("mission")
 	for _, s := range allSlugs {
 		if len(s) > maxSlug {
 			maxSlug = len(s)
 		}
 	}
 
-	fmt.Printf("%-*s  %s\n", maxSlug, "mission", strings.Join(driveNames, "  "))
-	fmt.Printf("%s\n", strings.Repeat("─", maxSlug+2+len(strings.Join(driveNames, "  "))))
+	scans := scanMissions(cfg.Drives, yearStr, allSlugs)
+	sizes := make(map[string]string, len(allSlugs))
+	maxSize := len("size")
+	var total int64
+	for _, slug := range allSlugs {
+		size := missionSize(scans[slug], driveNames)
+		total += size
+		sizes[slug] = fmtSize(uint64(size))
+		if len(sizes[slug]) > maxSize {
+			maxSize = len(sizes[slug])
+		}
+	}
+
+	header := fmt.Sprintf("%-*s  %*s  %s", maxSlug, "mission", maxSize, "size", strings.Join(driveNames, "  "))
+	fmt.Println(header)
+	fmt.Printf("%s\n", strings.Repeat("─", len(header)))
 	for _, slug := range allSlugs {
 		drives := missionDrives[slug]
 		var cols []string
 		for _, name := range driveNames {
-			if drives[name] {
-				cols = append(cols, name)
-			} else {
-				cols = append(cols, strings.Repeat(" ", len(name)))
-			}
+			cols = append(cols, listCell(listMarker(scans[slug][name], drives[name], true), len(name)))
 		}
-		fmt.Printf("%-*s  %s\n", maxSlug, slug, strings.Join(cols, "  "))
+		fmt.Printf("%-*s  %s  %s\n", maxSlug, slug,
+			dim(fmt.Sprintf("%*s", maxSize, sizes[slug])), strings.Join(cols, "  "))
 	}
+	fmt.Printf("\n%s\n", dim(fmt.Sprintf("%d missions · %s", len(allSlugs), fmtSize(uint64(total)))))
+	fmt.Printf("%s\n", dim(listLegend))
 }

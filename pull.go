@@ -17,8 +17,8 @@ import (
 	"github.com/vbauerster/mpb/v8"
 )
 
-// pullSource is one resolved mission on the cold drive it will be pulled from.
-type pullSource struct {
+// transferSource is one resolved mission on the drive it will be copied from.
+type transferSource struct {
 	num     int
 	slug    string
 	srcDir  string
@@ -28,8 +28,8 @@ type pullSource struct {
 	size    int64
 }
 
-// pullJob is the set of files one mission is missing on one hot drive.
-type pullJob struct {
+// transferJob is the set of files one mission is missing on one destination drive.
+type transferJob struct {
 	slug    string
 	srcDir  string
 	srcVol  string
@@ -40,15 +40,41 @@ type pullJob struct {
 	size    int64
 }
 
+// transferSpec describes one direction of copying between configured drives.
+// -pull reads from cold drives into hot ones; -copy moves between hot drives.
+type transferSpec struct {
+	verb    string // shown in the plan header
+	srcRole string // "cold" or "hot"
+	dstRole string // "cold" or "hot"
+	// dstNames, when set, restricts destinations to these drives. Naming a
+	// drive is explicit, so its pull:false setting does not apply.
+	dstNames []string
+	noDst    string // message when no destination drive is available
+}
+
 func runPull(cfg Config, missions []int, year int, sub string, skipConf bool) {
+	runTransfer(cfg, transferSpec{
+		verb: "pull", srcRole: "cold", dstRole: "hot",
+		noDst: "no pull-enabled hot drives mounted",
+	}, missions, year, sub, skipConf)
+}
+
+func runCopy(cfg Config, missions []int, year int, sub string, to []string, skipConf bool) {
+	runTransfer(cfg, transferSpec{
+		verb: "copy", srcRole: "hot", dstRole: "hot", dstNames: to,
+		noDst: "no other hot drives mounted to copy to",
+	}, missions, year, sub, skipConf)
+}
+
+func runTransfer(cfg Config, spec transferSpec, missions []int, year int, sub string, skipConf bool) {
 	yearStr := strconv.Itoa(year)
 
 	// resolve every requested mission before copying anything, so typos and
 	// unmounted archives surface up front rather than mid-batch
-	var sources []pullSource
+	var sources []transferSource
 	unresolved := 0
 	for _, num := range missions {
-		s, err := resolvePullSource(cfg, yearStr, num, sub)
+		s, err := resolveSource(cfg, spec.srcRole, yearStr, num, sub)
 		if err != nil {
 			fmt.Printf("%s mission %03d: %v\n", red("ERROR"), num, err)
 			unresolved++
@@ -57,28 +83,53 @@ func runPull(cfg Config, missions []int, year int, sub string, skipConf bool) {
 		sources = append(sources, s)
 	}
 	if len(sources) == 0 {
-		exit(1, "nothing to pull")
+		exit(1, "nothing to %s", spec.verb)
 	}
 
-	// find destination hot drives where pull is allowed, and work out what
-	// each is missing across the whole batch
-	var jobs []pullJob
+	// find destination drives, and work out what each is missing across the batch
+	wanted := make(map[string]bool, len(spec.dstNames))
+	for _, n := range spec.dstNames {
+		wanted[strings.ToLower(strings.TrimSpace(n))] = true
+	}
+	var jobs []transferJob
 	var dstVols []string // display names, in config order
 	dstBase := make(map[string]string)
 	toCopy := make(map[string]int64)
 	already := make(map[string]int64)
 	for _, d := range cfg.Drives {
-		if d.Role != "hot" || !d.pullAllowed() {
+		if d.Role != spec.dstRole {
+			continue
+		}
+		vol := d.name()
+		if len(wanted) > 0 {
+			if !wanted[strings.ToLower(vol)] {
+				continue
+			}
+		} else if !d.pullAllowed() {
 			continue
 		}
 		base := d.basePath()
 		if !dirExists(base) {
 			continue
 		}
-		vol := d.name()
+		// a drive that is the source of every mission in the batch is not a
+		// destination at all, and listing it as "already up to date" would
+		// misrepresent it
+		eligible := 0
+		for _, s := range sources {
+			if vol != s.srcVol {
+				eligible++
+			}
+		}
+		if eligible == 0 {
+			continue
+		}
 		dstVols = append(dstVols, vol)
 		dstBase[vol] = base
 		for _, s := range sources {
+			if vol == s.srcVol {
+				continue // this drive is the source for this mission
+			}
 			dir := filepath.Join(base, d.Root, yearStr, s.slug)
 			existing := make(map[string]bool)
 			if dirExists(dir) {
@@ -104,17 +155,21 @@ func runPull(cfg Config, missions []int, year int, sub string, skipConf bool) {
 			}
 			toCopy[vol] += size
 			if len(missing) > 0 {
-				jobs = append(jobs, pullJob{s.slug, s.srcDir, s.srcVol, s.srcBase, dir, vol, missing, size})
+				jobs = append(jobs, transferJob{s.slug, s.srcDir, s.srcVol, s.srcBase, dir, vol, missing, size})
 			}
 		}
 	}
 	if len(dstVols) == 0 {
-		exit(1, "no pull-enabled hot drives mounted")
+		if len(wanted) > 0 {
+			exit(1, "none of the requested drives are mounted %s drives: %s",
+				spec.dstRole, strings.Join(spec.dstNames, ", "))
+		}
+		exit(1, "%s", spec.noDst)
 	}
 
-	printPullPlan(sources, dstVols, dstBase, toCopy, already)
+	printTransferPlan(spec.verb, sources, dstVols, dstBase, toCopy, already)
 	if len(jobs) == 0 {
-		fmt.Println(dim("all hot drives already up to date"))
+		fmt.Printf("%s\n", dim(fmt.Sprintf("all %s drives already up to date", spec.dstRole)))
 		if unresolved > 0 {
 			os.Exit(1)
 		}
@@ -171,7 +226,7 @@ func runPull(cfg Config, missions []int, year int, sub string, skipConf bool) {
 		copyBars[vol] = addBar(p1, vol, sizeByVol[vol])
 	}
 
-	jobsByVol := make(map[string][]pullJob)
+	jobsByVol := make(map[string][]transferJob)
 	for _, j := range jobs {
 		jobsByVol[j.dstVol] = append(jobsByVol[j.dstVol], j)
 	}
@@ -334,20 +389,20 @@ func runPull(cfg Config, missions []int, year int, sub string, skipConf bool) {
 	}
 }
 
-// resolvePullSource locates a mission on the fullest cold drive holding it and
-// lists the files to pull, restricted to sub if set.
-func resolvePullSource(cfg Config, yearStr string, num int, sub string) (pullSource, error) {
+// resolveSource locates a mission on the fullest drive of the given role that
+// holds it, and lists the files to copy, restricted to sub if set.
+func resolveSource(cfg Config, role, yearStr string, num int, sub string) (transferSource, error) {
 	slug, err := findMissionSlug(cfg.Drives, yearStr, num)
 	if err != nil {
-		return pullSource{}, err
+		return transferSource{}, err
 	}
 
-	// prefer the cold drive with the most files, so a partially-synced drive
-	// is never silently used as the source
+	// prefer the drive with the most files, so a partially-synced drive is
+	// never silently used as the source
 	var srcDir, srcVol, srcBase string
 	var files []fileEntry
 	for _, d := range cfg.Drives {
-		if d.Role != "cold" {
+		if d.Role != role {
 			continue
 		}
 		base := d.basePath()
@@ -364,12 +419,12 @@ func resolvePullSource(cfg Config, yearStr string, num int, sub string) (pullSou
 		}
 	}
 	if srcDir == "" {
-		return pullSource{}, fmt.Errorf("not found on any cold drive")
+		return transferSource{}, fmt.Errorf("not found on any %s drive", role)
 	}
 
 	if sub != "" {
 		if !dirExists(filepath.Join(srcDir, sub)) {
-			return pullSource{}, fmt.Errorf("subfolder %q not found", sub)
+			return transferSource{}, fmt.Errorf("subfolder %q not found", sub)
 		}
 		prefix := sub + string(os.PathSeparator)
 		var filtered []fileEntry
@@ -381,26 +436,26 @@ func resolvePullSource(cfg Config, yearStr string, num int, sub string) (pullSou
 		files = filtered
 	}
 	if len(files) == 0 {
-		return pullSource{}, fmt.Errorf("no files found")
+		return transferSource{}, fmt.Errorf("no files found")
 	}
 
 	var size int64
 	for _, f := range files {
 		size += f.size
 	}
-	return pullSource{num, slug, srcDir, srcVol, srcBase, files, size}, nil
+	return transferSource{num, slug, srcDir, srcVol, srcBase, files, size}, nil
 }
 
-func printPullPlan(sources []pullSource, dstVols []string, dstBase map[string]string, toCopy, already map[string]int64) {
+func printTransferPlan(verb string, sources []transferSource, dstVols []string, dstBase map[string]string, toCopy, already map[string]int64) {
 	var totalSrc int64
 	for _, s := range sources {
 		totalSrc += s.size
 	}
 	if len(sources) == 1 {
 		s := sources[0]
-		fmt.Printf("pull: %s from %s (%s total)\n\n", bold(s.slug), bold(s.srcVol), dim(fmtSize(uint64(s.size))))
+		fmt.Printf("%s: %s from %s (%s total)\n\n", verb, bold(s.slug), bold(s.srcVol), dim(fmtSize(uint64(s.size))))
 	} else {
-		fmt.Printf("pull: %s mission(s) (%s total)\n\n", bold(strconv.Itoa(len(sources))), dim(fmtSize(uint64(totalSrc))))
+		fmt.Printf("%s: %s mission(s) (%s total)\n\n", verb, bold(strconv.Itoa(len(sources))), dim(fmtSize(uint64(totalSrc))))
 		width := 0
 		for _, s := range sources {
 			width = max(width, len(s.slug))

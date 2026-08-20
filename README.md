@@ -117,6 +117,10 @@ qcp -pull 42-48                       # pull an inclusive range
 qcp -pull 42-44,48 -y
 qcp -pull 42 -sub CFEXP_250_01        # pull only one card's subfolder
 qcp -pull 42 -year 2025
+
+qcp -copy 42                          # copy mission to every other hot drive
+qcp -copy 42 -to SSD2                 # ...or just one
+qcp -copy 42-48 -to SSD2,LAPTOP       # ...or a named list
 ```
 
 `-sync` copies from hot drives to cold drives — only cold drives whose `year_from`/`year_to` range covers the target year receive data. Cross-checks file manifests across hot drives before copying; conflicts are reported and skipped. Partial missions are handled: only missing files are copied, so it's safe to run again after adding files to an existing mission (e.g. edit exports).
@@ -127,7 +131,9 @@ qcp -pull 42 -year 2025
 
 Missions can be given as a number, a comma-separated list, an inclusive range, or any combination. Every mission is resolved before anything is copied, so a bad number is reported up front; the rest of the batch still runs and the exit status is non-zero. Sizes and free-space warnings are totalled per hot drive across the whole batch, and only missing files are copied, so re-running a batch is cheap. `-sub` applies to a single mission only. Interrupting a pull offers to remove the mission directories that run created, leaving pre-existing ones alone.
 
-All of `-pull`, `-verify`, `-checksum` and `-check` take the same mission selection: a single number (`42`), a comma-separated list (`42,44`), an inclusive range (`42-48`), or any combination (`42-44,48`). Ranges are capped at 500 missions. Each mission is reported separately and the run continues past failures, exiting non-zero at the end if any failed.
+`-copy` moves missions between hot drives. The source is whichever mounted hot drive holds the most files for that mission; destinations default to every other mounted hot drive, honouring `pull: false`. Naming drives with `-to` is explicit, so it overrides `pull: false`. Use `-sync` to reach cold drives.
+
+All of `-pull`, `-copy`, `-verify`, `-checksum` and `-check` take the same mission selection: a single number (`42`), a comma-separated list (`42,44`), an inclusive range (`42-48`), or any combination (`42-44,48`). Ranges are capped at 500 missions. Each mission is reported separately and the run continues past failures, exiting non-zero at the end if any failed.
 
 Copy concurrency is limited per source drive as well as per destination. Sizing the pool by the destination alone means one read stream per destination worker — and one per worker per destination when several are mounted — so a single archive HDD would serve many interleaved streams, losing far more to seeks than the parallelism gains. Every copy takes a read slot on its source drive, so an HDD source is read by one worker at a time no matter how many destinations it feeds.
 
@@ -167,7 +173,7 @@ qcp -check all                        # check every mission in current year
 qcp -check all -year all              # check the entire archive
 ```
 
-`-list` shows missions with per-drive presence columns; missions missing from a mounted drive are highlighted. `-check` / `-check all` compare each mission against every cold drive scoped for that year and report missing or extra files. Exits 1 if any mission is incomplete.
+`-list` shows each mission's size and a column per drive: `✓` where that drive's copy is fully covered by its `checksums.b3`, `·` where the mission is present but not (or only partly) checksummed, `−` where it is absent. Sizes come from the first drive holding the mission and exclude `checksums.b3` itself, so they match across drives. Getting them means walking each mission directory, so `-list` does real work now rather than only reading directory names. `-check` / `-check all` compare each mission against every cold drive scoped for that year and report missing or extra files. Exits 1 if any mission is incomplete.
 
 ### Organise
 
