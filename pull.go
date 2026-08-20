@@ -19,22 +19,25 @@ import (
 
 // pullSource is one resolved mission on the cold drive it will be pulled from.
 type pullSource struct {
-	num    int
-	slug   string
-	srcDir string
-	srcVol string
-	files  []fileEntry
-	size   int64
+	num     int
+	slug    string
+	srcDir  string
+	srcVol  string
+	srcBase string
+	files   []fileEntry
+	size    int64
 }
 
 // pullJob is the set of files one mission is missing on one hot drive.
 type pullJob struct {
-	slug   string
-	srcDir string
-	dstDir string
-	dstVol string
-	files  []fileEntry
-	size   int64
+	slug    string
+	srcDir  string
+	srcVol  string
+	srcBase string
+	dstDir  string
+	dstVol  string
+	files   []fileEntry
+	size    int64
 }
 
 func runPull(cfg Config, missions []int, year int, sub string, skipConf bool) {
@@ -101,7 +104,7 @@ func runPull(cfg Config, missions []int, year int, sub string, skipConf bool) {
 			}
 			toCopy[vol] += size
 			if len(missing) > 0 {
-				jobs = append(jobs, pullJob{s.slug, s.srcDir, dir, vol, missing, size})
+				jobs = append(jobs, pullJob{s.slug, s.srcDir, s.srcVol, s.srcBase, dir, vol, missing, size})
 			}
 		}
 	}
@@ -145,12 +148,33 @@ func runPull(cfg Config, missions []int, year int, sub string, skipConf bool) {
 		}
 	}
 
-	// probe each destination drive once
+	// Probe every drive involved once. Reads are limited per source drive as
+	// well as per destination: a pull usually runs a single cold HDD into fast
+	// hot SSDs, and sizing the copy pool by the destination alone would put
+	// one head under 8 concurrent readers, losing more to seeks than
+	// parallelism gains.
+	var srcOrder []string
+	srcInfo := make(map[string]driveInfo)
+	srcSem := make(map[string]chan struct{})
+	for _, j := range jobs {
+		if _, seen := srcInfo[j.srcVol]; seen {
+			continue
+		}
+		info := probeDrive(j.srcBase)
+		srcInfo[j.srcVol] = info
+		srcSem[j.srcVol] = make(chan struct{}, info.concurrency)
+		srcOrder = append(srcOrder, j.srcVol)
+	}
 	volInfo := make(map[string]driveInfo)
-	fmt.Println()
 	for _, vol := range volOrder {
 		volInfo[vol] = probeDrive(dstBase[vol])
-		fmt.Printf("  %s: %s\n", bold(vol), volInfo[vol])
+	}
+	fmt.Println()
+	for _, vol := range srcOrder {
+		fmt.Printf("  %s %s: %s\n", dim("from"), bold(vol), srcInfo[vol])
+	}
+	for _, vol := range volOrder {
+		fmt.Printf("  %s %s: %s\n", dim("to  "), bold(vol), volInfo[vol])
 	}
 
 	// copy — one bar per drive, all missions in parallel
@@ -169,32 +193,47 @@ func runPull(cfg Config, missions []int, year int, sub string, skipConf bool) {
 	var results []*result
 	var resultsMu sync.Mutex
 	var copyPools []*pool
+	// pool.run blocks the caller when the pool is full, so each destination
+	// submits from its own goroutine — otherwise the first destination would
+	// have to drain before the next one started.
+	var submit sync.WaitGroup
 	for vol, volJobs := range jobsByVol {
 		bar := copyBars[vol]
 		wp := newPool(volInfo[vol].concurrency)
 		copyPools = append(copyPools, wp)
-		for _, j := range volJobs {
-			for _, f := range j.files {
-				f, srcDir, dstRoot := f, j.srcDir, j.dstDir
-				wp.run(func() {
-					if ctx.Err() != nil {
-						return
-					}
-					dst := filepath.Join(dstRoot, f.rel)
-					r := job(filepath.Join(srcDir, f.rel), dst, bar)
-					r.dst = dst
-					r.rel = f.rel
-					r.dstRoot = dstRoot
-					resultsMu.Lock()
-					results = append(results, r)
-					resultsMu.Unlock()
-					if r.err != nil {
-						fmt.Printf("\n%s %v\n", red("ERROR:"), r.err)
-					}
-				})
+		submit.Add(1)
+		go func(volJobs []pullJob, wp *pool, bar *barTracker) {
+			defer submit.Done()
+			for _, j := range volJobs {
+				sem := srcSem[j.srcVol]
+				for _, f := range j.files {
+					f, srcDir, dstRoot := f, j.srcDir, j.dstDir
+					wp.run(func() {
+						if ctx.Err() != nil {
+							return
+						}
+						sem <- struct{}{} // one reader per source drive slot
+						defer func() { <-sem }()
+						if ctx.Err() != nil {
+							return
+						}
+						dst := filepath.Join(dstRoot, f.rel)
+						r := job(filepath.Join(srcDir, f.rel), dst, bar)
+						r.dst = dst
+						r.rel = f.rel
+						r.dstRoot = dstRoot
+						resultsMu.Lock()
+						results = append(results, r)
+						resultsMu.Unlock()
+						if r.err != nil {
+							fmt.Printf("\n%s %v\n", red("ERROR:"), r.err)
+						}
+					})
+				}
 			}
-		}
+		}(volJobs, wp, bar)
 	}
+	submit.Wait()
 	for _, wp := range copyPools {
 		wp.wait()
 	}
@@ -244,28 +283,34 @@ func runPull(cfg Config, missions []int, year int, sub string, skipConf bool) {
 		}
 	}
 	var verifyPools []*pool
+	var verifySubmit sync.WaitGroup
 	for vol, rs := range resultsByVol {
 		bar := verifyBars[vol]
 		wp := newPool(volInfo[vol].concurrency)
 		verifyPools = append(verifyPools, wp)
-		for _, r := range rs {
-			r := r
-			wp.run(func() {
-				if ctx.Err() != nil {
-					return
-				}
-				got, err := hashFile(r.dst, bar)
-				if err != nil || got != r.srcHash {
-					fmt.Printf("\n%s %s\n", red("FAIL:"), r.dst)
-					verifyFailed.Add(1)
-					return
-				}
-				newHashesMu.Lock()
-				newHashes[r.dstRoot] = append(newHashes[r.dstRoot], fmt.Sprintf("%s  %s", got, r.rel))
-				newHashesMu.Unlock()
-			})
-		}
+		verifySubmit.Add(1)
+		go func(rs []*result, wp *pool, bar *barTracker) {
+			defer verifySubmit.Done()
+			for _, r := range rs {
+				r := r
+				wp.run(func() {
+					if ctx.Err() != nil {
+						return
+					}
+					got, err := hashFile(r.dst, bar)
+					if err != nil || got != r.srcHash {
+						fmt.Printf("\n%s %s\n", red("FAIL:"), r.dst)
+						verifyFailed.Add(1)
+						return
+					}
+					newHashesMu.Lock()
+					newHashes[r.dstRoot] = append(newHashes[r.dstRoot], fmt.Sprintf("%s  %s", got, r.rel))
+					newHashesMu.Unlock()
+				})
+			}
+		}(rs, wp, bar)
 	}
+	verifySubmit.Wait()
 	for _, wp := range verifyPools {
 		wp.wait()
 	}
@@ -321,13 +366,14 @@ func resolvePullSource(cfg Config, yearStr string, num int, sub string) (pullSou
 
 	// prefer the cold drive with the most files, so a partially-synced drive
 	// is never silently used as the source
-	var srcDir, srcVol string
+	var srcDir, srcVol, srcBase string
 	var files []fileEntry
 	for _, d := range cfg.Drives {
 		if d.Role != "cold" {
 			continue
 		}
-		dir := filepath.Join(d.basePath(), d.Root, yearStr, slug)
+		base := d.basePath()
+		dir := filepath.Join(base, d.Root, yearStr, slug)
 		if !dirExists(dir) {
 			continue
 		}
@@ -336,7 +382,7 @@ func resolvePullSource(cfg Config, yearStr string, num int, sub string) (pullSou
 			continue
 		}
 		if len(found) > len(files) {
-			srcDir, srcVol, files = dir, d.name(), found
+			srcDir, srcVol, srcBase, files = dir, d.name(), base, found
 		}
 	}
 	if srcDir == "" {
@@ -364,7 +410,7 @@ func resolvePullSource(cfg Config, yearStr string, num int, sub string) (pullSou
 	for _, f := range files {
 		size += f.size
 	}
-	return pullSource{num, slug, srcDir, srcVol, files, size}, nil
+	return pullSource{num, slug, srcDir, srcVol, srcBase, files, size}, nil
 }
 
 func printPullPlan(sources []pullSource, dstVols []string, dstBase map[string]string, toCopy, already map[string]int64) {

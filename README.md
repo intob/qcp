@@ -125,6 +125,8 @@ qcp -pull 42 -year 2025
 
 `-pull` selects whichever cold drive has the most files as the source, avoiding partial copies from an incompletely synced drive.
 
+Copy concurrency is limited per source drive as well as per destination. A pull usually runs one cold HDD into fast hot SSDs, and sizing the pool by the destination alone would put a single set of heads under one reader per destination worker, losing more to seeks than parallelism gains.
+
 Missions can be given as a number, a comma-separated list, an inclusive range, or any combination. Every mission is resolved before anything is copied, so a bad number is reported up front; the rest of the batch still runs and the exit status is non-zero. Sizes and free-space warnings are totalled per hot drive across the whole batch, and only missing files are copied, so re-running a batch is cheap. `-sub` applies to a single mission only. Interrupting a pull offers to remove the mission directories that run created, leaving pre-existing ones alone.
 
 ### Verify
