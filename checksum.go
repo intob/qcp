@@ -202,26 +202,30 @@ func runChecksumYear(cfg Config, year int) bool {
 		var mu sync.Mutex
 		var failed atomic.Int64
 		var drivePools []*pool
+		var submitters []func()
 
 		for k := range j.drives {
 			md := &j.drives[k]
 			dp := newPool(volInfo[md.vol].concurrency)
 			drivePools = append(drivePools, dp)
-			for _, f := range j.files {
-				f := f
-				dp.run(func() {
-					hash, err := hashFile(filepath.Join(md.dir, f.rel), bars[md.vol])
-					if err != nil {
-						fmt.Printf("\n%s %s: %v\n", red(fmt.Sprintf("ERROR [%s]", md.vol)), f.rel, err)
-						failed.Add(1)
-						return
-					}
-					mu.Lock()
-					md.hashes[f.rel] = hash
-					mu.Unlock()
-				})
-			}
+			submitters = append(submitters, func() {
+				for _, f := range j.files {
+					f := f
+					dp.run(func() {
+						hash, err := hashFile(filepath.Join(md.dir, f.rel), bars[md.vol])
+						if err != nil {
+							fmt.Printf("\n%s %s: %v\n", red(fmt.Sprintf("ERROR [%s]", md.vol)), f.rel, err)
+							failed.Add(1)
+							return
+						}
+						mu.Lock()
+						md.hashes[f.rel] = hash
+						mu.Unlock()
+					})
+				}
+			})
 		}
+		submitAll(submitters)
 		for _, dp := range drivePools {
 			dp.wait()
 		}
@@ -361,27 +365,31 @@ func runChecksum(cfg Config, missionNum int, year int) bool {
 	var trackers []*barTracker
 	var drivePools []*pool
 
+	var submitters []func()
 	for i := range drives {
 		d := &drives[i]
 		bar := addBar(p, d.vol, totalSize)
 		trackers = append(trackers, bar)
 		dp := newPool(driveInfos[d.vol].concurrency)
 		drivePools = append(drivePools, dp)
-		for _, f := range files {
-			f := f
-			dp.run(func() {
-				hash, err := hashFile(filepath.Join(d.dir, f.rel), bar)
-				if err != nil {
-					fmt.Printf("\n%s %v\n", red(fmt.Sprintf("ERROR [%s]:", d.vol)), err)
-					failed.Add(1)
-					return
-				}
-				mu.Lock()
-				d.hashes[f.rel] = hash
-				mu.Unlock()
-			})
-		}
+		submitters = append(submitters, func() {
+			for _, f := range files {
+				f := f
+				dp.run(func() {
+					hash, err := hashFile(filepath.Join(d.dir, f.rel), bar)
+					if err != nil {
+						fmt.Printf("\n%s %v\n", red(fmt.Sprintf("ERROR [%s]:", d.vol)), err)
+						failed.Add(1)
+						return
+					}
+					mu.Lock()
+					d.hashes[f.rel] = hash
+					mu.Unlock()
+				})
+			}
+		})
 	}
+	submitAll(submitters)
 	for _, dp := range drivePools {
 		dp.wait()
 	}

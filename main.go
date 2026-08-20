@@ -476,6 +476,7 @@ func main() {
 	runDay := func(dayScanned []scannedCard, missionSlug string, dstRoots []string, dstNames, dstBase map[string]string) {
 		type fileJob struct {
 			src, dst, rel, dstRoot string
+			srcVol                 string // card the file is read from
 			size                   int64
 		}
 
@@ -493,6 +494,14 @@ func main() {
 			dstInfos[dstRoot] = probeDrive(dstBase[dstRoot])
 		}
 
+		// Each destination reads the card separately, so with the copies now
+		// running concurrently the card would take one reader per destination
+		// worker without this.
+		srcLimit := newSourceLimiter()
+		for _, sc := range dayScanned {
+			srcLimit.add(sc.Volume, filepath.Join("/Volumes", sc.Volume))
+		}
+
 		missingByDst := make(map[string][]fileJob)
 		for _, sc := range dayScanned {
 			for _, f := range sc.files {
@@ -502,7 +511,7 @@ func main() {
 					dst := filepath.Join(dstRoot, dstRel)
 					if _, err := os.Stat(dst); err != nil {
 						missingByDst[dstRoot] = append(missingByDst[dstRoot],
-							fileJob{src, dst, dstRel, dstRoot, f.size})
+							fileJob{src, dst, dstRel, dstRoot, sc.Volume, f.size})
 					}
 				}
 			}
@@ -524,6 +533,7 @@ func main() {
 		var resultsMu sync.Mutex
 		var total atomic.Int64
 		var copyPools []*pool
+		var copySubmit []func()
 		for _, dstRoot := range dstRoots {
 			missing := missingByDst[dstRoot]
 			if len(missing) == 0 {
@@ -532,25 +542,33 @@ func main() {
 			}
 			wp := newPool(dstInfos[dstRoot].concurrency)
 			copyPools = append(copyPools, wp)
-			for _, fj := range missing {
-				fj := fj
-				o := prepJob(fj.src, fj.dst, fj.rel, fj.dstRoot, copyBars[fj.dstRoot])
-				wp.run(func() {
-					if ctx.Err() != nil {
-						return
-					}
-					r := <-o()
-					resultsMu.Lock()
-					results = append(results, r)
-					resultsMu.Unlock()
-					if r.err != nil {
-						fmt.Printf("\n%s copy: %v\n", red("ERROR"), r.err)
-						return
-					}
-					total.Add(r.n)
-				})
-			}
+			copySubmit = append(copySubmit, func() {
+				for _, fj := range missing {
+					fj := fj
+					o := prepJob(fj.src, fj.dst, fj.rel, fj.dstRoot, copyBars[fj.dstRoot])
+					wp.run(func() {
+						if ctx.Err() != nil {
+							return
+						}
+						release := srcLimit.acquire(fj.srcVol)
+						defer release()
+						if ctx.Err() != nil {
+							return
+						}
+						r := <-o()
+						resultsMu.Lock()
+						results = append(results, r)
+						resultsMu.Unlock()
+						if r.err != nil {
+							fmt.Printf("\n%s copy: %v\n", red("ERROR"), r.err)
+							return
+						}
+						total.Add(r.n)
+					})
+				}
+			})
 		}
+		submitAll(copySubmit)
 		for _, wp := range copyPools {
 			wp.wait()
 		}
@@ -592,33 +610,37 @@ func main() {
 		}
 
 		var verifyPools []*pool
+		var verifySubmit []func()
 		for dstRoot, rs := range resultsByDst {
 			wp := newPool(dstInfos[dstRoot].concurrency)
 			verifyPools = append(verifyPools, wp)
-			for _, r := range rs {
-				r := r
-				wp.run(func() {
-					if ctx.Err() != nil {
-						return
-					}
-					got, err := hashFile(r.dst, verifyBars[r.dstRoot])
-					if err != nil {
-						fmt.Printf("\n%s verify: %v\n", red("ERROR"), err)
-						verifyFailed.Add(1)
-						return
-					}
-					if got != r.srcHash {
-						fmt.Printf("\n%s %s\n", red("MISMATCH:"), r.dst)
-						verifyFailed.Add(1)
-						return
-					}
-					mu.Lock()
-					newChecksums[r.dstRoot] = append(newChecksums[r.dstRoot],
-						fmt.Sprintf("%s  %s", got, r.rel))
-					mu.Unlock()
-				})
-			}
+			verifySubmit = append(verifySubmit, func() {
+				for _, r := range rs {
+					r := r
+					wp.run(func() {
+						if ctx.Err() != nil {
+							return
+						}
+						got, err := hashFile(r.dst, verifyBars[r.dstRoot])
+						if err != nil {
+							fmt.Printf("\n%s verify: %v\n", red("ERROR"), err)
+							verifyFailed.Add(1)
+							return
+						}
+						if got != r.srcHash {
+							fmt.Printf("\n%s %s\n", red("MISMATCH:"), r.dst)
+							verifyFailed.Add(1)
+							return
+						}
+						mu.Lock()
+						newChecksums[r.dstRoot] = append(newChecksums[r.dstRoot],
+							fmt.Sprintf("%s  %s", got, r.rel))
+						mu.Unlock()
+					})
+				}
+			})
 		}
+		submitAll(verifySubmit)
 		for _, wp := range verifyPools {
 			wp.wait()
 		}

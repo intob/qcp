@@ -98,27 +98,31 @@ func runVerify(cfg Config, missionNum int, year int) bool {
 	var trackers []*barTracker
 	var jobPools []*pool
 
+	var submitters []func()
 	for _, job := range jobs {
 		bar := addBar(p, job.vol, job.totalSize)
 		trackers = append(trackers, bar)
 		wp := newPool(volInfos[job.vol].concurrency)
 		jobPools = append(jobPools, wp)
-		for _, e := range job.entries {
-			e, dir, b := e, job.dir, bar
-			wp.run(func() {
-				got, err := hashFile(filepath.Join(dir, e.rel), b)
-				if err != nil {
-					fmt.Printf("\n%s %v\n", red("ERROR:"), err)
-					failed.Add(1)
-					return
-				}
-				if got != e.hash {
-					fmt.Printf("\n%s [%s]: %s\n", red("FAIL"), filepath.Base(dir), e.rel)
-					failed.Add(1)
-				}
-			})
-		}
+		submitters = append(submitters, func() {
+			for _, e := range job.entries {
+				e, dir, b := e, job.dir, bar
+				wp.run(func() {
+					got, err := hashFile(filepath.Join(dir, e.rel), b)
+					if err != nil {
+						fmt.Printf("\n%s %v\n", red("ERROR:"), err)
+						failed.Add(1)
+						return
+					}
+					if got != e.hash {
+						fmt.Printf("\n%s [%s]: %s\n", red("FAIL"), filepath.Base(dir), e.rel)
+						failed.Add(1)
+					}
+				})
+			}
+		})
 	}
+	submitAll(submitters)
 	for _, wp := range jobPools {
 		wp.wait()
 	}
@@ -259,6 +263,7 @@ func verifySlug(cfg Config, slug, yearStr string, volInfos map[string]driveInfo)
 	var failures []failure
 
 	var drivePools []*pool
+	var submitters []func()
 	for _, job := range jobs {
 		info := volInfos[job.vol]
 		if info.concurrency == 0 {
@@ -266,18 +271,21 @@ func verifySlug(cfg Config, slug, yearStr string, volInfos map[string]driveInfo)
 		}
 		wp := newPool(info.concurrency)
 		drivePools = append(drivePools, wp)
-		for _, e := range job.entries {
-			e, j := e, job
-			wp.run(func() {
-				got, err := hashFile(filepath.Join(j.dir, e.rel), nil)
-				if err != nil || got != e.hash {
-					mu.Lock()
-					failures = append(failures, failure{j.vol, e.rel, err})
-					mu.Unlock()
-				}
-			})
-		}
+		submitters = append(submitters, func() {
+			for _, e := range job.entries {
+				e, j := e, job
+				wp.run(func() {
+					got, err := hashFile(filepath.Join(j.dir, e.rel), nil)
+					if err != nil || got != e.hash {
+						mu.Lock()
+						failures = append(failures, failure{j.vol, e.rel, err})
+						mu.Unlock()
+					}
+				})
+			}
+		})
 	}
+	submitAll(submitters)
 	for _, wp := range drivePools {
 		wp.wait()
 	}
