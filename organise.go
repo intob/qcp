@@ -14,7 +14,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
 )
 
 // datePatterns extracts YYYY MM DD from common camera filename conventions.

@@ -18,8 +18,8 @@ type CardConfig struct {
 }
 
 type DriveConfig struct {
-	Volume   string `json:"volume"`    // display name and /Volumes/<volume> path (if Path not set)
-	Path     string `json:"path"`      // explicit path, e.g. "~/Footage" (overrides Volume for path)
+	Volume   string `json:"volume"` // display name and /Volumes/<volume> path (if Path not set)
+	Path     string `json:"path"`   // explicit path, e.g. "~/Footage" (overrides Volume for path)
 	Root     string `json:"root"`
 	Role     string `json:"role"`      // "hot" or "cold"
 	Pull     *bool  `json:"pull"`      // nil/true = pull allowed (default), false = excluded from pull

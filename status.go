@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-
 )
 
 func runStatus(cfg Config, year int) {
