@@ -276,11 +276,15 @@ func runChecksumYear(cfg Config, year int) bool {
 	return true
 }
 
-func runChecksum(cfg Config, missionNum int, year int) {
+// runChecksum hashes one mission on every mounted drive that has it, cross-checks
+// the drives against each other and writes checksums.b3. It reports problems and
+// returns false rather than exiting, so callers can do several missions in a row.
+func runChecksum(cfg Config, missionNum int, year int) bool {
 	yearStr := strconv.Itoa(year)
 	slug, err := findMissionSlug(cfg.Drives, yearStr, missionNum)
 	if err != nil {
-		exit(1, "mission %03d not found: %v", missionNum, err)
+		fmt.Printf("%s mission %03d not found: %v\n", red("ERROR"), missionNum, err)
+		return false
 	}
 
 	type driveHashes struct {
@@ -309,7 +313,10 @@ func runChecksum(cfg Config, missionNum int, year int) {
 		drives = append(drives, driveHashes{vol: d.name(), dir: dir, base: base, hashes: make(map[string]string)})
 	}
 	if len(drives) == 0 {
-		exit(1, "no drives to checksum (all missing or already have checksums.b3)")
+		// every mounted copy is already checksummed (or absent) — a no-op, not a
+		// failure; the loop above has already said which drives were skipped
+		fmt.Printf("%s\n", dim(fmt.Sprintf("mission %03d: nothing to checksum", missionNum)))
+		return true
 	}
 
 	// union file lists from all drives so files absent from drives[0] are not silently omitted
@@ -327,7 +334,8 @@ func runChecksum(cfg Config, missionNum int, year int) {
 		}
 	}
 	if len(fileSet) == 0 {
-		exit(1, "no files found for mission %03d", missionNum)
+		fmt.Printf("%s no files found for mission %03d\n", red("ERROR"), missionNum)
+		return false
 	}
 	var files []fileEntry
 	var totalSize int64
@@ -383,7 +391,8 @@ func runChecksum(cfg Config, missionNum int, year int) {
 	p.Wait()
 
 	if failed.Load() > 0 {
-		exit(1, "%d file(s) could not be hashed", failed.Load())
+		fmt.Printf("\n%s %d file(s) could not be hashed\n", red("ERROR"), failed.Load())
+		return false
 	}
 
 	// cross-check: every drive must agree on every file
@@ -399,7 +408,8 @@ func runChecksum(cfg Config, missionNum int, year int) {
 		}
 	}
 	if conflicts > 0 {
-		exit(1, "%d conflict(s) found — checksums.b3 not written", conflicts)
+		fmt.Printf("%s %d conflict(s) found — checksums.b3 not written\n", red("ERROR"), conflicts)
+		return false
 	}
 
 	// all drives agree — write checksums.b3 to each
@@ -416,4 +426,5 @@ func runChecksum(cfg Config, missionNum int, year int) {
 			fmt.Printf("%s wrote %s (%d files)\n", green("✓"), cPath, len(lines))
 		}
 	}
+	return true
 }

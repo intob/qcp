@@ -14,12 +14,16 @@ import (
 	"github.com/vbauerster/mpb/v8"
 )
 
-func runVerify(cfg Config, missionNum int, year int) {
+// runVerify verifies one mission against checksums.b3 on every mounted drive
+// that has it, with a progress bar per drive. It reports problems and returns
+// false rather than exiting, so callers can verify several missions in a row.
+func runVerify(cfg Config, missionNum int, year int) bool {
 	yearStr := strconv.Itoa(year)
 
 	slug, err := findMissionSlug(cfg.Drives, yearStr, missionNum)
 	if err != nil {
-		exit(1, "mission %03d not found: %v", missionNum, err)
+		fmt.Printf("%s mission %03d not found: %v\n", red("ERROR"), missionNum, err)
+		return false
 	}
 
 	type dirEntry struct {
@@ -41,7 +45,8 @@ func runVerify(cfg Config, missionNum int, year int) {
 		dirs = append(dirs, dirEntry{d.name(), dir, base})
 	}
 	if len(dirs) == 0 {
-		exit(1, "mission %03d not found on any mounted drive", missionNum)
+		fmt.Printf("%s mission %03d not found on any mounted drive\n", red("ERROR"), missionNum)
+		return false
 	}
 
 	type entry struct{ hash, rel string }
@@ -75,7 +80,8 @@ func runVerify(cfg Config, missionNum int, year int) {
 		jobs = append(jobs, dirJob{de, entries, totalSize})
 	}
 	if len(jobs) == 0 {
-		exit(1, "no checksums.b3 found for mission %03d", missionNum)
+		fmt.Printf("%s no checksums.b3 found for mission %03d\n", red("ERROR"), missionNum)
+		return false
 	}
 
 	fmt.Printf("%s mission %s on %d drive(s)\n", dim("verifying"), bold(fmt.Sprintf("%03d", missionNum)), len(jobs))
@@ -122,13 +128,15 @@ func runVerify(cfg Config, missionNum int, year int) {
 	p.Wait()
 
 	if n := failed.Load(); n > 0 {
-		exit(1, "%d file(s) failed", n)
+		fmt.Printf("\n%s %d file(s) failed\n", red("ERROR"), n)
+		return false
 	}
 	total := 0
 	for _, j := range jobs {
 		total += len(j.entries)
 	}
 	fmt.Printf("\n%s all %d files ok across %d drive(s)\n", green("✓"), total, len(jobs))
+	return true
 }
 
 func runVerifyAll(cfg Config) bool {

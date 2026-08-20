@@ -148,31 +148,17 @@ func runPull(cfg Config, missions []int, year int, sub string, skipConf bool) {
 		}
 	}
 
-	// Probe every drive involved once. Reads are limited per source drive as
-	// well as per destination: a pull usually runs a single cold HDD into fast
-	// hot SSDs, and sizing the copy pool by the destination alone would put
-	// one head under 8 concurrent readers, losing more to seeks than
-	// parallelism gains.
-	var srcOrder []string
-	srcInfo := make(map[string]driveInfo)
-	srcSem := make(map[string]chan struct{})
+	// probe every drive involved once, and limit reads per source drive
+	srcLimit := newSourceLimiter()
 	for _, j := range jobs {
-		if _, seen := srcInfo[j.srcVol]; seen {
-			continue
-		}
-		info := probeDrive(j.srcBase)
-		srcInfo[j.srcVol] = info
-		srcSem[j.srcVol] = make(chan struct{}, info.concurrency)
-		srcOrder = append(srcOrder, j.srcVol)
+		srcLimit.add(j.srcVol, j.srcBase)
 	}
 	volInfo := make(map[string]driveInfo)
 	for _, vol := range volOrder {
 		volInfo[vol] = probeDrive(dstBase[vol])
 	}
 	fmt.Println()
-	for _, vol := range srcOrder {
-		fmt.Printf("  %s %s: %s\n", dim("from"), bold(vol), srcInfo[vol])
-	}
+	srcLimit.report()
 	for _, vol := range volOrder {
 		fmt.Printf("  %s %s: %s\n", dim("to  "), bold(vol), volInfo[vol])
 	}
@@ -193,27 +179,21 @@ func runPull(cfg Config, missions []int, year int, sub string, skipConf bool) {
 	var results []*result
 	var resultsMu sync.Mutex
 	var copyPools []*pool
-	// pool.run blocks the caller when the pool is full, so each destination
-	// submits from its own goroutine — otherwise the first destination would
-	// have to drain before the next one started.
-	var submit sync.WaitGroup
+	var copySubmit []func()
 	for vol, volJobs := range jobsByVol {
 		bar := copyBars[vol]
 		wp := newPool(volInfo[vol].concurrency)
 		copyPools = append(copyPools, wp)
-		submit.Add(1)
-		go func(volJobs []pullJob, wp *pool, bar *barTracker) {
-			defer submit.Done()
+		copySubmit = append(copySubmit, func() {
 			for _, j := range volJobs {
-				sem := srcSem[j.srcVol]
 				for _, f := range j.files {
-					f, srcDir, dstRoot := f, j.srcDir, j.dstDir
+					f, srcDir, srcVol, dstRoot := f, j.srcDir, j.srcVol, j.dstDir
 					wp.run(func() {
 						if ctx.Err() != nil {
 							return
 						}
-						sem <- struct{}{} // one reader per source drive slot
-						defer func() { <-sem }()
+						release := srcLimit.acquire(srcVol)
+						defer release()
 						if ctx.Err() != nil {
 							return
 						}
@@ -231,9 +211,9 @@ func runPull(cfg Config, missions []int, year int, sub string, skipConf bool) {
 					})
 				}
 			}
-		}(volJobs, wp, bar)
+		})
 	}
-	submit.Wait()
+	submitAll(copySubmit)
 	for _, wp := range copyPools {
 		wp.wait()
 	}
@@ -283,14 +263,12 @@ func runPull(cfg Config, missions []int, year int, sub string, skipConf bool) {
 		}
 	}
 	var verifyPools []*pool
-	var verifySubmit sync.WaitGroup
+	var verifySubmit []func()
 	for vol, rs := range resultsByVol {
 		bar := verifyBars[vol]
 		wp := newPool(volInfo[vol].concurrency)
 		verifyPools = append(verifyPools, wp)
-		verifySubmit.Add(1)
-		go func(rs []*result, wp *pool, bar *barTracker) {
-			defer verifySubmit.Done()
+		verifySubmit = append(verifySubmit, func() {
 			for _, r := range rs {
 				r := r
 				wp.run(func() {
@@ -308,9 +286,9 @@ func runPull(cfg Config, missions []int, year int, sub string, skipConf bool) {
 					newHashesMu.Unlock()
 				})
 			}
-		}(rs, wp, bar)
+		})
 	}
-	verifySubmit.Wait()
+	submitAll(verifySubmit)
 	for _, wp := range verifyPools {
 		wp.wait()
 	}

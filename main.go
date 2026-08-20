@@ -49,8 +49,8 @@ func usage() {
 	row("  -sub", "dir", "subdirectory within mission to pull")
 
 	section("VERIFY")
-	row("-verify", "n|all", "re-verify mission(s) across all mounted drives")
-	row("-checksum", "n|all", "generate checksums.b3 for a mission (or all in year)")
+	row("-verify", "n|list|all", "re-verify mission(s) across all mounted drives")
+	row("-checksum", "n|list|all", "generate checksums.b3 for mission(s) (or all in year)")
 
 	section("ORGANISE")
 	row("-organise", "", "group unorganised files into seasonal mission folders")
@@ -61,7 +61,7 @@ func usage() {
 	section("INFO")
 	row("-list", "", "list missions across all mounted drives")
 	row("-status", "", "show drive space and mission status")
-	row("-check", "n|all", "check mission(s) for missing files across drives")
+	row("-check", "n|list|all", "check mission(s) for missing files across drives")
 
 	section("MAINTENANCE")
 	row("-clean", "", "find and remove junk files from all mounted drives")
@@ -137,15 +137,15 @@ func main() {
 	skipConf := flag.Bool("y", false, "skip confirmation")
 	missionFlag := flag.String("ingest", "", "mission name or number")
 	yearFlag := flag.String("year", "", `year to operate on (default: current year, "all" for all years)`)
-	verifyMissionStr := flag.String("verify", "", `re-verify mission(s) across all mounted drives (use "all" for all missions)`)
-	checksumMissionStr := flag.String("checksum", "", `generate checksums.b3 for a mission (use "all" for all missions in year)`)
+	verifyMissionStr := flag.String("verify", "", `re-verify mission(s) across all mounted drives (e.g. "42", "42,44", "42-48", "all")`)
+	checksumMissionStr := flag.String("checksum", "", `generate checksums.b3 for mission(s) (e.g. "42", "42,44", "42-48", "all")`)
 	pullMissionStr := flag.String("pull", "", `pull mission(s) from cold storage to hot drives (e.g. "42", "42,44", "42-48")`)
 	pullSub := flag.String("sub", "", "subdirectory within mission to pull (e.g. CFEXP_250_01)")
 	doSync := flag.Bool("sync", false, "sync missions from hot drives to cold drives")
 	doReplicate := flag.Bool("replicate", false, "replicate missions between cold drives")
 	doList := flag.Bool("list", false, "list missions across all mounted drives")
 	doStatus := flag.Bool("status", false, "show drive space and mission status")
-	checkMissionStr := flag.String("check", "", `check mission(s) for missing files across drives (use "all" for all missions)`)
+	checkMissionStr := flag.String("check", "", `check mission(s) for missing files across drives (e.g. "42", "42,44", "42-48", "all")`)
 	doClean := flag.Bool("clean", false, "find and remove junk files (Synology metadata, Thumbs.db, etc.) from all mounted drives")
 	doInit := flag.Bool("init", false, "scan drives and initialise missing sequence numbers")
 	doOrganise := flag.Bool("organise", false, "group unorganised files into seasonal mission folders")
@@ -173,17 +173,6 @@ func main() {
 		}
 	}
 
-	parseMission := func(s string) (int, bool) {
-		if s == "" {
-			return 0, false
-		}
-		n, err := strconv.Atoi(s)
-		if err != nil || n <= 0 {
-			exit(1, "invalid mission number: %s", s)
-		}
-		return n, true
-	}
-
 	pullMissions, hasPull := parseMissionList(*pullMissionStr)
 	if hasPull && *pullSub != "" && len(pullMissions) > 1 {
 		exit(1, "-sub applies to a single mission, but %d were given", len(pullMissions))
@@ -205,8 +194,17 @@ func main() {
 		}
 		return
 	case *checkMissionStr != "":
-		n, _ := parseMission(*checkMissionStr)
-		if !runCheckMission(cfg, n, year, !yearAll) {
+		nums, _ := parseMissionList(*checkMissionStr)
+		ok := true
+		for i, n := range nums {
+			if i > 0 {
+				fmt.Println()
+			}
+			if !runCheckMission(cfg, n, year, !yearAll) {
+				ok = false
+			}
+		}
+		if !ok {
 			os.Exit(1)
 		}
 		return
@@ -300,8 +298,19 @@ func main() {
 		}
 		return
 	case *verifyMissionStr != "":
-		n, _ := parseMission(*verifyMissionStr)
-		runVerify(cfg, n, year)
+		nums, _ := parseMissionList(*verifyMissionStr)
+		ok := true
+		for i, n := range nums {
+			if i > 0 {
+				fmt.Println()
+			}
+			if !runVerify(cfg, n, year) {
+				ok = false
+			}
+		}
+		if !ok {
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -318,8 +327,19 @@ func main() {
 		}
 		return
 	case *checksumMissionStr != "":
-		n, _ := parseMission(*checksumMissionStr)
-		runChecksum(cfg, n, year)
+		nums, _ := parseMissionList(*checksumMissionStr)
+		ok := true
+		for i, n := range nums {
+			if i > 0 {
+				fmt.Println()
+			}
+			if !runChecksum(cfg, n, year) {
+				ok = false
+			}
+		}
+		if !ok {
+			os.Exit(1)
+		}
 		return
 	}
 

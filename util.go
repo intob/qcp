@@ -17,6 +17,7 @@ type fileEntry struct {
 
 type op struct {
 	src, dst string
+	srcVol   string
 	do       func() <-chan *result
 }
 

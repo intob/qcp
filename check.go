@@ -42,7 +42,8 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 	} else {
 		searchYears = allYears(cfg)
 		if len(searchYears) == 0 {
-			exit(1, "mission %03d not found", missionNum)
+			fmt.Printf("%s mission %03d not found\n", red("ERROR"), missionNum)
+			return false
 		}
 	}
 
@@ -58,7 +59,8 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 		}
 	}
 	if slug == "" {
-		exit(1, "mission %03d not found", missionNum)
+		fmt.Printf("%s mission %03d not found\n", red("ERROR"), missionNum)
+		return false
 	}
 
 	// filter cold drives to those scoped for this year
@@ -92,12 +94,25 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 		}
 	}
 	if refDir == "" {
-		exit(1, "mission %s not found on any drive", slug)
+		fmt.Printf("%s mission %s not found on any drive\n", red("ERROR"), slug)
+		return false
 	}
 
 	refFiles, err := findFiles(refDir)
 	if err != nil {
-		exit(1, "error scanning %s on %s: %v", slug, refVol, err)
+		fmt.Printf("%s scanning %s on %s: %v\n", red("ERROR"), slug, refVol, err)
+		return false
+	}
+
+	// Name the mission the first time this run has something to report, so the
+	// per-drive detail below is attributable when several missions are checked.
+	// The all-clear line names the mission itself, so it needs no heading.
+	headed := false
+	header := func() {
+		if !headed {
+			headed = true
+			fmt.Printf("%s\n", bold(slug))
+		}
 	}
 	refSet := make(map[string]bool, len(refFiles))
 	for _, f := range refFiles {
@@ -114,6 +129,7 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 	}
 	sort.Strings(ghosts)
 	if len(ghosts) > 0 {
+		header()
 		fmt.Printf("  %s %s\n", yellow("!"), dim(refVol+" — in checksums.b3 but missing from disk:"))
 		for _, f := range ghosts {
 			fmt.Printf("    %s %s\n", yellow("!"), f)
@@ -128,12 +144,14 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 		coldChecked++
 		coldDir := filepath.Join(cold.basePath(), cold.Root, yearStr, slug)
 		if !dirExists(coldDir) {
+			header()
 			fmt.Printf("  %s %s\n", yellow(cold.name()), dim("(mission directory missing)"))
 			totalMissing += len(refFiles)
 			continue
 		}
 		coldFiles, err := findFiles(coldDir)
 		if err != nil {
+			header()
 			fmt.Printf("%s scanning %s on %s: %v\n", red("ERROR"), slug, cold.name(), err)
 			scanErrors++
 			continue
@@ -164,6 +182,7 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 			}
 		}
 		if len(missing) > 0 || len(extra) > 0 || len(coldGhosts) > 0 {
+			header()
 			fmt.Printf("  %s\n", yellow(cold.name()))
 			for _, f := range coldGhosts {
 				fmt.Printf("    %s %s\n", yellow("!"), f)

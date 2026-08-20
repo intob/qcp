@@ -97,10 +97,11 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 	// missions found on multiple primaries are cross-checked by file manifest;
 	// conflicts are skipped with a warning.
 	type missionSource struct {
-		srcVol string
-		srcDir string
-		files  []fileEntry
-		size   int64
+		srcVol  string
+		srcBase string
+		srcDir  string
+		files   []fileEntry
+		size    int64
 	}
 	missionSources := make(map[string]missionSource)
 	conflicted := make(map[string]bool)
@@ -132,7 +133,7 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 				// identical on both primaries — keep existing source
 				continue
 			}
-			missionSources[slug] = missionSource{p.Volume, srcDir, files, size}
+			missionSources[slug] = missionSource{p.Volume, p.basePath(), srcDir, files, size}
 		}
 	}
 
@@ -147,6 +148,8 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 	type syncJob struct {
 		slug    string
 		srcDir  string
+		srcVol  string
+		srcBase string
 		dstDir  string
 		dstVol  string // display name
 		dstBase string // base path for probeDrive
@@ -186,6 +189,8 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 				jobs = append(jobs, syncJob{
 					slug:    slug,
 					srcDir:  ms.srcDir,
+					srcVol:  ms.srcVol,
+					srcBase: ms.srcBase,
 					dstDir:  dstDir,
 					dstVol:  dst.name(),
 					dstBase: dst.basePath(),
@@ -260,11 +265,16 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 	for _, j := range jobs {
 		dstBaseByVol[j.dstVol] = j.dstBase
 	}
+	srcLimit := newSourceLimiter()
+	for _, j := range jobs {
+		srcLimit.add(j.srcVol, j.srcBase)
+	}
 	fmt.Println()
+	srcLimit.report()
 	for vol := range archiveSize {
 		info := probeDrive(dstBaseByVol[vol])
 		volInfo[vol] = info
-		fmt.Printf("  %s: %s\n", bold(vol), info)
+		fmt.Printf("  %s %s: %s\n", dim("to  "), bold(vol), info)
 	}
 
 	// Phase 1: copy — one bar per archive, all missions in parallel
@@ -278,34 +288,43 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 	// group ops by destination volume; each volume gets its own pool sized by drive type
 	opsByVol := make(map[string][]*op)
 	for _, j := range jobs {
-		opsByVol[j.dstVol] = append(opsByVol[j.dstVol], buildSyncOps(j.files, j.srcDir, j.dstDir, copyBars[j.dstVol])...)
+		opsByVol[j.dstVol] = append(opsByVol[j.dstVol], buildSyncOps(j.files, j.srcDir, j.srcVol, j.dstDir, copyBars[j.dstVol])...)
 	}
 
 	var results []*result
 	var resultsMu sync.Mutex
 	var total atomic.Int64
 	var copyPools []*pool
+	var copySubmit []func()
 	for vol, ops := range opsByVol {
 		wp := newPool(volInfo[vol].concurrency)
 		copyPools = append(copyPools, wp)
-		for _, o := range ops {
-			o := o
-			wp.run(func() {
-				if ctx.Err() != nil {
-					return
-				}
-				r := <-o.do()
-				resultsMu.Lock()
-				results = append(results, r)
-				resultsMu.Unlock()
-				if r.err != nil {
-					fmt.Printf("\n%s %v\n", red("ERROR:"), r.err)
-				} else {
-					total.Add(r.n)
-				}
-			})
-		}
+		copySubmit = append(copySubmit, func() {
+			for _, o := range ops {
+				o := o
+				wp.run(func() {
+					if ctx.Err() != nil {
+						return
+					}
+					release := srcLimit.acquire(o.srcVol)
+					defer release()
+					if ctx.Err() != nil {
+						return
+					}
+					r := <-o.do()
+					resultsMu.Lock()
+					results = append(results, r)
+					resultsMu.Unlock()
+					if r.err != nil {
+						fmt.Printf("\n%s %v\n", red("ERROR:"), r.err)
+					} else {
+						total.Add(r.n)
+					}
+				})
+			}
+		})
 	}
+	submitAll(copySubmit)
 	for _, wp := range copyPools {
 		wp.wait()
 	}
@@ -354,28 +373,32 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 	}
 
 	var verifyPools []*pool
+	var verifySubmit []func()
 	for vol, rs := range resultsByVol {
 		wp := newPool(volInfo[vol].concurrency)
 		verifyPools = append(verifyPools, wp)
-		for _, r := range rs {
-			r := r
-			wp.run(func() {
-				if ctx.Err() != nil {
-					return
-				}
-				got, err := hashFile(r.dst, verifyBars[dstDirToVol[r.dstRoot]])
-				if err != nil || got != r.srcHash {
-					fmt.Printf("\n%s %s\n", red("FAIL:"), r.dst)
-					verifyFailed.Add(1)
-					return
-				}
-				mu.Lock()
-				checksums[r.dstRoot] = append(checksums[r.dstRoot],
-					fmt.Sprintf("%s  %s", got, r.rel))
-				mu.Unlock()
-			})
-		}
+		verifySubmit = append(verifySubmit, func() {
+			for _, r := range rs {
+				r := r
+				wp.run(func() {
+					if ctx.Err() != nil {
+						return
+					}
+					got, err := hashFile(r.dst, verifyBars[dstDirToVol[r.dstRoot]])
+					if err != nil || got != r.srcHash {
+						fmt.Printf("\n%s %s\n", red("FAIL:"), r.dst)
+						verifyFailed.Add(1)
+						return
+					}
+					mu.Lock()
+					checksums[r.dstRoot] = append(checksums[r.dstRoot],
+						fmt.Sprintf("%s  %s", got, r.rel))
+					mu.Unlock()
+				})
+			}
+		})
 	}
+	submitAll(verifySubmit)
 	for _, wp := range verifyPools {
 		wp.wait()
 	}
@@ -402,12 +425,12 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 	return !hasGhosts
 }
 
-func buildSyncOps(files []fileEntry, srcDir, dstDir string, bar *barTracker) []*op {
+func buildSyncOps(files []fileEntry, srcDir, srcVol, dstDir string, bar *barTracker) []*op {
 	var ops []*op
 	for _, f := range files {
 		src := filepath.Join(srcDir, f.rel)
 		dst := filepath.Join(dstDir, f.rel)
-		ops = append(ops, &op{src: src, dst: dst, do: prepJob(src, dst, f.rel, dstDir, bar)})
+		ops = append(ops, &op{src: src, dst: dst, srcVol: srcVol, do: prepJob(src, dst, f.rel, dstDir, bar)})
 	}
 	return ops
 }
