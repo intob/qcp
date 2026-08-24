@@ -17,6 +17,7 @@ const ewmaWindow = 250 * time.Millisecond
 // all goroutines writing to that bar share it via incr().
 type barTracker struct {
 	bar     *mpb.Bar
+	total   int64
 	mu      sync.Mutex
 	pending int64
 	last    time.Time
@@ -50,6 +51,16 @@ func (t *barTracker) flush() {
 		t.pending = 0
 	}
 	t.mu.Unlock()
+}
+
+// finish flushes, then tops the bar up to its total. Byte-exact bars arrive
+// there on their own, but progress estimated from ffmpeg's reported time can
+// land short — and mpb waits forever on a bar that never fills.
+func (t *barTracker) finish() {
+	t.flush()
+	if rem := t.total - t.bar.Current(); rem > 0 {
+		t.bar.IncrBy(int(rem))
+	}
 }
 
 type progressWriter struct {
@@ -100,7 +111,7 @@ func addBarDynamic(p *mpb.Progress, name string, total int64, label func() strin
 			decor.OnComplete(decor.EwmaETA(decor.ET_STYLE_GO, 150), "✓"),
 		),
 	)
-	return &barTracker{bar: bar}
+	return &barTracker{bar: bar, total: total}
 }
 
 func addBar(p *mpb.Progress, name string, total int64) *barTracker {
@@ -121,5 +132,5 @@ func addBar(p *mpb.Progress, name string, total int64) *barTracker {
 			decor.OnComplete(decor.EwmaETA(decor.ET_STYLE_GO, 150), "✓"),
 		),
 	)
-	return &barTracker{bar: bar}
+	return &barTracker{bar: bar, total: total}
 }
