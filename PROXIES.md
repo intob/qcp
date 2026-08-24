@@ -109,9 +109,11 @@ Note that the browse tier doubles as offline-edit media if editing away from the
 drives is ever needed: the baked Rec.709 grade does not matter when the media
 gets relinked to originals for the online, and timecode matches.
 
-### Browse tier — H.264 720p 2.5 Mbps, plus stills
+### Browse tier — H.264 1080p 6 Mbps, plus stills
 
-For the index. The whole library at 720p is ~111GB. The stills are much
+For the index. The tier moved from 720p/2.5 Mbps to 1080p/6 Mbps; the numbers
+below are the original 720p measurements, and the sizing section carries the
+1080p figures. The whole library at 720p is ~111GB. The stills are much
 smaller: a poster frame is 13KB and a 100-frame sprite sheet for hover-scrubbing
 is 185KB, so **~750MB covers all 3,781 clips**.
 
@@ -231,8 +233,34 @@ Encode throughput and output size, measured:
 | **Dual output, one decode, CST on browse leg**  | 3.20× | —              |
 
 With the edit tier dropped from the default, the standing cost is the browse
-tier plus stills: **~112GB for the whole 98-hour library**, against roughly
-1.1TB had the ProRes tier been generated as originally planned.
+tier plus stills. At the original 720p/2.5 Mbps that was ~112GB for the whole
+98-hour library; at the current **1080p/6 Mbps it is up to ~257GB**, against
+roughly 1.1TB had the ProRes tier been generated as originally planned.
+
+That ceiling is pessimistic. It assumes every clip reaches 1080p, but the width
+is capped rather than targeted and the bitrate is capped at the source's own,
+so the legacy SD/HD end of the library costs a fraction of it.
+
+The pairing was measured rather than guessed. Same 4K source, 30s, each proxy
+upscaled to 1080p so they are compared as viewed:
+
+| Tier                | Size / 30s | Quality @1080p |
+| ------------------- | ---------- | -------------- |
+| 720p  @ 2.5 Mbps    |  9.1 MB    | 29.72 dB       |
+| 1080p @ 2.5 Mbps    |  9.1 MB    | **29.09 dB**   |
+| 1080p @ 5 Mbps      | 18.2 MB    | 31.72 dB       |
+| 1080p @ 6 Mbps      | 21.8 MB    | 32.46 dB       |
+
+**1080p at the old bitrate is worse than 720p at the old bitrate** — the same
+bits spread over 2.25x the pixels. A resolution bump without a bitrate bump
+would have shipped a downgrade as an improvement. Encode time moved less than
+5% across all four, because the encoder is hardware and the decode and scale
+dominate, so this is a storage decision and not a throughput one.
+
+Because nothing in the manifest described the output, a tier change used to
+leave every existing proxy reading as up to date. Each entry now records the
+tier it was built with (`browse_spec`), and a mismatch marks the clip stale, so
+changing either constant rebuilds lazily as missions are touched.
 
 Backfill is ~22 h of CPU against a **17.7 h I/O floor** (6.62TB at 104 MB/s), so
 it stays I/O-bound either way — about a day of wall clock, or a year-folder at a
@@ -509,9 +537,16 @@ plain gamma LUT with no shoulder, which is why its CV 420 figure is 0.4894 —
 `0.18 ^ (1/2.4)` — rather than the 0.4574 the shipped transform produces. Both
 are correct; they are different LUTs, and only the second bakes a tone-map.)
 
-### A known cost
+### A known cost, since fixed
 
-`scale=1280:-2` and `scale=1920:-2` are absolute, so the 657 legacy SD/HD clips
-from 2014–2018 are upscaled rather than left alone. It is wasteful but small —
-that class is 0.43TB of the 6.62TB library and encodes very fast — and it keeps
-the filter chains identical to the ones the cost table was measured with.
+The browse scale used to be an absolute `scale=1280:-2`, so the 657 legacy
+SD/HD clips from 2014–2018 were upscaled rather than left alone. That was
+written off as wasteful but small. Moving the tier to 1080p made it not small:
+at a flat 6 Mbps a 320x240 clip encoded to a proxy **7.7x larger than its own
+source**, which inverts the entire point of a proxy.
+
+The browse width is now a ceiling — `scale=w='min(1920,iw)':h=-2` — and the
+bitrate follows the frame, scaling with the output pixel count and never
+exceeding the source's own rate. Those 320x240 clips now stay 320x240 and land
+at about 0.48x their source. The edit tier's `scale=1920:-2` is still absolute
+and still upscales.

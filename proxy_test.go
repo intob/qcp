@@ -101,7 +101,7 @@ func TestProxyManifestRoundTrip(t *testing.T) {
 // ungraded original makes the image jump when proxies are toggled in Resolve.
 func TestEditTierIsNeverGraded(t *testing.T) {
 	args := strings.Join(encodeArgs("/src/923.MXF", true,
-		"/p/edit/923.mov", "/p/browse/923.mp4", "/p/luts/x.cube", false), " ")
+		"/p/edit/923.mov", "/p/browse/923.mp4", "/p/luts/x.cube", false, 6_000_000), " ")
 
 	edit, browse, ok := strings.Cut(args, "/p/edit/923.mov")
 	if !ok {
@@ -124,7 +124,7 @@ func TestEditTierIsNeverGraded(t *testing.T) {
 		t.Errorf("the browse leg uses the wrong range convention: %s", browse)
 	}
 	// Scale before the LUT — it is materially cheaper.
-	if strings.Index(browse, "scale=1280") > strings.Index(browse, "lut3d") {
+	if strings.Index(browse, "scale=w=") > strings.Index(browse, "lut3d") {
 		t.Errorf("the browse leg scales after the LUT: %s", browse)
 	}
 	// One input, so one decode feeds both renditions.
@@ -135,18 +135,18 @@ func TestEditTierIsNeverGraded(t *testing.T) {
 
 // A clip with no colour transform must not get the LUT segment at all.
 func TestPassThroughOmitsTheLUT(t *testing.T) {
-	args := strings.Join(encodeArgs("/src/GH010042.MP4", true, "", "/p/browse/GH010042.mp4", "", false), " ")
+	args := strings.Join(encodeArgs("/src/GH010042.MP4", true, "", "/p/browse/GH010042.mp4", "", false, 6_000_000), " ")
 	if strings.Contains(args, "lut3d") || strings.Contains(args, "gbrp10le") {
 		t.Errorf("pass-through clip was colour-transformed: %s", args)
 	}
-	if !strings.Contains(args, "scale=1280:-2") {
+	if !strings.Contains(args, "scale=w='min(1920,iw)':h=-2") {
 		t.Errorf("browse scale missing: %s", args)
 	}
 }
 
 // A silent clip still has to encode.
 func TestSilentClipDropsTheAudioMap(t *testing.T) {
-	args := strings.Join(encodeArgs("/src/x.mp4", false, "", "/p/browse/x.mp4", "", false), " ")
+	args := strings.Join(encodeArgs("/src/x.mp4", false, "", "/p/browse/x.mp4", "", false, 6_000_000), " ")
 	if strings.Contains(args, "0:a") {
 		t.Errorf("audio was mapped for a clip with no audio stream: %s", args)
 	}
@@ -327,16 +327,105 @@ func TestHardwareDecodeIsGatedOnCodecAndChroma(t *testing.T) {
 // The flag has to reach ffmpeg ahead of the input it applies to, and must not
 // appear at all when the gate is closed.
 func TestHardwareDecodeFlagPlacement(t *testing.T) {
-	on := strings.Join(encodeArgs("/src/dji.MP4", true, "", "/p/browse/dji.mp4", "", true), " ")
+	on := strings.Join(encodeArgs("/src/dji.MP4", true, "", "/p/browse/dji.mp4", "", true, 6_000_000), " ")
 	if !strings.Contains(on, "-hwaccel videotoolbox -i /src/dji.MP4") {
 		t.Errorf("hwaccel is not applied to the input: %s", on)
 	}
-	off := strings.Join(encodeArgs("/src/923.MXF", true, "", "/p/browse/923.mp4", "", false), " ")
+	off := strings.Join(encodeArgs("/src/923.MXF", true, "", "/p/browse/923.mp4", "", false, 6_000_000), " ")
 	if strings.Contains(off, "hwaccel") {
 		t.Errorf("hwaccel leaked into an ungated encode: %s", off)
 	}
 	// Still one decode feeding every rendition.
 	if n := strings.Count(on, " -i "); n != 1 {
 		t.Errorf("expected a single decode, got %d inputs", n)
+	}
+}
+
+// The browse width is a ceiling, not a target. Upscaling a 432x240 clip from
+// 2014 to 1920 spends bitrate manufacturing detail that is not in the source
+// and makes the proxy larger than the footage it stands in for.
+func TestBrowseNeverUpscales(t *testing.T) {
+	for _, lut := range []string{"", "/p/luts/x.cube"} {
+		f := browseFilter(lut)
+		if !strings.Contains(f, "min(1920,iw)") {
+			t.Errorf("browse filter can upscale (lut=%q): %s", lut, f)
+		}
+		if strings.Contains(f, "scale=1920:") || strings.Contains(f, "scale=1280:") {
+			t.Errorf("browse filter uses an absolute width (lut=%q): %s", lut, f)
+		}
+	}
+}
+
+// Resolution and bitrate have to move together: 1080p at the old 2.5 Mbps
+// measured worse than 720p at 2.5 Mbps, so a bump to 1080p that kept the old
+// bitrate would be a downgrade shipped as an improvement.
+func TestBrowseBitrateMatchesTheResolution(t *testing.T) {
+	if browseWidth >= 1920 && browseBitrate <= 2_500_000 {
+		t.Error("1080p at 2.5 Mbps is worse than 720p at 2.5 Mbps — raise the bitrate")
+	}
+	args := strings.Join(encodeArgs("/src/x.mp4", false, "", "/p/browse/x.mp4", "", false, 6_000_000), " ")
+	if !strings.Contains(args, "-b:v 6000000") {
+		t.Errorf("browse leg does not carry the given bitrate: %s", args)
+	}
+}
+
+// A rendition built with different settings must not read as up to date, or
+// changing the tier would silently leave the archive holding a mix of two.
+func TestTierChangeInvalidatesACachedEntry(t *testing.T) {
+	if (clipMeta{BrowseSpec: browseSpec()}).BrowseSpec != browseSpec() {
+		t.Fatal("spec did not round-trip")
+	}
+	old := clipMeta{BrowseSpec: "1280w/2500k"}
+	if old.BrowseSpec == browseSpec() {
+		t.Error("an entry from the previous tier compares equal to the current one")
+	}
+	// Entries written before the tier was recorded have no spec at all.
+	if (clipMeta{}).BrowseSpec == browseSpec() {
+		t.Error("an entry with no recorded tier compares equal to the current one")
+	}
+}
+
+// A proxy must never be bigger than the footage it stands in for. A flat tier
+// bitrate applied to a 320x240 clip produced a proxy 7.7x the size of its
+// source, so the rate scales with the output frame and is capped at the
+// source's own rate.
+func TestBrowseRateFollowsTheFrame(t *testing.T) {
+	full := browseRate(1920, 1080, 0)
+	if full != browseBitrate {
+		t.Errorf("a 1080p frame should get the full tier rate, got %d", full)
+	}
+	small := browseRate(320, 240, 0)
+	if small >= full {
+		t.Errorf("a 320x240 frame got %d, not below the 1080p rate %d", small, full)
+	}
+	if small < browseFloor {
+		t.Errorf("rate %d fell below the floor", small)
+	}
+	// Never spend more than the source does — there is no detail up there.
+	if got := browseRate(1920, 1080, 1_200_000); got != 1_200_000 {
+		t.Errorf("rate %d exceeded a 1.2 Mbps source", got)
+	}
+	// ...but the floor still applies to a pathologically low source.
+	if got := browseRate(320, 240, 1000); got != browseFloor {
+		t.Errorf("rate %d ignored the floor", got)
+	}
+}
+
+// The width is a ceiling and the height follows the source aspect, rounded even.
+func TestBrowseSizeCapsWidthAndKeepsAspect(t *testing.T) {
+	for _, tc := range []struct{ w, h, wantW, wantH int }{
+		{3840, 2160, 1920, 1080}, // 4K 16:9
+		{5312, 4648, 1920, 1680}, // GoPro 8:7
+		{1280, 720, 1280, 720},   // already below the cap: untouched
+		{320, 240, 320, 240},     // legacy SD: untouched
+		{0, 0, 0, 0},             // unprobed
+	} {
+		gw, gh := browseSize(tc.w, tc.h)
+		if gw != tc.wantW || gh != tc.wantH {
+			t.Errorf("browseSize(%d,%d) = %d,%d want %d,%d", tc.w, tc.h, gw, gh, tc.wantW, tc.wantH)
+		}
+		if gh%2 != 0 {
+			t.Errorf("browseSize(%d,%d) height %d is odd", tc.w, tc.h, gh)
+		}
 	}
 }

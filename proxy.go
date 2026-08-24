@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -98,6 +99,11 @@ type clipMeta struct {
 	Sidecar   bool   `json:"sidecar"`   // false = inherited from the rest of the mission
 	Transform string `json:"transform"` // transform ID actually applied
 
+	// BrowseSpec is the tier the browse rendition was built with, so a change
+	// to the tier invalidates it. Empty on entries written before the tier was
+	// recorded, which correctly reads as "not the current tier".
+	BrowseSpec string `json:"browse_spec,omitempty"`
+
 	Browse string `json:"browse,omitempty"` // paths relative to the mission proxy directory
 	Edit   string `json:"edit,omitempty"`
 	Poster string `json:"poster,omitempty"`
@@ -176,6 +182,7 @@ type probeResult struct {
 	FPS      float64
 	Codec    string
 	PixFmt   string
+	BitRate  int64
 	HasAudio bool
 }
 
@@ -192,12 +199,13 @@ type ffprobeStreams struct {
 	} `json:"streams"`
 	Format struct {
 		Duration string `json:"duration"`
+		BitRate  string `json:"bit_rate"`
 	} `json:"format"`
 }
 
 func probeClip(path string) (probeResult, error) {
 	out, err := exec.Command("ffprobe", "-v", "quiet", "-print_format", "json",
-		"-show_entries", "stream=codec_type,codec_name,pix_fmt,width,height,r_frame_rate,avg_frame_rate,duration:format=duration",
+		"-show_entries", "stream=codec_type,codec_name,pix_fmt,width,height,r_frame_rate,avg_frame_rate,duration:format=duration,bit_rate",
 		path).Output()
 	if err != nil {
 		return probeResult{}, err
@@ -208,6 +216,7 @@ func probeClip(path string) (probeResult, error) {
 	}
 	var r probeResult
 	r.Duration, _ = strconv.ParseFloat(raw.Format.Duration, 64)
+	r.BitRate, _ = strconv.ParseInt(raw.Format.BitRate, 10, 64)
 	for _, s := range raw.Streams {
 		switch s.CodecType {
 		case "video":
@@ -254,11 +263,75 @@ func parseRational(s string) float64 {
 // LUT because scaling first is materially cheaper, and in_range=full is not
 // optional: the generated cubes are computed against raw code values, so
 // in_range=limited is off by up to 14/255 — see the range trap in PROXIES.md.
-func browseFilter(lut string) string {
-	if lut == "" {
-		return "scale=1280:-2"
+// The browse tier is 1080p at 6 Mbps. Resolution and bitrate move together:
+// 1080p at the old 2.5 Mbps measured *worse* than 720p at the same rate — more
+// pixels over the same bits — so a resolution bump alone is a downgrade.
+// Measured against a lanczos reference, both viewed at 1080p: 720p/2.5 Mbps
+// 29.72 dB, 1080p/2.5 Mbps 29.09 dB, 1080p/6 Mbps 32.46 dB. Encode time is
+// within 5% of the old tier because the encoder is hardware and the decode and
+// scale dominate, so this costs storage and nothing else.
+const (
+	browseWidth   = 1920
+	browseBitrate = 6_000_000 // at 1920x1080; scaled down for smaller frames
+	browseFloor   = 250_000   // below this even a small frame falls apart
+)
+
+// browseRate picks the bitrate for one clip. The tier is "1080p at 6 Mbps", and
+// the rate has to follow the frame down: the 320x240 clips in 2014 encoded at a
+// flat 6 Mbps came out 7.7x *larger* than the footage they stand in for, which
+// is the opposite of what a proxy is. Bits scale with the output pixel count,
+// and never exceed the source's own rate — there is no detail up there to keep.
+func browseRate(outW, outH int, srcBitRate int64) int64 {
+	if outW <= 0 || outH <= 0 {
+		return browseBitrate
 	}
-	return "scale=1280:-2:in_range=full:out_range=full,format=gbrp10le," +
+	rate := int64(browseBitrate) * int64(outW) * int64(outH) / (1920 * 1080)
+	if srcBitRate > 0 && srcBitRate < rate {
+		rate = srcBitRate
+	}
+	if rate < browseFloor {
+		rate = browseFloor
+	}
+	return rate
+}
+
+// browseSize is the rendition's output size: the width capped at browseWidth,
+// never above the source, with the height carried at the source aspect and
+// rounded to even as the scaler's -2 does.
+func browseSize(w, h int) (int, int) {
+	if w <= 0 || h <= 0 {
+		return 0, 0
+	}
+	outW := w
+	if outW > browseWidth {
+		outW = browseWidth
+	}
+	outH := int(math.Round(float64(h) * float64(outW) / float64(w)))
+	return outW, outH &^ 1
+}
+
+// browseSpec identifies the tier a rendition on disk was built with. It is
+// recorded per clip so that changing either constant above makes what is on
+// disk read as stale — nothing else in the manifest describes the output, so
+// without it a settings change would leave every old proxy marked up to date
+// and the archive would silently hold a mix of two tiers with no way to tell
+// them apart short of probing every file.
+func browseSpec() string {
+	return fmt.Sprintf("%dw/%dk", browseWidth, browseBitrate/1000)
+}
+
+// browseFilter builds the browse-tier filter chain.
+//
+// The width is a ceiling, never a target: min(1920,iw) leaves anything smaller
+// alone. The legacy end of the library is full of 432x240 and SD clips, and
+// blowing those up to 1920 would spend bitrate manufacturing pixels that carry
+// no detail, to make a browse proxy larger than the footage it stands in for.
+func browseFilter(lut string) string {
+	scale := fmt.Sprintf("scale=w='min(%d,iw)':h=-2", browseWidth)
+	if lut == "" {
+		return scale
+	}
+	return scale + ":in_range=full:out_range=full,format=gbrp10le," +
 		"lut3d=" + escapeFilterArg(lut) + ":interp=tetrahedral,format=yuv420p"
 }
 
@@ -302,7 +375,7 @@ func hwDecodes(codec, pixFmt string) bool {
 // decode, where hwDecodes allows it, applies to that one decode and so to both.
 //
 // The audio map is optional (0:a:0?) so a silent clip still encodes.
-func encodeArgs(src string, hasAudio bool, edit, browse, lut string, hwDecode bool) []string {
+func encodeArgs(src string, hasAudio bool, edit, browse, lut string, hwDecode bool, browseRateBps int64) []string {
 	args := []string{
 		"-nostdin", "-y", "-hide_banner", "-loglevel", "error",
 		"-progress", "pipe:1", "-nostats",
@@ -333,7 +406,7 @@ func encodeArgs(src string, hasAudio bool, edit, browse, lut string, hwDecode bo
 		args = append(args, amap...)
 		args = append(args,
 			"-vf", browseFilter(lut),
-			"-c:v", "h264_videotoolbox", "-b:v", "2500k")
+			"-c:v", "h264_videotoolbox", "-b:v", strconv.FormatInt(browseRateBps, 10))
 		if hasAudio {
 			args = append(args, "-c:a", "aac", "-b:a", "96k")
 		}
@@ -634,6 +707,12 @@ func planMission(src proxySource, outDir string, tiers proxyTiers) missionPlan {
 		if tiers.browse && cached[i] && jobs[i].meta.Transform != transforms[i].ID {
 			jobs[i].needBrow, jobs[i].needStil = true, true
 		}
+		// Likewise a cached entry built at a different resolution or bitrate:
+		// the source has not changed, but what is on disk is no longer what the
+		// browse tier means. Stills come off the browse proxy, so they follow.
+		if tiers.browse && cached[i] && jobs[i].meta.BrowseSpec != browseSpec() {
+			jobs[i].needBrow, jobs[i].needStil = true, true
+		}
 		if jobs[i].work() {
 			p.todo++
 			p.todoSize += jobs[i].size
@@ -717,6 +796,10 @@ func generateClip(j *clipJob, outDir, lutDir string, tiers proxyTiers, onProgres
 		// No probe means no pixel format, so no hardware decode — the CPU path
 		// is the one that is always correct.
 		hwDecode := haveProbe && hwDecodes(probe.Codec, probe.PixFmt)
+		// The rate follows the frame: a clip smaller than the tier keeps its
+		// own size and gets a bitrate to match, never more than its source.
+		outW, outH := browseSize(meta.Width, meta.Height)
+		rate := browseRate(outW, outH, probe.BitRate)
 		err := encodeOutputs(outs, func(tmps []string) []string {
 			edit, browse := "", ""
 			if editIdx >= 0 {
@@ -725,7 +808,7 @@ func generateClip(j *clipJob, outDir, lutDir string, tiers proxyTiers, onProgres
 			if browseIdx >= 0 {
 				browse = tmps[browseIdx]
 			}
-			return encodeArgs(j.src, hasAudio, edit, browse, lut, hwDecode)
+			return encodeArgs(j.src, hasAudio, edit, browse, lut, hwDecode, rate)
 		}, meta.Duration, onProgress)
 		if err != nil {
 			return meta, nil, err
@@ -735,6 +818,7 @@ func generateClip(j *clipJob, outDir, lutDir string, tiers proxyTiers, onProgres
 		}
 		if j.needBrow {
 			written = append(written, browseRel)
+			meta.BrowseSpec = browseSpec()
 		}
 	}
 	if j.needEdit || fileExists(filepath.Join(outDir, editRel)) {
