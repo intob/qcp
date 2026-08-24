@@ -955,6 +955,20 @@ func runProxy(cfg Config, missions []int, year int, all bool, tiers proxyTiers, 
 	if err != nil {
 		exit(1, "err resolving proxy destination: %v", err)
 	}
+	// Held for the whole run, so a second qcp cannot plan against a manifest
+	// this one has not written yet and then overwrite it with a partial view.
+	unlock, err := lockProxyTree(proxyRoot(dst.basePath()))
+	if err != nil {
+		exit(1, "%v", err)
+	}
+	defer unlock()
+	// Safe only under the lock: anything left is from a run killed outright,
+	// since encodeOutputs removes its own temporaries when it fails.
+	if orphans := sweepPartFiles(proxyRoot(dst.basePath())); len(orphans) > 0 {
+		fmt.Printf("\n  %s cleared %d unfinished file(s) from an interrupted run\n",
+			dim("·"), len(orphans))
+	}
+
 	yearRoot := filepath.Join(proxyRoot(dst.basePath()), yearStr)
 
 	if all {
@@ -1210,6 +1224,16 @@ func runIngestProxies(cfg Config, year int, slug string) {
 		fmt.Printf("\n  %s  %s\n", yellow("⚠"), dim("no proxy destination: "+err.Error()))
 		return
 	}
+	// Ingest generates proxies too, so it contends for the same tree. Here a
+	// busy tree is a warning rather than a failure: the footage is already
+	// copied and verified, and proxies can be generated later.
+	unlock, err := lockProxyTree(proxyRoot(dst.basePath()))
+	if err != nil {
+		fmt.Printf("\n  %s  %s\n", yellow("⚠"), dim(err.Error()+" — skipping proxies"))
+		return
+	}
+	defer unlock()
+
 	yearStr := strconv.Itoa(year)
 	src, err := proxySourceForSlug(cfg, yearStr, slug)
 	if err != nil {

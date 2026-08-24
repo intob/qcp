@@ -497,7 +497,23 @@ applied. A re-run skips any clip whose recorded source hash still matches, and
 reuses the cached sidecar reading rather than re-parsing every XML.
 
 Renditions are written through a `.qcp-part` temporary and renamed on success,
-so an interrupted run never leaves a truncated file that looks finished.
+so an interrupted run never leaves a truncated file that looks finished. That
+covers a failed encode, which cleans up after itself, but not a process killed
+outright — so a run sweeps any `.qcp-part` left in the tree before starting.
+Doing that is only safe while holding the tree lock, or it would delete a live
+run's work in progress.
+
+**One run per proxy tree.** `-proxy` takes an exclusive lock on the drive's
+proxy root and a second run is turned away rather than queued. Two concurrent
+runs over one mission do not merely duplicate work, they corrupt each other's
+bookkeeping: `proxies.json` is written once at the end of a run, assembled from
+that run's own view of what it generated and what it judged cached, so the
+second run plans against a manifest the first has not written yet and whichever
+finishes last overwrites with a partial picture. Clips that were built then read
+as missing and get built again. The loser has nothing useful to contribute and
+should come back when the winner has finished and plan against the truth. During
+`-ingest` a busy tree is a warning rather than a failure — the footage is
+already copied and verified, and proxies can be generated later.
 
 Concurrency is `min(source drive read limit, NumCPU/4)` ffmpeg processes — one
 at a time off the archive HDD, three on the M2 Pro against a hot SSD.
