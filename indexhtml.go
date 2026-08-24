@@ -350,9 +350,15 @@ function render() {
   } else {
     const d = document.createElement("div");
     d.className = "empty";
-    d.textContent = state.mission && !state.mission.clips.length
-      ? "No proxies for this mission yet — run  qcp -proxy " + state.mission.num + " -year " + state.mission.year
-      : filtering() ? "Nothing matches those filters." : "Pick a mission, or start typing to search.";
+    if (state.mission && !state.mission.clips.length) {
+      const cmd = "qcp -proxy " + state.mission.num + " -year " + state.mission.year;
+      d.append("No proxies for this mission yet — run ");
+      const c = document.createElement("code");
+      c.textContent = cmd;
+      d.append(c, copyBtn(cmd));
+    } else {
+      d.textContent = filtering() ? "Nothing matches those filters." : "Pick a mission, or start typing to search.";
+    }
     frag.append(d);
   }
   main.replaceChildren(frag);
