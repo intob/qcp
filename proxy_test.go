@@ -101,7 +101,7 @@ func TestProxyManifestRoundTrip(t *testing.T) {
 // ungraded original makes the image jump when proxies are toggled in Resolve.
 func TestEditTierIsNeverGraded(t *testing.T) {
 	args := strings.Join(encodeArgs("/src/923.MXF", true,
-		"/p/edit/923.mov", "/p/browse/923.mp4", "/p/luts/x.cube"), " ")
+		"/p/edit/923.mov", "/p/browse/923.mp4", "/p/luts/x.cube", false), " ")
 
 	edit, browse, ok := strings.Cut(args, "/p/edit/923.mov")
 	if !ok {
@@ -135,7 +135,7 @@ func TestEditTierIsNeverGraded(t *testing.T) {
 
 // A clip with no colour transform must not get the LUT segment at all.
 func TestPassThroughOmitsTheLUT(t *testing.T) {
-	args := strings.Join(encodeArgs("/src/GH010042.MP4", true, "", "/p/browse/GH010042.mp4", ""), " ")
+	args := strings.Join(encodeArgs("/src/GH010042.MP4", true, "", "/p/browse/GH010042.mp4", "", false), " ")
 	if strings.Contains(args, "lut3d") || strings.Contains(args, "gbrp10le") {
 		t.Errorf("pass-through clip was colour-transformed: %s", args)
 	}
@@ -146,7 +146,7 @@ func TestPassThroughOmitsTheLUT(t *testing.T) {
 
 // A silent clip still has to encode.
 func TestSilentClipDropsTheAudioMap(t *testing.T) {
-	args := strings.Join(encodeArgs("/src/x.mp4", false, "", "/p/browse/x.mp4", ""), " ")
+	args := strings.Join(encodeArgs("/src/x.mp4", false, "", "/p/browse/x.mp4", "", false), " ")
 	if strings.Contains(args, "0:a") {
 		t.Errorf("audio was mapped for a clip with no audio stream: %s", args)
 	}
@@ -296,5 +296,47 @@ func TestClipMetaStaleness(t *testing.T) {
 	}
 	if !noHash.stale(100, 8, "") {
 		t.Error("a changed mtime was not detected")
+	}
+}
+
+// Hardware decode is worth it for HEVC and a net loss for H.264: Apple silicon
+// decodes H.264 in software about as fast as the media engine returns frames,
+// so the round-trip is pure overhead. Measured 1.6x SLOWER on GoPro 1080p.
+func TestHardwareDecodeIsGatedOnCodecAndChroma(t *testing.T) {
+	for _, tc := range []struct {
+		codec, pixFmt string
+		want          bool
+	}{
+		{"hevc", "yuv420p10le", true}, // DJI 4K/8K — the case worth having
+		{"hevc", "yuv420p", true},
+		{"hevc", "p010le", true},
+		{"hevc", "nv12", true},
+		{"hevc", "yuv422p10le", false}, // 4:2:2 is slower on the GPU whatever the codec
+		{"h264", "yuvj420p", false},    // GoPro 1080p — 1.6x slower with hwaccel
+		{"h264", "yuv420p", false},
+		{"h264", "yuv422p10le", false}, // Sony XAVC-I Intra
+		{"prores", "yuv422p10le", false},
+		{"", "", false}, // unprobed: the CPU path is the one always correct
+	} {
+		if got := hwDecodes(tc.codec, tc.pixFmt); got != tc.want {
+			t.Errorf("hwDecodes(%q, %q) = %v, want %v", tc.codec, tc.pixFmt, got, tc.want)
+		}
+	}
+}
+
+// The flag has to reach ffmpeg ahead of the input it applies to, and must not
+// appear at all when the gate is closed.
+func TestHardwareDecodeFlagPlacement(t *testing.T) {
+	on := strings.Join(encodeArgs("/src/dji.MP4", true, "", "/p/browse/dji.mp4", "", true), " ")
+	if !strings.Contains(on, "-hwaccel videotoolbox -i /src/dji.MP4") {
+		t.Errorf("hwaccel is not applied to the input: %s", on)
+	}
+	off := strings.Join(encodeArgs("/src/923.MXF", true, "", "/p/browse/923.mp4", "", false), " ")
+	if strings.Contains(off, "hwaccel") {
+		t.Errorf("hwaccel leaked into an ungated encode: %s", off)
+	}
+	// Still one decode feeding every rendition.
+	if n := strings.Count(on, " -i "); n != 1 {
+		t.Errorf("expected a single decode, got %d inputs", n)
 	}
 }

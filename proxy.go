@@ -175,6 +175,7 @@ type probeResult struct {
 	Height   int
 	FPS      float64
 	Codec    string
+	PixFmt   string
 	HasAudio bool
 }
 
@@ -182,6 +183,7 @@ type ffprobeStreams struct {
 	Streams []struct {
 		CodecType    string `json:"codec_type"`
 		CodecName    string `json:"codec_name"`
+		PixFmt       string `json:"pix_fmt"`
 		Width        int    `json:"width"`
 		Height       int    `json:"height"`
 		RFrameRate   string `json:"r_frame_rate"`
@@ -195,7 +197,7 @@ type ffprobeStreams struct {
 
 func probeClip(path string) (probeResult, error) {
 	out, err := exec.Command("ffprobe", "-v", "quiet", "-print_format", "json",
-		"-show_entries", "stream=codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate,duration:format=duration",
+		"-show_entries", "stream=codec_type,codec_name,pix_fmt,width,height,r_frame_rate,avg_frame_rate,duration:format=duration",
 		path).Output()
 	if err != nil {
 		return probeResult{}, err
@@ -212,7 +214,7 @@ func probeClip(path string) (probeResult, error) {
 			if r.Codec != "" {
 				continue // first video stream only; some cameras attach a thumbnail
 			}
-			r.Codec, r.Width, r.Height = s.CodecName, s.Width, s.Height
+			r.Codec, r.PixFmt, r.Width, r.Height = s.CodecName, s.PixFmt, s.Width, s.Height
 			r.FPS = parseRational(s.AvgFrameRate)
 			if r.FPS == 0 {
 				r.FPS = parseRational(s.RFrameRate)
@@ -260,18 +262,55 @@ func browseFilter(lut string) string {
 		"lut3d=" + escapeFilterArg(lut) + ":interp=tetrahedral,format=yuv420p"
 }
 
+// hwDecodes reports whether asking VideoToolbox to decode this source is worth
+// it. Both encoders are already hardware, so on a heavy source the CPU-side
+// decode is the whole bottleneck — a 4K HEVC clip pins ffmpeg at 259% CPU and
+// crawls at 1× realtime, which is where the browse tier loses its 4.19×.
+//
+// The win is specific to HEVC. Apple silicon decodes H.264 in software about as
+// fast as the media engine can hand frames back, so for H.264 the GPU
+// round-trip is pure overhead and costs more than it saves. Measured on an M2
+// Pro, decode plus scale plus browse encode:
+//
+//	HEVC  4:2:0 10-bit 4K     28.17s →  5.34s   5.3× faster
+//	HEVC  4:2:0 10-bit 8K     33.63s →  5.30s   6.3× faster
+//	H.264 4:2:0  8-bit 1080p  23.43s → 37.23s   1.6× SLOWER
+//	H.264 4:2:2 10-bit 4K      2.72s →  4.51s   1.7× SLOWER
+//	H.264 4:2:0  8-bit 720p     2.00s →  2.10s   a wash
+//
+// 4:2:2 is excluded on top of that: VideoToolbox takes the Sony XAVC-I Intra
+// and hands back p210le, but it is the same wall the concurrent-decode table in
+// PROXIES.md hit, and it is slower than the CPU either way.
+//
+// Decoded frames are bit-identical with and without it, including through the
+// LUT chain, so this is only ever a throughput decision.
+func hwDecodes(codec, pixFmt string) bool {
+	if codec != "hevc" {
+		return false
+	}
+	switch pixFmt {
+	case "nv12", "p010le", "p016le": // semi-planar 4:2:0
+		return true
+	}
+	return strings.Contains(pixFmt, "420")
+}
+
 // encodeArgs builds one ffmpeg invocation covering every rendition a clip still
 // needs. Both tiers come off a single decode: that costs 3.20× realtime against
 // 4.19× for the browse leg alone, so the second rendition is nearly free — the
-// same instinct as reading a source once and fanning out to N writers.
+// same instinct as reading a source once and fanning out to N writers. Hardware
+// decode, where hwDecodes allows it, applies to that one decode and so to both.
 //
 // The audio map is optional (0:a:0?) so a silent clip still encodes.
-func encodeArgs(src string, hasAudio bool, edit, browse, lut string) []string {
+func encodeArgs(src string, hasAudio bool, edit, browse, lut string, hwDecode bool) []string {
 	args := []string{
 		"-nostdin", "-y", "-hide_banner", "-loglevel", "error",
 		"-progress", "pipe:1", "-nostats",
-		"-i", src,
 	}
+	if hwDecode {
+		args = append(args, "-hwaccel", "videotoolbox")
+	}
+	args = append(args, "-i", src)
 	amap := []string{"-map", "0:a:0?"}
 	if !hasAudio {
 		amap = nil
@@ -638,7 +677,7 @@ func generateClip(j *clipJob, outDir, lutDir string, tiers proxyTiers, onProgres
 
 	var probe probeResult
 	haveProbe := false
-	if !j.cached || meta.Duration == 0 || meta.Codec == "" {
+	if !j.cached || meta.Duration == 0 || meta.Codec == "" || j.needEdit || j.needBrow {
 		p, err := probeClip(j.src)
 		if err != nil {
 			return meta, nil, fmt.Errorf("ffprobe: %w", err)
@@ -675,6 +714,9 @@ func generateClip(j *clipJob, outDir, lutDir string, tiers proxyTiers, onProgres
 			lut = p
 		}
 		hasAudio := !haveProbe || probe.HasAudio
+		// No probe means no pixel format, so no hardware decode — the CPU path
+		// is the one that is always correct.
+		hwDecode := haveProbe && hwDecodes(probe.Codec, probe.PixFmt)
 		err := encodeOutputs(outs, func(tmps []string) []string {
 			edit, browse := "", ""
 			if editIdx >= 0 {
@@ -683,7 +725,7 @@ func generateClip(j *clipJob, outDir, lutDir string, tiers proxyTiers, onProgres
 			if browseIdx >= 0 {
 				browse = tmps[browseIdx]
 			}
-			return encodeArgs(j.src, hasAudio, edit, browse, lut)
+			return encodeArgs(j.src, hasAudio, edit, browse, lut, hwDecode)
 		}, meta.Duration, onProgress)
 		if err != nil {
 			return meta, nil, err

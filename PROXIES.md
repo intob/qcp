@@ -244,6 +244,46 @@ The dual-output figure is retained because it still applies when the edit tier
 the browse leg alone, so the second rendition is close to free — same instinct
 as reading the source once and fanning out to N writers.
 
+### Hardware decode, gated on chroma subsampling
+
+Every figure above was measured on Sony XAVC-I, and the pipeline encoded with
+`h264_videotoolbox` while decoding on the CPU. That is the right split for
+XAVC-I and the wrong one for DJI: a 4K HEVC clip pins ffmpeg at 259% CPU and
+generates at 1× realtime, nowhere near the 4.19× above. The 8K clips are worse
+still, at 0.3×.
+
+Asking VideoToolbox to decode as well as encode fixes that, but only for 4:2:0.
+30s of each, decode plus scale plus browse encode:
+
+| Source                    | CPU decode | VideoToolbox decode |
+| ------------------------- | ---------- | ------------------- |
+| HEVC 4:2:0 10-bit 4K      | 28.17s     | **5.34s** (5.3×)    |
+| HEVC 4:2:0 10-bit 8K      | 33.63s     | **5.30s** (6.3×)    |
+| H.264 4:2:0 8-bit 1080p   | **23.43s** | 37.23s (1.6× slower)|
+| H.264 4:2:2 10-bit 4K     |  **2.72s** | 4.51s (1.7× slower) |
+| H.264 4:2:0 8-bit 720p    |  2.00s     | 2.10s (a wash)      |
+
+**The win is HEVC-specific.** Apple silicon decodes H.264 in software about as
+fast as the media engine can hand frames back, so for H.264 the GPU round-trip
+is pure overhead — the GoPro 1080p row is a 1.6× *loss*, and it is the shape of
+most of the legacy library. An earlier draft of this gate keyed on chroma
+subsampling alone and made every GoPro clip slower; the 720p row is why it
+survived review, being far too short to show the cost.
+
+The 4:2:2 rows are the same wall the concurrent-decode table hit: Apple's
+decoder does not do H.264 High 4:2:2 Intra well. VideoToolbox accepts it and
+returns `p210le`, but is slower than software either way. So the gate is HEVC
+4:2:0 only; everything else stays on the CPU.
+
+This is a throughput change and must not be a picture change, which was
+verified rather than assumed: decoded frames are bit-identical either way
+across all 720 frames of a 30s segment, **including through the full
+`scale → gbrp10le → lut3d → yuv420p` chain**, so the colour path does not move.
+The encoded files are not byte-identical — `h264_videotoolbox` makes different
+rate-control choices when fed GPU-backed buffers — but against a lossless
+reference the two score 22.9411 dB and 22.9410 dB, with output sizes within
+0.01%. Neither is better; they are the same picture.
+
 ---
 
 ## Design rules
