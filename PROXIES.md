@@ -599,8 +599,15 @@ written off as wasteful but small. Moving the tier to 1080p made it not small:
 at a flat 6 Mbps a 320x240 clip encoded to a proxy **7.7x larger than its own
 source**, which inverts the entire point of a proxy.
 
-The browse width is now a ceiling — `scale=w='min(1920,iw)':h=-2` — and the
+Both widths are now ceilings — `scale=w='min(1920,iw)':h=-2` — and the browse
 bitrate follows the frame, scaling with the output pixel count and never
 exceeding the source's own rate. Those 320x240 clips now stay 320x240 and land
-at about 0.48x their source. The edit tier's `scale=1920:-2` is still absolute
-and still upscales.
+at about 0.48x their source.
+
+Capping the edit tier surfaced an older bug behind the upscale.
+`prores_videotoolbox` refuses 4:2:0 input outright — it fails to open the
+encoder rather than converting — so **the edit tier had never worked on the
+GoPro, DJI or legacy sources at all**, at any resolution. Every figure in the
+cost table was measured on XAVC-I, which is already 4:2:2, which is why it went
+unnoticed for so long. The chain now carries `format=yuv422p10le` after the
+scale, and all three source classes encode.

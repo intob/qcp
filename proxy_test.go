@@ -110,6 +110,9 @@ func TestEditTierIsNeverGraded(t *testing.T) {
 	if strings.Contains(edit, "lut3d") {
 		t.Errorf("the edit leg is colour-transformed: %s", edit)
 	}
+	if !strings.Contains(edit, "scale=w='min(1920,iw)':h=-2") {
+		t.Errorf("the edit leg can upscale: %s", edit)
+	}
 	if strings.Contains(edit, "prores_videotoolbox") == false {
 		t.Errorf("the edit leg is not ProRes: %s", edit)
 	}
@@ -427,5 +430,50 @@ func TestBrowseSizeCapsWidthAndKeepsAspect(t *testing.T) {
 		if gh%2 != 0 {
 			t.Errorf("browseSize(%d,%d) height %d is odd", tc.w, tc.h, gh)
 		}
+	}
+}
+
+// Both tiers cap rather than target. The edit tier used an absolute width long
+// after the browse tier stopped, which quietly upscaled every SD clip into
+// ProRes.
+func TestNeitherTierUpscales(t *testing.T) {
+	for name, f := range map[string]string{"browse": browseFilter(""), "edit": editFilter()} {
+		if !strings.Contains(f, "min(1920,iw)") {
+			t.Errorf("%s tier can upscale: %s", name, f)
+		}
+		if strings.Contains(f, "scale=1920:") {
+			t.Errorf("%s tier uses an absolute width: %s", name, f)
+		}
+	}
+}
+
+// Both tiers record what they were built with, or a settings change leaves the
+// archive holding a silent mix with no way to tell the two apart.
+func TestBothTiersRecordTheirSpec(t *testing.T) {
+	if editSpec() == "" || browseSpec() == "" {
+		t.Fatal("a tier spec is empty")
+	}
+	if editSpec() == browseSpec() {
+		t.Error("the two tiers share a spec, so one cannot invalidate without the other")
+	}
+	// An entry from before the specs existed must not compare equal to either.
+	var old clipMeta
+	if old.EditSpec == editSpec() || old.BrowseSpec == browseSpec() {
+		t.Error("an unrecorded entry reads as current")
+	}
+}
+
+// prores_videotoolbox refuses 4:2:0 input outright rather than converting, so
+// the edit tier has to carry the conversion itself or it only ever works on
+// footage that happens to be 4:2:2 already.
+func TestEditTierConvertsToFourTwoTwo(t *testing.T) {
+	f := editFilter()
+	if !strings.Contains(f, "format=yuv422p10le") {
+		t.Errorf("edit tier does not convert to 4:2:2, so 4:2:0 sources will fail: %s", f)
+	}
+	// The scale has to come first: converting before downscaling would do the
+	// chroma interpolation at full resolution for nothing.
+	if strings.Index(f, "scale=") > strings.Index(f, "format=") {
+		t.Errorf("edit tier converts before scaling: %s", f)
 	}
 }

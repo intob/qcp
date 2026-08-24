@@ -101,8 +101,10 @@ type clipMeta struct {
 
 	// BrowseSpec is the tier the browse rendition was built with, so a change
 	// to the tier invalidates it. Empty on entries written before the tier was
-	// recorded, which correctly reads as "not the current tier".
+	// recorded, which correctly reads as "not the current tier". EditSpec is
+	// the same for the edit tier.
 	BrowseSpec string `json:"browse_spec,omitempty"`
+	EditSpec   string `json:"edit_spec,omitempty"`
 
 	Browse string `json:"browse,omitempty"` // paths relative to the mission proxy directory
 	Edit   string `json:"edit,omitempty"`
@@ -270,6 +272,23 @@ func parseRational(s string) float64 {
 // 29.72 dB, 1080p/2.5 Mbps 29.09 dB, 1080p/6 Mbps 32.46 dB. Encode time is
 // within 5% of the old tier because the encoder is hardware and the decode and
 // scale dominate, so this costs storage and nothing else.
+// editWidth is a ceiling too, for the same reason the browse one is: nothing
+// is gained by blowing an SD clip up to 1920 before handing it to ProRes, and
+// the file it produces is far larger than the footage it stands in for.
+const editWidth = 1920
+
+// editFilter is the edit tier's chain. It is never colour-transformed — a
+// graded proxy against an ungraded original makes the image jump when proxies
+// are toggled in Resolve — so the scale is the whole of it.
+func editFilter() string {
+	// The format conversion is not optional. ProRes is a 4:2:2 codec and
+	// prores_videotoolbox refuses 4:2:0 outright — it fails to open the encoder
+	// rather than converting — so the edit tier had never worked on the GoPro,
+	// DJI or legacy sources at all. Every figure in PROXIES.md was measured on
+	// XAVC-I, which is already 4:2:2, which is why it went unnoticed.
+	return fmt.Sprintf("scale=w='min(%d,iw)':h=-2,format=yuv422p10le", editWidth)
+}
+
 const (
 	browseWidth   = 1920
 	browseBitrate = 6_000_000 // at 1920x1080; scaled down for smaller frames
@@ -318,6 +337,12 @@ func browseSize(w, h int) (int, int) {
 // them apart short of probing every file.
 func browseSpec() string {
 	return fmt.Sprintf("%dw/%dk", browseWidth, browseBitrate/1000)
+}
+
+// editSpec is the same idea for the edit tier, which has no bitrate to record
+// because ProRes Proxy is quality-targeted rather than rate-targeted.
+func editSpec() string {
+	return fmt.Sprintf("%dw/prores-proxy", editWidth)
 }
 
 // browseFilter builds the browse-tier filter chain.
@@ -394,7 +419,7 @@ func encodeArgs(src string, hasAudio bool, edit, browse, lut string, hwDecode bo
 		args = append(args, "-map", "0:v:0")
 		args = append(args, amap...)
 		args = append(args,
-			"-vf", "scale=1920:-2",
+			"-vf", editFilter(),
 			"-c:v", "prores_videotoolbox", "-profile:v", "0")
 		if hasAudio {
 			args = append(args, "-c:a", "pcm_s16le")
@@ -726,6 +751,9 @@ func planMission(src proxySource, outDir string, tiers proxyTiers, look string) 
 		if tiers.browse && cached[i] && jobs[i].meta.BrowseSpec != browseSpec() {
 			jobs[i].needBrow, jobs[i].needStil = true, true
 		}
+		if tiers.edit && cached[i] && jobs[i].meta.EditSpec != editSpec() {
+			jobs[i].needEdit = true
+		}
 		if jobs[i].work() {
 			p.todo++
 			p.todoSize += jobs[i].size
@@ -828,6 +856,7 @@ func generateClip(j *clipJob, outDir, lutDir string, tiers proxyTiers, onProgres
 		}
 		if j.needEdit {
 			written = append(written, editRel)
+			meta.EditSpec = editSpec()
 		}
 		if j.needBrow {
 			written = append(written, browseRel)
