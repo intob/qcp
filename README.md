@@ -258,8 +258,11 @@ still matches, and reuses the cached sidecar reading rather than re-parsing
 every XML.
 
 Proxy filenames keep the source stem and change only the extension, because
-Resolve links externally generated proxy media by filename excluding extension.
-See `PROXIES.md` for the rest of the relink criteria and how they were checked.
+Resolve pairs a folder of proxies to a selection of clips by filename excluding
+extension. Relinking a mission is one action: select its clips in the Media
+Pool, right-click → Link Proxy Media, and point at
+`.../proxies/<year>/<mission>/edit/<card>/`. This was verified against Resolve
+Studio 20.0.1 — see `PROXIES.md`.
 
 **Proxies are derived, and are never archived.** `-sync` and `-replicate` skip
 the `proxies/` root entirely: cold space is the scarce resource and every proxy

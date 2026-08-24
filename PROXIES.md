@@ -309,10 +309,36 @@ must meet to link in Resolve. There are four, and audio is not among them:
 - the same frame rate as the source
 - a format and codec Resolve supports
 
-All four were checked against a generated browse proxy of `923_0322.MXF`:
-timecode `07:15:49:00` on both source and proxy, frame rate 23.976 on both,
-H.264/AAC in MP4, and the stem preserved. The ProRes edit tier clears the same
-bar by construction.
+All four hold for the generated proxies of mission 024: timecode
+`07:15:49:00` on both source and proxy, frame rate 23.976 on both, ProRes
+Proxy in a `.mov` (H.264/AAC in MP4 for the browse tier), and the stem
+preserved.
+
+**Confirmed in Resolve.** Against DaVinci Resolve Studio 20.0.1, all five
+clips of `024_Jamie_Balint_landing_La_Jonction` were imported from
+`/Volumes/T9/2026/...` and linked to the edit tier in
+`/Volumes/T9/proxies/2026/.../edit/CFEXP/`. Every one came online:
+
+```
+923_0322.MXF   Proxy 1920x1080   Start TC 07:15:49:00   FPS 23.976
+923_0323.MXF   Proxy 1920x1080   Start TC 07:17:03:20   FPS 23.976
+923_0324.MXF   Proxy 1920x1080   Start TC 07:17:29:00   FPS 23.976
+923_0325.MXF   Proxy 1920x1080   Start TC 07:17:46:04   FPS 23.976
+923_0326.MXF   Proxy 1920x1080   Start TC 07:18:03:20   FPS 23.976
+```
+
+A resolution in the Proxy column is what "online" looks like; `None` or
+`Offline` is what a failure looks like. 5/5.
+
+One thing the same test showed that is worth knowing: linking a *named file*
+does not enforce the filename rule. A copy of `923_0322.mov` renamed to
+`WRONGNAME.mov` also linked and came online. That is not a contradiction —
+when you hand Resolve one specific file for one specific clip there is nothing
+to disambiguate. The filename rule binds the **directory** form, where Resolve
+has to pair a folder of proxies to a selection of clips by name, and that is
+the bulk workflow this layout is built around. Keeping the stem is therefore
+still the right call: it is required for directory linking and costs nothing
+for per-file linking.
 
 That settles the layout question in favour of the **mirrored proxy root**, not
 Blackmagic Proxy Generator's `.proxy` subfolder:
@@ -336,9 +362,10 @@ changes, the stem never does — and the tree mirrors the mission layout under
 `<drive>/proxies/<year>/<mission>/`. Relinking a mission means pointing Resolve
 at `.../proxies/<year>/<mission>/edit/<card>/`.
 
-The one thing still worth doing by hand is a first relink in the GUI, to
-confirm nothing about this particular media surprises Resolve. The criteria are
-met on paper and in the files.
+The remaining untested path is the GUI directory form itself — the scripting
+API only links one file at a time. Per-clip linking works on this media, and
+the names it would match on are correct, so there is nothing left that should
+surprise it.
 
 ### Audio channel mapping: one track is enough to link, but know what you lose
 
