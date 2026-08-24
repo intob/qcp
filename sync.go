@@ -53,7 +53,7 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 		missions := make(map[string]bool)
 		if entries, err := os.ReadDir(yearDir); err == nil {
 			for _, e := range entries {
-				if e.IsDir() {
+				if e.IsDir() && !isProxyDir(e.Name()) {
 					missions[e.Name()] = true
 				}
 			}

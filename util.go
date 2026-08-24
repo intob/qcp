@@ -306,3 +306,14 @@ func exit(code int, msg string, args ...any) {
 	fmt.Printf(msg+"\n", args...)
 	os.Exit(code)
 }
+
+// isDisabled reports whether a string flag was used to switch a feature off,
+// as in -proxy=false. -proxy carries a mission selection elsewhere, so the
+// negation has to be recognised by value rather than by a separate bool flag.
+func isDisabled(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "false", "no", "off", "0":
+		return true
+	}
+	return false
+}

@@ -41,6 +41,7 @@ func usage() {
 	row("-ingest", "", "ingest cards, prompting for mission name")
 	row("-ingest", "name", `create new mission (e.g. "Altissimo with Anton")`)
 	row("-ingest", "n", "append cards to existing mission number")
+	row("  -proxy=false", "", "skip browse-tier proxy generation after ingest")
 
 	section("ARCHIVE")
 	row("-sync", "", "sync missions from hot drives to cold drives")
@@ -68,6 +69,13 @@ func usage() {
 	row("-list", "", "list missions across all mounted drives")
 	row("-status", "", "show drive space and mission status")
 	row("-check", "n|list|all", "check mission(s) for missing files across drives")
+
+	section("PROXY")
+	row("-proxy", "n|list|all", "generate proxies for mission(s), or all in the year")
+	row("  -tier", "tier", "browse (default), edit, or both")
+	row("  -to", "drive", "drive the proxy tree lands on (default: first hot drive)")
+	row("-index", "", "build a static browsable index from the proxy manifests")
+	row("  -to", "dir", "output directory (default: ~/qcp-index)")
 
 	section("MAINTENANCE")
 	row("-clean", "", "find and remove junk files from all mounted drives")
@@ -171,6 +179,9 @@ func main() {
 	doReorganise := flag.Bool("reorganise", false, "regroup already-organised missions by season (re-runs organise over existing numbered folders)")
 	doRenumber := flag.Bool("renumber", false, "fix mission numbers to be sequential with no gaps or duplicates")
 	doEject := flag.Bool("eject", false, "eject all mounted cards and drives")
+	proxyFlag := flag.String("proxy", "", `generate proxies for mission(s) (e.g. "42", "42-48", "all"); -proxy=false skips proxy generation during -ingest`)
+	tierFlag := flag.String("tier", "", "proxy tier to generate: browse (default), edit, or both")
+	doIndex := flag.Bool("index", false, "build a static browsable index from the proxy manifests")
 	flag.Parse()
 
 	if *showVersion {
@@ -216,8 +227,22 @@ func main() {
 	if n := len(pullMissions) + len(copyMissions); *pullSub != "" && n > 1 {
 		exit(1, "-sub applies to a single mission, but %d were given", n)
 	}
-	if *copyTo != "" && !hasCopy {
-		exit(1, "-to only applies to -copy")
+	proxyAll := *proxyFlag == "all"
+	proxyOff := isDisabled(*proxyFlag)
+	var proxyMissions []int
+	hasProxy := proxyAll
+	if !proxyAll && !proxyOff {
+		proxyMissions, hasProxy = parseMissionList(*proxyFlag)
+	}
+	if *copyTo != "" && !hasCopy && !hasProxy && !*doIndex {
+		exit(1, "-to only applies to -copy, -proxy and -index")
+	}
+	if *tierFlag != "" && !hasProxy {
+		exit(1, "-tier only applies to -proxy")
+	}
+	tiers, err := parseTiers(*tierFlag)
+	if err != nil {
+		exit(1, "%v", err)
 	}
 	var copyDrives []string
 	for _, name := range strings.Split(*copyTo, ",") {
@@ -314,6 +339,41 @@ func main() {
 
 	if hasEvict {
 		runEvict(cfg, evictMissions, year, evictDrives, *evictCopies, *evictQuick, *skipConf)
+		return
+	}
+
+	if hasProxy {
+		if yearAll && !proxyAll {
+			exit(1, `-year all only applies to -proxy all`)
+		}
+		years := []int{year}
+		if yearAll {
+			if years = allYears(cfg); len(years) == 0 {
+				exit(1, "no missions found")
+			}
+		}
+		ok := true
+		for i, y := range years {
+			if len(years) > 1 {
+				if i > 0 {
+					fmt.Println()
+				}
+				fmt.Printf("%s\n", bold(strconv.Itoa(y)))
+			}
+			if !runProxy(cfg, proxyMissions, y, proxyAll, tiers, *copyTo, *skipConf) {
+				ok = false
+			}
+		}
+		if !ok {
+			os.Exit(1)
+		}
+		return
+	}
+
+	if *doIndex {
+		if !runIndex(cfg, *copyTo) {
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -700,6 +760,15 @@ func main() {
 
 		copied := fmtSize(uint64(total.Load()) / uint64(len(dstRoots)))
 		fmt.Printf("\n  %s  %s  %s  %s\n", green("✓"), bold("Done"), dim(copied+" copied and verified  →"), bold(missionSlug))
+
+		// Generate the browse tier now, while the cards are still mounted.
+		// The footage is copied and verified at this point, so an interrupt
+		// from here on must not offer to delete the mission — proxies are
+		// derived and cost nothing to regenerate.
+		if !proxyOff {
+			intrDstRoots, intrIsNew = nil, false
+			runIngestProxies(cfg, year, missionSlug)
+		}
 	}
 
 	if len(days) == 1 {
