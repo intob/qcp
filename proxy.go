@@ -770,13 +770,36 @@ func fileExists(p string) bool {
 
 // ── generation ──────────────────────────────────────────────────────────────
 
-// proxyWorkers bounds concurrent ffmpeg invocations. The source drive's read
-// limit still applies — the archive HDD collapses under parallel seeks — and
-// the CPU cap keeps a fast SSD from spawning one decode per core.
+// Concurrent transcodes per source drive. A transcode is not a copy and must
+// not inherit the copy limit: a copy worker reads as fast as the drive will go,
+// which is why several on one HDD lose to seeks, but a transcode reads only as
+// fast as the encoder consumes — about 12 MB/s for a 100 Mbps source, against
+// an archive drive measured at 302 MB/s. Gating transcodes on the copy limit
+// ran the archive at 4% utilisation with the media engine mostly idle.
+//
+// Aggregate throughput on the 5.3K HEVC material, 30s per stream:
+//
+//	1 stream   2.37× realtime      3 streams  4.46× realtime
+//	2 streams  4.29× realtime      4 streams  4.43× realtime
+//
+// It saturates on compute, not I/O, and two streams already reach 96% of what
+// three do. So an HDD gets two — most of the win for the least seeking — and an
+// SSD three, both still under the CPU cap.
+const (
+	proxyWorkersHDD = 2
+	proxyWorkersSSD = 3
+)
+
+// proxyWorkers bounds concurrent ffmpeg invocations against one source drive.
 func proxyWorkers(info driveInfo) int {
-	n := max(1, runtime.NumCPU()/4)
-	if info.concurrency < n {
-		n = info.concurrency
+	n := proxyWorkersHDD
+	if info.kind == "SSD" {
+		n = proxyWorkersSSD
+	}
+	// The CPU cap keeps a fast machine from spawning one decode per core, and
+	// keeps a small one from oversubscribing.
+	if c := max(1, runtime.NumCPU()/4); c < n {
+		n = c
 	}
 	return n
 }

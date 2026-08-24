@@ -477,3 +477,22 @@ func TestEditTierConvertsToFourTwoTwo(t *testing.T) {
 		t.Errorf("edit tier converts before scaling: %s", f)
 	}
 }
+
+// A transcode reads at the rate the encoder consumes, not at the rate the drive
+// can go, so it must not inherit the copy limit that exists to stop several
+// full-speed readers thrashing one HDD. Measured: one stream 2.37x realtime,
+// two 4.29x — the copy limit of 1 was leaving that on the table.
+func TestProxyWorkersIgnoreTheCopyReadLimit(t *testing.T) {
+	hdd := driveInfo{concurrency: 1, kind: "HDD", protocol: "USB"}
+	if got := proxyWorkers(hdd); got < 2 {
+		t.Errorf("an archive HDD got %d transcode worker(s); the copy limit should not gate transcodes", got)
+	}
+	ssd := driveInfo{concurrency: 8, kind: "SSD", protocol: "USB"}
+	if proxyWorkers(ssd) < proxyWorkers(hdd) {
+		t.Error("an SSD got fewer workers than an HDD")
+	}
+	// The CPU cap still applies, so neither runs away on a small machine.
+	if got := proxyWorkers(ssd); got > proxyWorkersSSD {
+		t.Errorf("SSD workers %d exceeded the ceiling", got)
+	}
+}
