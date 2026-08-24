@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -218,5 +219,66 @@ func TestLUTRoundTripThroughFFmpeg(t *testing.T) {
 					cv, c.name, c.got, c.want, c.got-c.want)
 			}
 		}
+	}
+}
+
+// A look replaces the whole technical conversion rather than layering on it,
+// so it must land as its own transform with its own cache entry — two looks
+// must never collide in one proxy tree, and a tree must record which was used.
+func TestLookTransformIsSelfIdentifying(t *testing.T) {
+	lt := lookTransform("/LUT/Alister/Super Hero Final-33x.cube")
+	if lt.passthrough() {
+		t.Fatal("a look must not pass through")
+	}
+	if lt.Look != "/LUT/Alister/Super Hero Final-33x.cube" {
+		t.Errorf("source path not carried: %q", lt.Look)
+	}
+	// The cached name is derived from the look's own, so the proxy tree says
+	// which look it was baked with.
+	if lt.LUT != "look_Super_Hero_Final-33x.cube" {
+		t.Errorf("cache name = %q", lt.LUT)
+	}
+	// Spaces and punctuation must not reach a filesystem path or a filter arg.
+	if strings.ContainsAny(lt.LUT, " '\\:") {
+		t.Errorf("cache name is not filter-safe: %q", lt.LUT)
+	}
+	// Two different looks must not share a cache entry.
+	if other := lookTransform("/LUT/Other/Moody.cube"); other.LUT == lt.LUT {
+		t.Error("two looks collide in the cache")
+	}
+	// The ID is what marks a cached clip stale when the look changes, so it
+	// must differ from the technical transform it replaces.
+	if lt.ID == transformSGamut3Cine.ID || lt.ID == transformNone.ID {
+		t.Errorf("look ID %q does not distinguish itself", lt.ID)
+	}
+}
+
+// A look only ever displaces a conversion that was going to happen anyway.
+// Rec.709 sources have no log to give the cube and must be left alone.
+func TestLookOnlyDisplacesALogConversion(t *testing.T) {
+	clips := []clipColour{
+		{Gamma: "s-log3-cine", Prim: "s-gamut3-cine", Found: true},
+		{Gamma: "rec709", Prim: "rec709", Found: true}, // GoPro / DJI
+	}
+	got := fillMissingColour(clips)
+	if got[0].passthrough() {
+		t.Fatal("the log clip should have had a conversion to displace")
+	}
+	if !got[1].passthrough() {
+		t.Fatal("the Rec.709 clip should pass through before any look is applied")
+	}
+	// planMission substitutes only where a conversion already existed; mirror
+	// that rule here so the invariant is pinned even if the caller moves.
+	lt := lookTransform("/LUT/x.cube")
+	for i := range got {
+		if !got[i].passthrough() {
+			got[i] = lt
+		}
+	}
+	if got[0].ID != lt.ID {
+		t.Error("the log clip did not take the look")
+	}
+	if !got[1].passthrough() {
+		t.Error("the Rec.709 clip was graded — it has no log to give the cube")
 	}
 }

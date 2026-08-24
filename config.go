@@ -10,6 +10,12 @@ import (
 type Config struct {
 	Cards  []CardConfig  `json:"cards"`
 	Drives []DriveConfig `json:"drives"`
+
+	// Look is an optional creative .cube baked into the browse tier in place of
+	// the generated technical conversion. It must take S-Log3 in and deliver
+	// finished Rec.709 out, because nothing is applied after it. Only log clips
+	// get it — Rec.709 sources have no log to give it and are left alone.
+	Look string `json:"look"`
 }
 
 type CardConfig struct {

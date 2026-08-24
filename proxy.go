@@ -652,7 +652,7 @@ type missionPlan struct {
 // skipped when its renditions are on disk and the recorded source hash still
 // matches — the manifest also carries the parsed sidecar, so a re-run does not
 // re-read every XML.
-func planMission(src proxySource, outDir string, tiers proxyTiers) missionPlan {
+func planMission(src proxySource, outDir string, tiers proxyTiers, look string) missionPlan {
 	p := missionPlan{src: src, outDir: outDir, existing: readProxyManifest(outDir).byRel()}
 
 	// Sidecars are only read for clips with no usable cached entry.
@@ -679,6 +679,19 @@ func planMission(src proxySource, outDir string, tiers proxyTiers) missionPlan {
 	}
 
 	transforms := fillMissingColour(colours)
+	// A configured look replaces the technical conversion wherever there was
+	// one to replace. Detection and the mission-wide inheritance above still
+	// decide *which* clips are log; the look only changes what they are taken
+	// through. Clips that pass through are already Rec.709 and stay untouched —
+	// the cube expects log, and there is none to give it.
+	if look != "" {
+		lt := lookTransform(look)
+		for i := range transforms {
+			if !transforms[i].passthrough() {
+				transforms[i] = lt
+			}
+		}
+	}
 	for i := range jobs {
 		jobs[i].colour = colours[i]
 		jobs[i].trans = transforms[i]
@@ -963,7 +976,7 @@ func runProxy(cfg Config, missions []int, year int, all bool, tiers proxyTiers, 
 			failed++
 			continue
 		}
-		plans = append(plans, planMission(src, filepath.Join(yearRoot, src.slug), tiers))
+		plans = append(plans, planMission(src, filepath.Join(yearRoot, src.slug), tiers, cfg.Look))
 	}
 	if len(plans) == 0 {
 		exit(1, "nothing to proxy")
@@ -1205,7 +1218,7 @@ func runIngestProxies(cfg Config, year int, slug string) {
 	}
 	tiers := proxyTiers{browse: true}
 	outDir := filepath.Join(proxyRoot(dst.basePath()), yearStr, slug)
-	plan := planMission(src, outDir, tiers)
+	plan := planMission(src, outDir, tiers, cfg.Look)
 	if plan.todo == 0 {
 		return
 	}

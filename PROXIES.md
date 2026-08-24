@@ -509,6 +509,44 @@ because a `file://` page cannot fetch a sibling JSON file — every browser
 treats that as a cross-origin request, and the whole point of the index is that
 it opens with nothing mounted.
 
+### Baking a look
+
+`look` in `~/.qcp` points at a creative cube that replaces the generated
+technical conversion in the browse tier. It has to take S-Log3 in and deliver
+finished Rec.709 out, because it stands in for the *whole* chain — gamut matrix,
+tone-map and gamma encode — and nothing may be applied after it or the result is
+double-encoded.
+
+Only clips that already had a conversion take the look. Detection and the
+mission-wide sidecar inheritance still decide which clips are log; the look only
+changes what those clips are taken through. GoPro and DJI material is already
+Rec.709, has no log to give the cube, and passes through untouched.
+
+Two things were checked rather than assumed when the first look was fitted, both
+worth repeating for the next one:
+
+- **Which input the cube expects.** A LUT's title is a claim, not evidence. The
+  curve is evidence: sampling the neutral ramp of the Alister Chapman *Super
+  Hero* cube showed output flat from 0 to 0.0938 and then rising steeply, which
+  is the cube discarding everything below S-Log3 black at 0.0928. A
+  Rec.709-input look LUT has no reason to build that shelf.
+- **The range trap, again.** `color_range=pc` is a container tag and does not
+  have to match the data. Measured: the XAVC-I luma runs down to 40, below the
+  64 floor limited range would impose, so the footage really is full range and
+  `in_range=full` is right. Feeding the cube through a limited→full expansion
+  crushes shadows that are not sub-black.
+
+The cost is the tuned highlight roll-off. `tonemapWhite = 8.0` was chosen
+against this library's own statistics — median +3.31 stops, p95 +5.25 on a
+representative flying shot — and a look handles highlights its own way instead.
+That is inherent in baking a grade, not a defect in the plumbing.
+
+The cube is copied into `proxies/luts/` under a name derived from its own, so
+the tree records which look it was baked with and still resolves after the
+original moves. The per-clip transform ID changes from `s-log3/s-gamut3-cine` to
+`look/<name>`, and the existing staleness check on that ID rebuilds affected
+proxies without any new mechanism.
+
 ### Verified against the measurements
 
 The generated S-Gamut3.Cine cube is 970,516 bytes, matching the 970KB in the

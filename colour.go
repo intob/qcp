@@ -211,6 +211,12 @@ type colourTransform struct {
 	ID  string
 	LUT string // .cube basename in the LUT cache; "" means pass through
 	Mat mat3
+
+	// Look is the absolute path to a user-supplied creative cube, copied into
+	// the cache rather than generated. A look takes S-Log3 straight to finished
+	// Rec.709, so it replaces the whole technical chain — gamut matrix,
+	// tone-map and gamma encode alike — and nothing may be applied after it.
+	Look string
 }
 
 func (t colourTransform) passthrough() bool { return t.LUT == "" }
@@ -227,6 +233,25 @@ var (
 	transformSGamut3     = colourTransform{ID: "s-log3/s-gamut3", LUT: "slog3_sgamut3_to_rec709.cube", Mat: gamutMatrix(sGamut3)}
 	transformSGamut3Cine = colourTransform{ID: "s-log3/s-gamut3-cine", LUT: "slog3_sgamut3cine_to_rec709.cube", Mat: gamutMatrix(sGamut3Cine)}
 )
+
+// lookTransform is the transform for a clip when a creative look is
+// configured. The cube carries S-Log3 all the way to finished Rec.709, so the
+// gamut matrix, tone-map and gamma encode it would otherwise go through are all
+// replaced — a look is the whole conversion, not a layer on top of one.
+//
+// The cached basename is derived from the look's own name so two different
+// looks cannot collide in one proxy tree, and so a tree records which was used.
+func lookTransform(path string) colourTransform {
+	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	safe := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			return r
+		}
+		return '_'
+	}, base)
+	return colourTransform{ID: "look/" + base, LUT: "look_" + safe + ".cube", Look: path}
+}
 
 // pickTransform maps a clip's capture gamma and colour primaries onto a
 // transform. Anything not recognised passes through: baking a guessed
@@ -260,7 +285,18 @@ func ensureLUT(dir string, t colourTransform) (string, error) {
 	if err := os.MkdirAll(dir, 0777); err != nil {
 		return "", err
 	}
-	data := buildCube(t.ID, t.Mat)
+	// A look is copied, not generated: it lives beside the proxies it was
+	// baked into so the tree stays self-describing once the original moves.
+	var data []byte
+	if t.Look != "" {
+		raw, err := os.ReadFile(t.Look)
+		if err != nil {
+			return "", fmt.Errorf("look %s: %w", t.Look, err)
+		}
+		data = raw
+	} else {
+		data = buildCube(t.ID, t.Mat)
+	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0644); err != nil {
 		return "", err
