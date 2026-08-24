@@ -204,6 +204,9 @@ qcp -index -to ~/Desktop/qcp-index    # ...or somewhere else
 
 qcp -serve                            # serve that index on localhost:8080
 qcp -serve -addr :8080                # ...reachable from other devices on the LAN
+
+qcp -resolve                          # push flagged clips into the open Resolve project
+qcp -resolve -unflag                  # ...and clear the flag from clips no longer flagged
 ```
 
 `-proxy` generates derived renditions per source clip. The **browse tier** is
@@ -299,6 +302,37 @@ originals and the rest of the disk are not reachable through it. It binds to
 `localhost` by default — pass `-addr :8080` to browse the archive from a phone
 on the same network, which prints the LAN URL to open.
 
+### Flagging
+
+Under `qcp -serve` each clip carries a flag toggle, and the toolbar gains a
+**Flagged only** filter. `qcp -resolve` then pushes those flags into the open
+DaVinci Resolve project: a flagged clip gets a blue flag *and* a blue clip
+colour in the Media Pool. Matching is on the absolute source path, which
+Resolve reports as `File Path` exactly as qcp composes it, so nothing is
+guessed from filenames and a clip that exists on two drives cannot be confused.
+
+It is one-way by design. The index is the source of truth, so there is no
+conflict to resolve and nothing is read back out of Resolve. `-unflag` retracts
+only the colour qcp itself applies, leaving a flag or clip colour set by hand in
+Resolve alone. Flagged clips that were never imported into the open project are
+reported and skipped — the index covers the whole archive, a project covers one
+shoot.
+
+Flags live in a `.qcp-flags.json` **dotfile in the mission directory**, beside
+the footage they describe. `findFiles` skips any path component starting with a
+dot, so the file is invisible to `checksums.b3`, `-verify`, `-check`, `-sync`,
+`-replicate` and `-pull`. That invisibility is deliberate: a flag must never be
+able to make a good mission look corrupt or an archive drive look out of date.
+The cost is that flags are not carried to cold storage. Two consequences worth
+knowing: only clips that have been proxied can be flagged, because only those
+appear in the index; and flagging needs somewhere to write, so it is offered
+under `-serve` and not when the index is opened from `file://`.
+
+Resolve's scripting API is a Python module inside the application bundle, so
+`-resolve` shells out to `python3`. It needs Resolve running with a project
+open, and **Preferences → System → General → External scripting using** set to
+**Local**.
+
 Browse-tier proxies are also generated automatically at the end of `-ingest`,
 while the cards are still mounted, so backfilling the existing archive is a
 one-time event rather than a permanent chore. Pass `-proxy=false` to skip it.
@@ -332,6 +366,7 @@ qcp -clean -y
 -year <N|all>    year to operate on (default: current year)
 -to <drives>     destinations for -copy / -proxy, or the index dir for -index / -serve
 -addr <addr>     address for -serve to listen on (default: localhost:8080)
+-unflag          -resolve: clear qcp's flag from clips no longer flagged
 -tier <tier>     proxy tier: browse (default), edit, or both
 -y               skip confirmation prompts
 -version         print version and exit

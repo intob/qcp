@@ -79,6 +79,8 @@ func usage() {
 	row("-serve", "", "serve a built index over HTTP, with the proxies playable")
 	row("  -addr", "addr", "address to listen on (default: localhost:8080)")
 	row("  -to", "dir", "index directory to serve (default: ~/qcp-index)")
+	row("-resolve", "", "push clips flagged in the index into the open Resolve project")
+	row("  -unflag", "", "also clear qcp's flag from clips no longer flagged")
 
 	section("MAINTENANCE")
 	row("-clean", "", "find and remove junk files from all mounted drives")
@@ -187,6 +189,8 @@ func main() {
 	doIndex := flag.Bool("index", false, "build a static browsable index from the proxy manifests")
 	doServe := flag.Bool("serve", false, "serve a built index over HTTP, with the browse proxies playable in the browser")
 	serveAddr := flag.String("addr", "localhost:8080", "address for -serve to listen on (use :8080 to reach it from other devices)")
+	doResolve := flag.Bool("resolve", false, "push flagged clips into the open DaVinci Resolve project")
+	resolveClear := flag.Bool("unflag", false, "-resolve: also clear qcp's flag from clips no longer flagged")
 	flag.Parse()
 
 	if *showVersion {
@@ -383,7 +387,14 @@ func main() {
 	}
 
 	if *doServe {
-		if !runServe(*copyTo, *serveAddr) {
+		if !runServe(cfg, *copyTo, *serveAddr) {
+			os.Exit(1)
+		}
+		return
+	}
+
+	if *doResolve {
+		if !runResolve(cfg, *resolveClear) {
 			os.Exit(1)
 		}
 		return

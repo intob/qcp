@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -18,7 +19,7 @@ import (
 // browser's access to removable volumes behind a TCC prompt it never shows for
 // a subresource. Serving the proxies from the same origin as the page sidesteps
 // both — qcp already has access to the drives, so it does the reading.
-func runServe(out, addr string) bool {
+func runServe(cfg Config, out, addr string) bool {
 	out = indexOutDir(out)
 
 	raw, err := os.ReadFile(filepath.Join(out, "index.json"))
@@ -37,8 +38,14 @@ func runServe(out, addr string) bool {
 	// whole allowlist: the media handler serves these files and nothing else,
 	// so a crafted path cannot walk out of the proxy tree and read the disk.
 	allowed := make(map[string]bool)
+	// Which clips may be flagged, by the same principle: only what the index
+	// published, so a crafted slug cannot steer a write outside the archive.
+	allowedClips := make(map[string]bool)
 	for _, y := range data.Years {
 		for _, m := range y.Missions {
+			for _, c := range m.Clips {
+				allowedClips[flagKey(y.Year, m.Slug, c.Rel)] = true
+			}
 			if m.ProxyDir == "" {
 				continue
 			}
@@ -50,8 +57,48 @@ func runServe(out, addr string) bool {
 		}
 	}
 
+	// Flags are read from and written to the drives on every request rather
+	// than cached: the page is the only writer, but a mission can be flagged
+	// from a second qcp -serve or edited between requests, and the file is a
+	// few hundred bytes.
+	flags := newFlagStore(cfg)
+
 	mux := http.NewServeMux()
 	mux.Handle("/", http.FileServer(http.Dir(out)))
+	mux.HandleFunc("/api/flags", func(w http.ResponseWriter, r *http.Request) {
+		out := map[string]bool{}
+		for _, c := range flags.all() {
+			out[flagKey(c.Year, c.Slug, c.Rel)] = true
+		}
+		writeJSON(w, out)
+	})
+	mux.HandleFunc("/api/flag", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Year    int    `json:"year"`
+			Slug    string `json:"slug"`
+			Rel     string `json:"rel"`
+			Flagged bool   `json:"flagged"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&req); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		// The slug and rel land in a filesystem path, so they have to be exactly
+		// what the index published — never a path the caller invented.
+		if !allowedClips[flagKey(req.Year, req.Slug, req.Rel)] {
+			http.Error(w, "unknown clip", http.StatusNotFound)
+			return
+		}
+		if _, err := flags.set(req.Year, req.Slug, req.Rel, req.Flagged); err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		writeJSON(w, map[string]bool{"flagged": req.Flagged})
+	})
 	mux.HandleFunc("/media/", func(w http.ResponseWriter, r *http.Request) {
 		p := filepath.Clean(strings.TrimPrefix(r.URL.Path, "/media"))
 		if !allowed[p] {
@@ -121,4 +168,16 @@ func serveURLs(a net.Addr) []string {
 		urls = append(urls, "http://"+net.JoinHostPort(n.IP.String(), port)+"/")
 	}
 	return urls
+}
+
+// flagKey identifies a clip across the index, the API and the drives.
+func flagKey(year int, slug, rel string) string {
+	return strconv.Itoa(year) + "/" + slug + "/" + rel
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		http.Error(w, "encode failed", http.StatusInternalServerError)
+	}
 }

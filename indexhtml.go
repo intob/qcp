@@ -110,6 +110,20 @@ code {
   padding: 2px 6px; display: inline-block; word-break: break-all;
 }
 .copy { margin-left: 6px; padding: 1px 7px; font-size: 11px; }
+/* The flag sits on the thumbnail, dim until hover so a wall of unflagged
+   clips stays calm, and always visible once set. */
+.flag {
+  position: absolute; top: 6px; right: 6px; z-index: 2;
+  width: 26px; height: 26px; padding: 0; line-height: 1;
+  border-radius: 6px; border: 1px solid var(--line);
+  background: rgba(20, 22, 26, .72); color: var(--dim);
+  opacity: 0; transition: opacity .12s, color .12s;
+}
+.card:hover .flag, .flag:focus-visible { opacity: 1; }
+.flag:hover { color: var(--fg); }
+.flag.on { opacity: 1; color: var(--accent); border-color: var(--accent); }
+.card.flagged { outline: 2px solid var(--accent); outline-offset: -2px; }
+.modal-body .flag { position: static; opacity: 1; width: auto; padding: 2px 10px; }
 </style>
 </head>
 <body>
@@ -121,6 +135,7 @@ code {
   <select id="fcodec"></select>
   <select id="fgamma"></select>
   <select id="fdur"></select>
+  <select id="fflag" hidden></select>
   <button id="clear">Clear</button>
   <span class="stats" id="stats"></span>
 </header>
@@ -141,7 +156,8 @@ code {
 const DATA = /*INDEX_DATA*/null;
 const $ = id => document.getElementById(id);
 const q = $("q"), fyear = $("fyear"), fcard = $("fcard"), fcodec = $("fcodec"),
-      fgamma = $("fgamma"), fdur = $("fdur"), clearBtn = $("clear"), stats = $("stats"),
+      fgamma = $("fgamma"), fdur = $("fdur"), fflag = $("fflag"),
+      clearBtn = $("clear"), stats = $("stats"),
       side = $("side"), main = $("main"), dlg = $("dlg"),
       dlgTitle = $("dlg-title"), dlgBody = $("dlg-body"), dlgClose = $("dlg-close"),
       gen = $("gen");
@@ -200,7 +216,38 @@ const DURATIONS = [
 const durBucket = d => d < 30 ? "s" : d < 120 ? "m" : d < 600 ? "l" : "x";
 
 // ── filters ─────────────────────────────────────────────────────────────────
-const state = { q: "", year: "", card: "", codec: "", gamma: "", dur: "", mission: null };
+const state = { q: "", year: "", card: "", codec: "", gamma: "", dur: "", flagged: "", mission: null };
+
+// Flagging needs somewhere to write, which only qcp -serve has — a page opened
+// from disk can show nothing and change nothing, so the control is not drawn.
+const flags = new Set();
+const flagKey = c => c.mission.year + "/" + c.mission.slug + "/" + c.rel;
+async function loadFlags() {
+  if (!served) return;
+  try {
+    const r = await fetch("/api/flags");
+    if (!r.ok) return;
+    for (const k of Object.keys(await r.json())) flags.add(k);
+  } catch (_) { /* the index still works unflagged */ }
+}
+async function toggleFlag(c) {
+  const key = flagKey(c), on = !flags.has(key);
+  // Optimistic: the click has to feel instant, and a failure puts it back.
+  on ? flags.add(key) : flags.delete(key);
+  render();
+  try {
+    const r = await fetch("/api/flag", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ year: c.mission.year, slug: c.mission.slug, rel: c.rel, flagged: on }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+  } catch (e) {
+    on ? flags.delete(key) : flags.add(key);
+    render();
+    alert("Could not save the flag: " + e.message);
+  }
+}
 
 function fillSelect(el, label, values) {
   el.innerHTML = "";
@@ -223,6 +270,7 @@ function clipMatches(c) {
   if (state.codec && c.codec !== state.codec) return false;
   if (state.gamma && c.gamma !== state.gamma) return false;
   if (state.dur && durBucket(c.dur || 0) !== state.dur) return false;
+  if (state.flagged && !flags.has(flagKey(c))) return false;
   if (state.q) {
     const q = state.q.toLowerCase();
     if (!(c.rel.toLowerCase().includes(q) || c.mission.name.toLowerCase().includes(q)
@@ -230,13 +278,13 @@ function clipMatches(c) {
   }
   return true;
 }
-const filtering = () => !!(state.q || state.year || state.card || state.codec || state.gamma || state.dur);
+const filtering = () => !!(state.q || state.year || state.card || state.codec || state.gamma || state.dur || state.flagged);
 
 // A mission with no proxies yet still belongs in the list — the index is the
 // map of the whole library, not only of what has been transcoded.
 function missionMatches(m) {
   if (state.year && String(m.year) !== state.year) return false;
-  const clipFilters = !!(state.card || state.codec || state.gamma || state.dur);
+  const clipFilters = !!(state.card || state.codec || state.gamma || state.dur || state.flagged);
   if (clipFilters) return m.clips.some(clipMatches);
   if (state.q) {
     const q = state.q.toLowerCase();
@@ -295,6 +343,8 @@ function clipCard(c) {
     '<div class="sub">' + esc([c.codec, c.w ? c.w + "×" + c.h : "", c.fps ? c.fps.toFixed(2).replace(/\.?0+$/, "") + "p" : "", fmtSize(c.size)].filter(Boolean).join(" · ")) + "</div>" +
     (c.gamma ? '<div class="sub">' + esc(c.gamma) + (c.xf && c.xf !== "none" ? " → rec709" : "") + "</div>" : "") +
     "</div>";
+  if (served) el.querySelector(".thumb").append(flagBtn(c));
+  if (flags.has(flagKey(c))) el.classList.add("flagged");
 
   if (c.sprite) {
     const thumb = el.querySelector(".thumb");
@@ -371,6 +421,19 @@ function render() {
   stats.textContent = missions.length + " missions · " + allClips.length + " clips · " + fmtSize(missions.reduce((a, m) => a + m.size, 0));
 }
 
+// One control, two states. The label is a word in the dialog and a glyph on a
+// card, but it is the same toggle and the same request either way.
+function flagBtn(c, label) {
+  const b = document.createElement("button");
+  const on = flags.has(flagKey(c));
+  b.className = "flag" + (on ? " on" : "");
+  b.textContent = label ? (on ? "Flagged" : "Flag") : (on ? "\u2691" : "\u2690");
+  b.title = on ? "Flagged for Resolve — click to remove" : "Flag for Resolve";
+  b.setAttribute("aria-pressed", on ? "true" : "false");
+  b.onclick = e => { e.stopPropagation(); toggleFlag(c); };
+  return b;
+}
+
 function copyBtn(text) {
   const b = document.createElement("button");
   b.className = "copy";
@@ -395,6 +458,12 @@ function copyBtn(text) {
 function openClip(c) {
   dlgTitle.textContent = c.mission.slug + " / " + c.rel;
   const body = document.createElement("div");
+  if (served) {
+    const row = document.createElement("div");
+    row.style.marginBottom = "10px";
+    row.append(flagBtn(c, true));
+    body.append(row);
+  }
 
   const path = browsePath(c);
   if (path) {
@@ -468,10 +537,11 @@ const bind = (el, key) => el.addEventListener("input", () => {
   render();
 });
 bind(q, "q"); bind(fyear, "year"); bind(fcard, "card");
-bind(fcodec, "codec"); bind(fgamma, "gamma"); bind(fdur, "dur");
+bind(fcodec, "codec"); bind(fgamma, "gamma"); bind(fdur, "dur"); bind(fflag, "flagged");
 clearBtn.onclick = () => {
-  Object.assign(state, { q: "", year: "", card: "", codec: "", gamma: "", dur: "", mission: null });
+  Object.assign(state, { q: "", year: "", card: "", codec: "", gamma: "", dur: "", flagged: "", mission: null });
   q.value = ""; fyear.value = ""; fcard.value = ""; fcodec.value = ""; fgamma.value = ""; fdur.value = "";
+  fflag.value = "";
   render();
 };
 dlgClose.onclick = () => dlg.close();
@@ -480,7 +550,14 @@ document.addEventListener("keydown", e => {
   if (e.key === "/" && document.activeElement !== q) { e.preventDefault(); q.focus(); }
 });
 gen.textContent = "index · " + DATA.generated.slice(0, 10) + " · qcp " + DATA.version;
+if (served) {
+  fflag.hidden = false;
+  fflag.append(new Option("Any flag", ""), new Option("Flagged only", "1"));
+}
 render();
+// Flags arrive after the first paint so the index is usable immediately, then
+// re-render once they land.
+loadFlags().then(() => { if (flags.size) render(); });
 </script>
 </body>
 </html>
