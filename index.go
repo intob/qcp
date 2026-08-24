@@ -106,20 +106,25 @@ func stillRel(year int, slug, clipRel, suffix string) string {
 		strings.TrimSuffix(clipRel, filepath.Ext(clipRel))+suffix)
 }
 
-func runIndex(cfg Config, out string) bool {
+// indexOutDir resolves the -to flag to the directory the index lives in,
+// defaulting to ~/qcp-index. Shared by -index and -serve so both agree.
+func indexOutDir(out string) string {
 	if out == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			exit(1, "err resolving home directory: %v", err)
 		}
-		out = filepath.Join(home, indexDirName)
-	} else {
-		p, err := expandPath(out)
-		if err != nil {
-			exit(1, "err resolving %s: %v", out, err)
-		}
-		out = p
+		return filepath.Join(home, indexDirName)
 	}
+	p, err := expandPath(out)
+	if err != nil {
+		exit(1, "err resolving %s: %v", out, err)
+	}
+	return p
+}
+
+func runIndex(cfg Config, out string) bool {
+	out = indexOutDir(out)
 
 	var mounted []DriveConfig
 	for _, d := range cfg.Drives {

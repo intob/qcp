@@ -76,6 +76,9 @@ func usage() {
 	row("  -to", "drive", "drive the proxy tree lands on (default: first hot drive)")
 	row("-index", "", "build a static browsable index from the proxy manifests")
 	row("  -to", "dir", "output directory (default: ~/qcp-index)")
+	row("-serve", "", "serve a built index over HTTP, with the proxies playable")
+	row("  -addr", "addr", "address to listen on (default: localhost:8080)")
+	row("  -to", "dir", "index directory to serve (default: ~/qcp-index)")
 
 	section("MAINTENANCE")
 	row("-clean", "", "find and remove junk files from all mounted drives")
@@ -182,6 +185,8 @@ func main() {
 	proxyFlag := flag.String("proxy", "", `generate proxies for mission(s) (e.g. "42", "42-48", "all"); -proxy=false skips proxy generation during -ingest`)
 	tierFlag := flag.String("tier", "", "proxy tier to generate: browse (default), edit, or both")
 	doIndex := flag.Bool("index", false, "build a static browsable index from the proxy manifests")
+	doServe := flag.Bool("serve", false, "serve a built index over HTTP, with the browse proxies playable in the browser")
+	serveAddr := flag.String("addr", "localhost:8080", "address for -serve to listen on (use :8080 to reach it from other devices)")
 	flag.Parse()
 
 	if *showVersion {
@@ -234,8 +239,8 @@ func main() {
 	if !proxyAll && !proxyOff {
 		proxyMissions, hasProxy = parseMissionList(*proxyFlag)
 	}
-	if *copyTo != "" && !hasCopy && !hasProxy && !*doIndex {
-		exit(1, "-to only applies to -copy, -proxy and -index")
+	if *copyTo != "" && !hasCopy && !hasProxy && !*doIndex && !*doServe {
+		exit(1, "-to only applies to -copy, -proxy, -index and -serve")
 	}
 	if *tierFlag != "" && !hasProxy {
 		exit(1, "-tier only applies to -proxy")
@@ -372,6 +377,13 @@ func main() {
 
 	if *doIndex {
 		if !runIndex(cfg, *copyTo) {
+			os.Exit(1)
+		}
+		return
+	}
+
+	if *doServe {
+		if !runServe(*copyTo, *serveAddr) {
 			os.Exit(1)
 		}
 		return

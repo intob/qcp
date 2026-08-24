@@ -201,6 +201,9 @@ qcp -proxy 42 -tier edit -to T7       # edit tier only, onto a named drive
 
 qcp -index                            # build the static index in ~/qcp-index
 qcp -index -to ~/Desktop/qcp-index    # ...or somewhere else
+
+qcp -serve                            # serve that index on localhost:8080
+qcp -serve -addr :8080                # ...reachable from other devices on the LAN
 ```
 
 `-proxy` generates derived renditions per source clip. The **browse tier** is
@@ -277,7 +280,24 @@ mission, hover a clip to scrub its sprite sheet, filter by mission, card, codec,
 capture gamma or duration, and click through for the full metadata, a copyable
 absolute path per drive holding the mission, and the `qcp -pull` command to
 retrieve it. Clicking a clip plays its 720p browse proxy when the drive it lives
-on happens to be mounted, and shows the path when it is not.
+on happens to be mounted, and shows the path when it is not — or, under
+`qcp -serve`, plays it through the server regardless of what the browser is
+allowed to read.
+
+`-serve` puts that same index behind a local HTTP server, and is the answer when
+the proxies will not play from `file://`. A page opened from disk can only reach
+a proxy by absolute `file://` URL, and whether that works is up to the browser:
+an `http://` page is not permitted to load `file://` subresources at all, and on
+macOS a browser needs its own Files and Folders permission for a removable
+volume before it can read one. `-serve` sidesteps both — qcp reads the drive,
+which it already has access to, and the page only ever talks to the server. It
+also gets seeking, which `file://` does not reliably give: the player asks for
+byte ranges and `-serve` answers them.
+
+Only the browse proxies listed in `index.json` are served, by exact path; the
+originals and the rest of the disk are not reachable through it. It binds to
+`localhost` by default — pass `-addr :8080` to browse the archive from a phone
+on the same network, which prints the LAN URL to open.
 
 Browse-tier proxies are also generated automatically at the end of `-ingest`,
 while the cards are still mounted, so backfilling the existing archive is a
@@ -310,7 +330,8 @@ qcp -clean -y
 
 ```sh
 -year <N|all>    year to operate on (default: current year)
--to <drives>     destinations for -copy / -proxy, or the output dir for -index
+-to <drives>     destinations for -copy / -proxy, or the index dir for -index / -serve
+-addr <addr>     address for -serve to listen on (default: localhost:8080)
 -tier <tier>     proxy tier: browse (default), edit, or both
 -y               skip confirmation prompts
 -version         print version and exit

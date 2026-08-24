@@ -176,6 +176,11 @@ const join = (...p) => p.filter(Boolean).join("/");
 // escaped per segment before it reaches a URL or a CSS url().
 const encPath = p => p.split("/").map(encodeURIComponent).join("/");
 const fileURL = p => "file://" + encPath(p);
+// Opened from disk, the player reads the drive directly. Served by qcp -serve,
+// it goes back through the server: an http:// page is not allowed to load a
+// file:// subresource, and the server can seek where the page cannot.
+const served = location.protocol !== "file:";
+const mediaURL = p => served ? "/media" + encPath(p) : fileURL(p);
 const stem = rel => rel.replace(/\.[^./]+$/, "");
 const stillURL = (c, kind) =>
   encPath("stills/" + c.mission.year + "/" + c.mission.slug + "/" + stem(c.rel) + "." + kind + ".jpg");
@@ -396,7 +401,7 @@ function openClip(c) {
     const v = document.createElement("video");
     v.controls = true;
     v.preload = "metadata";
-    v.src = fileURL(path);
+    v.src = mediaURL(path);
     v.onerror = () => v.replaceWith(offlineBox(path));
     body.append(v);
   } else {
@@ -443,7 +448,9 @@ function openClip(c) {
 function offlineBox(path, msg) {
   const d = document.createElement("div");
   d.className = "offline";
-  d.textContent = msg || "Proxy not reachable — the drive is probably not mounted.";
+  d.textContent = msg || (served
+    ? "Proxy not reachable — qcp -serve could not read it. Is the drive still mounted?"
+    : "Proxy not reachable — the drive is probably not mounted.");
   if (path) {
     const p = document.createElement("div");
     p.style.marginTop = "10px";
