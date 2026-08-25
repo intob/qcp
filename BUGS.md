@@ -6,34 +6,39 @@ suite. Line numbers are against commit `d7d6706` plus the progress-bar fix.
 
 Findings that have since been fixed are recorded at the bottom for context —
 they explain why `progress.go`, the `metadataFiles` set in `util.go`, the hot
-manifest read in `evict.go`, the `name()` calls in `sync.go` and the hashed look
-IDs in `colour.go` look the way they do.
+manifest read in `evict.go`, the `name()` calls in `sync.go`, the hashed look
+IDs in `colour.go` and the `interruptTarget` in `main.go` look the way they do.
 
 Ordered by severity. Each entry says what is wrong, how it was confirmed, and
 what a fix would have to do; none of them have been attempted.
 
 ---
 
-## 1. Data race on the ingest interrupt state
+## 1. An interrupted copy leaves a truncated file that the re-run then skips
 
-`main.go:553-554`, written at `792`, `864-865`, `953-954`, read at `564`, `580`, `584`
+`copy.go:38` (`job`), `main.go:656` (the `missingByDst` scan)
 
-`intrDstRoots` and `intrIsNew` are plain variables shared between the main
-goroutine and the SIGINT handler goroutine with no synchronisation. The handler
-decides from them whether to offer to delete the partial mission and revert the
-counter.
+`job` writes straight to the destination path, and `copy.go` takes no context —
+so the only cleanup is the `os.Remove(dst)` on its own error returns. When the
+SIGINT handler calls `os.Exit(130)`, every copy in flight dies mid-write and
+leaves a short file behind at the final name. The `ctx.Err()` guards in the
+worker (`main.go:695`, `main.go:700`) only stop copies that have not started.
 
-Not observed in practice, and `go test -race` does not reach it because the
-interrupt path has no test. The race is real regardless — the handler can read a
-torn or stale slice header.
+The re-run cannot tell: `missingByDst` decides what to copy with a bare
+`os.Stat`, so a truncated file counts as present and is never re-copied or
+verified. It survives into `checksums.b3` the next time `-checksum` runs, at
+which point the manifest agrees with the corrupt bytes.
 
-There is a related correctness wrinkle at `main.go:791-794`: the pair is cleared
-to `nil, false` only when proxies run. With `-proxy=false` it stays pointing at
-the just-completed, fully verified mission, so a Ctrl-C in the window after
-`runDay` finishes offers to delete good footage.
+Reachable from either answer to the delete prompt — `n` keeps the partial
+mission by design — and from the no-mission-in-flight path at `main.go:589`,
+which exits without prompting at all.
 
-**Fix direction.** A mutex, or move the state into a small struct behind one.
-Clearing the pair unconditionally at the end of `runDay` fixes the second half.
+**Fix direction.** Copy to a temporary name in the destination directory and
+rename once `Sync` and `Chmod` have returned, so an interrupted copy leaves
+either nothing or a complete file. `.qcp-part-*` leftovers would then need
+skipping in the scans and sweeping on the next run. Threading a context into
+`job` would narrow the window but not close it — the process can die between the
+last write and the removal.
 
 ---
 
@@ -77,6 +82,41 @@ than reusing.
 ---
 
 ## Fixed
+
+### The ingest interrupt state was shared with the signal handler unguarded
+
+`intrDstRoots` and `intrIsNew` were plain variables in `runIngest`, written by
+the main goroutine before each day's copy and read by the SIGINT handler on its
+own goroutine with nothing between them. The handler decides from that pair
+whether to offer to delete the partial mission and hand the mission number back,
+so a torn slice header or a stale `isNew` picks the wrong mission to remove or
+reverts a counter that was never minted. Never observed — `go test -race` never
+reached it, because the interrupt path had no test — but real regardless.
+
+Fixed by moving the pair into an `interruptTarget` (`main.go:160`) whose `set`,
+`clear` and `get` all take one mutex. `get` returns both fields under the same
+lock, so the handler cannot pair one mission's roots with another's `isNew`, and
+it is called once at the top of the handler: what the prompt offers to delete is
+the mission that was in flight when the signal arrived.
+
+The second half of the finding was the clearing. `runDay` reset the pair only
+inside `if !proxyOff`, so with `-proxy=false` it stayed pointing at a mission
+that was by then copied *and verified* — a Ctrl-C in the window before the next
+day started offered to delete good footage. `intr.clear()` now runs
+unconditionally once the verify phase and the manifest write are done, with the
+proxy comment split from it: the footage being safe is why the target is
+cleared, and proxies being cheap to regenerate is why the tier that follows is
+not guarded.
+
+Regression test in `main_test.go`; the setter alternates missions whose `isNew`
+is derivable from their roots, so without the mutex `-race` reports the race and
+a torn pair fails the check independently.
+
+Left alone: the handler still calls `os.Exit(130)` while the copy pools are
+live, so copies in flight die mid-write. Reading that path is what turned up
+finding 1 above — the partial files they leave are indistinguishable from
+complete ones on the next run — but that is a fix to the copy path, not to the
+interrupt state.
 
 ### A look edited in place never reached a proxy
 

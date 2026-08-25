@@ -157,6 +157,34 @@ func parseMissionList(s string) ([]int, bool) {
 	return nums, true
 }
 
+// interruptTarget is the mission the SIGINT handler would offer to delete: the
+// destination roots written so far, and whether the mission number was minted
+// for it and so has to be given back. The main goroutine sets it before each
+// day's copy and clears it once that footage is copied and verified; the
+// handler runs on its own goroutine, so both sides go through the mutex.
+type interruptTarget struct {
+	mu       sync.Mutex
+	dstRoots []string
+	isNew    bool
+}
+
+func (t *interruptTarget) set(dstRoots []string, isNew bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.dstRoots, t.isNew = dstRoots, isNew
+}
+
+// clear marks that there is nothing an interrupt should offer to delete.
+func (t *interruptTarget) clear() { t.set(nil, false) }
+
+// get returns the pair as one snapshot, so the handler cannot act on the roots
+// of one mission with the isNew of another.
+func (t *interruptTarget) get() (dstRoots []string, isNew bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.dstRoots, t.isNew
+}
+
 func main() {
 	flag.Usage = usage
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -549,10 +577,7 @@ func main() {
 	}
 
 	// Shared interrupt state — updated before each day's copy begins.
-	var (
-		intrDstRoots []string
-		intrIsNew    bool
-	)
+	var intr interruptTarget
 
 	ctx, cancel := context.WithCancel(context.Background())
 	sigCh := make(chan os.Signal, 1)
@@ -561,7 +586,8 @@ func main() {
 		<-sigCh
 		signal.Stop(sigCh)
 		cancel()
-		if len(intrDstRoots) == 0 {
+		dstRoots, isNew := intr.get()
+		if len(dstRoots) == 0 {
 			fmt.Println()
 			os.Exit(130)
 		}
@@ -577,11 +603,11 @@ func main() {
 			}
 		}
 		if resp == "y" {
-			for _, d := range intrDstRoots {
+			for _, d := range dstRoots {
 				os.RemoveAll(d)
 				fmt.Printf("removed: %s\n", d)
 			}
-			if intrIsNew {
+			if isNew {
 				if err := revertMission(year); err != nil {
 					fmt.Printf("err reverting counter: %v\n", err)
 				} else {
@@ -784,12 +810,14 @@ func main() {
 		copied := fmtSize(uint64(total.Load()) / uint64(len(dstRoots)))
 		fmt.Printf("\n  %s  %s  %s  %s\n", green("✓"), bold("Done"), dim(copied+" copied and verified  →"), bold(missionSlug))
 
-		// Generate the browse tier now, while the cards are still mounted.
 		// The footage is copied and verified at this point, so an interrupt
-		// from here on must not offer to delete the mission — proxies are
-		// derived and cost nothing to regenerate.
+		// from here on must not offer to delete the mission.
+		intr.clear()
+
+		// Generate the browse tier now, while the cards are still mounted.
+		// Proxies are derived and cost nothing to regenerate, so they are not
+		// worth guarding either.
 		if !proxyOff {
-			intrDstRoots, intrIsNew = nil, false
 			runIngestProxies(cfg, year, missionSlug)
 		}
 	}
@@ -861,8 +889,7 @@ func main() {
 			}
 		}
 
-		intrDstRoots = dstRoots
-		intrIsNew = !isAppend
+		intr.set(dstRoots, !isAppend)
 
 		runDay(scanned, missionSlug, dstRoots, dstNames, dstBase)
 
@@ -950,8 +977,7 @@ func main() {
 
 		for _, p := range plan {
 			fmt.Printf("\n  %s  %s\n", blue("▶"), bold(p.slug))
-			intrDstRoots = p.dstRoots
-			intrIsNew = p.isNew
+			intr.set(p.dstRoots, p.isNew)
 			runDay(p.day.cards, p.slug, p.dstRoots, p.dstNames, p.dstBase)
 		}
 	}
