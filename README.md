@@ -145,7 +145,7 @@ qcp -evict 42 -from LAPTOP            # only from one hot drive
 
 `-sync` copies from hot drives to cold drives — only cold drives whose `year_from`/`year_to` range covers the target year receive data. Cross-checks file manifests across hot drives before copying; conflicts are reported and skipped. Partial missions are handled: only missing files are copied, so it's safe to run again after adding files to an existing mission (e.g. edit exports).
 
-`-replicate` copies missions between cold drives. Any mounted cold drive with the data is a valid source; only cold drives scoped for the year are destinations. Use this to populate a second cold drive from an existing one, or to catch up a drive that wasn't present during `-sync`.
+`-replicate` copies missions between cold drives. Any mounted cold drive with the data is a valid source — the one holding the most of a given mission is the one it is read from, so a drive that is itself short of a file gets it filled in rather than defining the mission; only cold drives scoped for the year are destinations. Use this to populate a second cold drive from an existing one, or to catch up a drive that wasn't present during `-sync`.
 
 `-pull` selects whichever cold drive has the most files as the source, avoiding partial copies from an incompletely synced drive.
 

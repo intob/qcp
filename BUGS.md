@@ -16,6 +16,35 @@ being written.
 
 ## Fixed
 
+### `-replicate` could never fill a gap in the first cold drive
+
+`runReplicate` took the first cold drive holding a mission as its source
+(`replicate.go:108`) and diffed every other copy against it. A file missing *on
+that drive* was therefore not missing at all — the drive listed first in the
+config silently defined the mission — and the run printed `cold drives are in
+sync` over an archive that was short.
+
+Confirmed with `ARCHIVE_01` holding `{a.mxf}` and `ARCHIVE_02` holding
+`{a.mxf, b.mxf}`, config order as written: no jobs, "cold drives are in sync",
+`b.mxf` still absent. README.md:148 sells this exact case — "to catch up a drive
+that wasn't present during `-sync`" — and it worked only when the stale drive
+happened to sort second.
+
+Fixed by keeping the fullest copy as the source, the same rule and the same
+reason as `resolveSource` (`pull.go:404`) on the pull side: a partially-synced
+drive must never be silently used as the source. The cost is a directory walk
+per cold copy rather than per mission, which is what `-sync` already pays across
+its primaries.
+
+Regression test in `replicate_test.go`, running the command end to end on two
+temporary drives and asserting both that the file lands and that it reaches the
+receiving drive's `checksums.b3` like any other transfer's.
+
+Left alone: two cold copies that disagree about a file's *contents* are still
+not detected here — both hold it by name, so neither is missing anything.
+`-check` and `-verify` are the tools for that, and `-sync`'s manifest
+cross-check has no counterpart on this side.
+
 ### A failed proxy re-bake recorded itself as up to date
 
 `generateClip` stamps the new `SrcHash` (`proxy.go:819`) and `Transform`

@@ -93,7 +93,14 @@ func runReplicate(cfg Config, year int, skipConf bool) bool {
 		return true
 	}
 
-	// build mission → source map: first cold drive that has it wins
+	// Build mission → source map: the cold drive holding the most of it wins.
+	//
+	// Taking the first drive that had it meant a mission could never be filled
+	// in *on* that drive — every other copy was diffed against it, so the one
+	// that came first in the config silently defined the mission and a drive
+	// that was absent during a -sync stayed short forever. Same rule and same
+	// reason as resolveSource on the pull side: a partially-synced drive must
+	// not be used as the source.
 	type missionSource struct {
 		srcVol  string
 		srcBase string
@@ -105,9 +112,6 @@ func runReplicate(cfg Config, year int, skipConf bool) bool {
 	var hasGhosts bool
 	for _, c := range coldDrives {
 		for slug := range c.missions {
-			if _, seen := missionSources[slug]; seen {
-				continue
-			}
 			srcDir := filepath.Join(c.yearDir, slug)
 			files, size, ghosts, err := missionFiles(srcDir)
 			if err != nil {
@@ -118,6 +122,9 @@ func runReplicate(cfg Config, year int, skipConf bool) bool {
 				fmt.Printf("%s %s on %s: %d file(s) in checksums.b3 missing from disk — replicated drives will be incomplete\n",
 					red("ERROR"), slug, bold(c.name()), ghosts)
 				hasGhosts = true
+			}
+			if existing, seen := missionSources[slug]; seen && len(existing.files) >= len(files) {
+				continue
 			}
 			missionSources[slug] = missionSource{c.name(), c.basePath(), srcDir, files, size}
 		}
