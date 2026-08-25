@@ -4,49 +4,16 @@ Findings from a read of the whole tree on 2026-08-25. `go build`, `go vet` and
 `go test ./...` are all clean, so none of these are caught by the existing
 suite. Line numbers are against commit `d7d6706` plus the progress-bar fix.
 
-Two findings from that pass are already fixed and are recorded at the bottom for
-context — they explain why `progress.go` and the `metadataFiles` set in `util.go`
-look the way they do.
+Findings that have since been fixed are recorded at the bottom for context —
+they explain why `progress.go`, the `metadataFiles` set in `util.go` and the hot
+manifest read in `evict.go` look the way they do.
 
 Ordered by severity. Each entry says what is wrong, how it was confirmed, and
 what a fix would have to do; none of them have been attempted.
 
 ---
 
-## 1. `-evict`'s manifest cross-check is vacuous when the hot copy has no manifest
-
-`evict.go:209` — `qualifyBackups`
-
-```go
-conflicts += len(manifestConflicts(readChecksumFile(filepath.Join(t.dir, "checksums.b3")), manifest))
-```
-
-`readChecksumFile` returns an empty map for a file that is missing or will not
-parse, and `manifestConflicts` iterates the *reference* map — so an absent hot
-manifest yields zero conflicts and the cold copy qualifies.
-
-The rest of the bar still holds (every hot file is on the cold disk, listed in
-the cold manifest, and re-read and hashed unless `-quick`), but with no hot
-manifest nothing ever ties the cold bytes to the hot ones. `-evict` is the only
-command that deletes data, so "I could not compare" should refuse rather than
-pass.
-
-The same wording — "the two manifests must agree wherever both mention a file"
-in README.md — means the check also degrades quietly for individual files: a
-mission that had edit exports added after ingest has them in the cold manifest
-(written by `-sync`) but not the hot one, so those files are cross-checked
-against nothing. That case is less alarming because `-sync` verified them on the
-way over.
-
-**Fix direction.** Treat a missing or unreadable hot `checksums.b3` as a
-qualification failure with the same "run `-checksum NNN` first" note the cold
-side already produces at `evict.go:173`. Deciding whether to also require the
-hot manifest to *cover* every hot file is a judgement call — it would make
-`-evict` refuse missions with newly added, never-checksummed files.
-
----
-
-## 2. `-sync` uses `DriveConfig.Volume` instead of `name()`
+## 1. `-sync` uses `DriveConfig.Volume` instead of `name()`
 
 `sync.go:118, 123, 129, 136, 214`
 
@@ -71,7 +38,7 @@ reverse.
 
 ---
 
-## 3. A look edited in place is never picked up
+## 2. A look edited in place is never picked up
 
 `colour.go:282` — `ensureLUT`, with `lookTransform` at `colour.go:244`
 
@@ -99,7 +66,7 @@ accumulate under their old hashes — decide whether that matters.
 
 ---
 
-## 4. Data race on the ingest interrupt state
+## 3. Data race on the ingest interrupt state
 
 `main.go:553-554`, written at `792`, `864-865`, `953-954`, read at `564`, `580`, `584`
 
@@ -122,7 +89,7 @@ Clearing the pair unconditionally at the end of `runDay` fixes the second half.
 
 ---
 
-## 5. Interrupt during the verify phase is not honoured in `-sync` / `-replicate`
+## 4. Interrupt during the verify phase is not honoured in `-sync` / `-replicate`
 
 `sync.go:336`, `replicate.go:317`
 
@@ -140,7 +107,7 @@ inconsistency between the three, not a design decision.
 
 ---
 
-## 6. `-list` and `-status` do not filter to numbered missions
+## 5. `-list` and `-status` do not filter to numbered missions
 
 `status.go:84` (`runStatus`), `status.go:406` (`runList`)
 
@@ -162,6 +129,30 @@ than reusing.
 ---
 
 ## Fixed
+
+### `-evict` deleted a hot copy it had never compared against the cold one
+
+`qualifyBackups` (`evict.go:209`) cross-checked the two manifests with
+`manifestConflicts(readChecksumFile(<hot>/checksums.b3), manifest)`.
+`readChecksumFile` returns an empty map for a file that is missing or will not
+parse, and `manifestConflicts` iterates the *reference* map, so a hot copy with
+no manifest yielded zero conflicts and the cold copy qualified. The rest of the
+bar still held — every hot file on the cold disk, in the cold manifest, and
+re-read and hashed unless `-quick` — but nothing tied the cold bytes to the hot
+ones. `-evict` is the only command that deletes data, so "I could not compare"
+must refuse.
+
+Fixed by reading every hot manifest once, up front, and returning the same
+"run `-checksum NNN` first" note the cold side already produces at
+`evict.go:173` when one is missing or unreadable. The conflict loop then walks
+those maps instead of re-reading the file per cold drive. Regression test in
+`evict_test.go`; without the guard a manifest-less hot copy qualifies.
+
+Left alone: the hot manifest is still not required to *cover* every hot file, so
+files added after the last `-checksum` — edit exports, say — are cross-checked
+against nothing. `-sync` verified those on the way over, and requiring coverage
+would make `-evict` refuse missions that are merely new rather than suspect.
+
 
 ### `-reorganise` moved `checksums.b3` into the new mission as if it were footage
 

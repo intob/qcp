@@ -42,10 +42,11 @@ type evictPlan struct {
 // runEvict deletes missions from hot drives once cold copies are proven good.
 //
 // "Proven" means, for every cold copy relied on: every file on the hot copy is
-// listed in that cold copy's checksums.b3, the two manifests agree wherever
-// both mention a file, and — unless quick is set — every file the manifest
-// lists is re-read from the cold drive and hashed. Nothing is deleted until
-// every mission in the batch has cleared that bar.
+// listed in that cold copy's checksums.b3, every hot copy has a checksums.b3 of
+// its own, the two manifests agree wherever both mention a file, and — unless
+// quick is set — every file the manifest lists is re-read from the cold drive
+// and hashed. Nothing is deleted until every mission in the batch has cleared
+// that bar.
 func runEvict(cfg Config, missions []int, year int, from []string, minCopies int, quick, skipConf bool) {
 	yearStr := strconv.Itoa(year)
 
@@ -157,8 +158,29 @@ func qualifyBackups(cfg Config, yearStr, slug string, num int, targets []evictTa
 		}
 	}
 
-	var backups []evictBackup
 	var notes []string
+
+	// The manifest cross-check below is only worth anything if the hot copies
+	// have manifests of their own: readChecksumFile yields an empty map for a
+	// file that is missing or unparseable, and manifestConflicts walks the hot
+	// side, so an absent hot manifest reports no conflicts rather than no
+	// comparison. -evict is the only command that deletes data, so "I could
+	// not compare" refuses here.
+	hotManifests := make([]map[string]string, 0, len(targets))
+	for _, t := range targets {
+		m := readChecksumFile(filepath.Join(t.dir, "checksums.b3"))
+		if len(m) == 0 {
+			notes = append(notes, fmt.Sprintf("%s has no checksums.b3 — run %s first",
+				bold(t.vol), bold(fmt.Sprintf("-checksum %03d", num))))
+			continue
+		}
+		hotManifests = append(hotManifests, m)
+	}
+	if len(notes) > 0 {
+		return nil, notes
+	}
+
+	var backups []evictBackup
 	for _, d := range cfg.Drives {
 		if d.Role != "cold" || len(backups) >= minCopies {
 			continue
@@ -205,8 +227,8 @@ func qualifyBackups(cfg Config, yearStr, slug string, num int, targets []evictTa
 
 		// the two copies must not disagree about any file they both record
 		var conflicts int
-		for _, t := range targets {
-			conflicts += len(manifestConflicts(readChecksumFile(filepath.Join(t.dir, "checksums.b3")), manifest))
+		for _, hot := range hotManifests {
+			conflicts += len(manifestConflicts(hot, manifest))
 		}
 		if conflicts > 0 {
 			notes = append(notes, fmt.Sprintf("%s records %d file(s) with different hashes than the hot copy — run %s",
