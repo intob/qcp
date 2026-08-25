@@ -61,6 +61,16 @@ var junkFiles = map[string]bool{
 	"desktop.ini": true,
 }
 
+// metadataFiles are qcp's own bookkeeping files. They describe the directory
+// they sit in, so anything that moves files between directories must leave
+// them behind rather than carry them along as if they were footage.
+var metadataFiles = map[string]bool{
+	"checksums.b3":    true,
+	proxyManifestName: true,
+	proxyMetaName:     true,
+	flagsFileName:     true,
+}
+
 // isJunk reports whether a file or directory name should be treated as junk.
 // This covers exact matches (junkDirs, junkFiles) as well as Synology resource
 // fork entries which are named <original>@SynoResource.

@@ -232,7 +232,7 @@ func scanUnorganised(yearDir string, regroup bool) ([]fileWithDate, error) {
 				return nil
 			}
 		}
-		if junkFiles[d.Name()] {
+		if junkFiles[d.Name()] || metadataFiles[d.Name()] {
 			return nil
 		}
 		rawFiles = append(rawFiles, rawFile{path, rel, d.Name()})

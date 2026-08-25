@@ -4,56 +4,16 @@ Findings from a read of the whole tree on 2026-08-25. `go build`, `go vet` and
 `go test ./...` are all clean, so none of these are caught by the existing
 suite. Line numbers are against commit `d7d6706` plus the progress-bar fix.
 
-One finding from that pass is already fixed and is recorded at the bottom for
-context — it explains why `progress.go` looks the way it does.
+Two findings from that pass are already fixed and are recorded at the bottom for
+context — they explain why `progress.go` and the `metadataFiles` set in `util.go`
+look the way they do.
 
 Ordered by severity. Each entry says what is wrong, how it was confirmed, and
 what a fix would have to do; none of them have been attempted.
 
 ---
 
-## 1. `-reorganise` moves `checksums.b3` into the new mission as if it were footage
-
-`organise.go:238` — `scanUnorganised`
-
-`scanUnorganised` filters dotfiles and `junkFiles` (`organise.go:235`) but
-nothing excludes `checksums.b3`. With `regroup=true` it descends into existing
-numbered mission directories, so it picks up each mission's manifest, dates it
-by mtime like any other file, and plans a move for it.
-
-**Confirmed** with a throwaway test over a year directory holding `001_Old` and
-`002_Older`, both regrouping into one season:
-
-```
-plan: 001_Old/checksums.b3   -> 003_Summer/001_Old_checksums.b3
-plan: 002_Older/checksums.b3 -> 003_Summer/002_Older_checksums.b3
-AFTER: 003_Summer/001_Old_A.MP4
-AFTER: 003_Summer/001_Old_checksums.b3
-AFTER: 003_Summer/002_Older_A.MP4
-AFTER: 003_Summer/002_Older_checksums.b3
-```
-
-The manifests survive the move because `buildOrganisePlan`'s collision rule
-renames them (two files share the basename `checksums.b3`), which puts them out
-of reach of the stale-manifest removal at `organise.go:439` — that only unlinks
-a file still called `checksums.b3`.
-
-They then become permanent files inside the mission: `-checksum` hashes them
-into the new manifest, `-list` counts them, and `-sync`/`-replicate` carry them
-to cold storage as footage.
-
-With exactly one source mission it happens to come out right — the file keeps
-its name and is deleted as stale — which is probably why it has gone unnoticed.
-
-**Fix direction.** Skip `checksums.b3` in `scanUnorganised` the way `missionFiles`
-does. Worth checking whether `.qcp-flags.json` needs the same treatment; it is
-a dotfile so the existing filter already catches it, but `proxies.json` and
-`proxies.b3` would be caught by the same walk if a proxy tree ever moved under
-a year directory.
-
----
-
-## 2. `-evict`'s manifest cross-check is vacuous when the hot copy has no manifest
+## 1. `-evict`'s manifest cross-check is vacuous when the hot copy has no manifest
 
 `evict.go:209` — `qualifyBackups`
 
@@ -86,7 +46,7 @@ hot manifest to *cover* every hot file is a judgement call — it would make
 
 ---
 
-## 3. `-sync` uses `DriveConfig.Volume` instead of `name()`
+## 2. `-sync` uses `DriveConfig.Volume` instead of `name()`
 
 `sync.go:118, 123, 129, 136, 214`
 
@@ -111,7 +71,7 @@ reverse.
 
 ---
 
-## 4. A look edited in place is never picked up
+## 3. A look edited in place is never picked up
 
 `colour.go:282` — `ensureLUT`, with `lookTransform` at `colour.go:244`
 
@@ -139,7 +99,7 @@ accumulate under their old hashes — decide whether that matters.
 
 ---
 
-## 5. Data race on the ingest interrupt state
+## 4. Data race on the ingest interrupt state
 
 `main.go:553-554`, written at `792`, `864-865`, `953-954`, read at `564`, `580`, `584`
 
@@ -162,7 +122,7 @@ Clearing the pair unconditionally at the end of `runDay` fixes the second half.
 
 ---
 
-## 6. Interrupt during the verify phase is not honoured in `-sync` / `-replicate`
+## 5. Interrupt during the verify phase is not honoured in `-sync` / `-replicate`
 
 `sync.go:336`, `replicate.go:317`
 
@@ -180,7 +140,7 @@ inconsistency between the three, not a design decision.
 
 ---
 
-## 7. `-list` and `-status` do not filter to numbered missions
+## 6. `-list` and `-status` do not filter to numbered missions
 
 `status.go:84` (`runStatus`), `status.go:406` (`runList`)
 
@@ -202,6 +162,28 @@ than reusing.
 ---
 
 ## Fixed
+
+### `-reorganise` moved `checksums.b3` into the new mission as if it were footage
+
+`scanUnorganised` (`organise.go:238`) filtered dotfiles and `junkFiles` but
+nothing excluded the manifest, so with `regroup=true` — where the walk descends
+into existing numbered missions — it dated each mission's `checksums.b3` by
+mtime and planned a move for it. With two or more source missions the plan's
+collision rule renamed them, which put them out of reach of the stale-manifest
+removal at `organise.go:439` (that only unlinks a file still called
+`checksums.b3`), and they became permanent files inside the new mission:
+`-checksum` hashed them, `-list` counted them, `-sync` carried them to cold
+storage. One source mission happened to come out right, which is why it went
+unnoticed.
+
+Fixed by adding a `metadataFiles` set in `util.go` — `checksums.b3`,
+`proxies.b3`, `proxies.json`, `.qcp-flags.json` — and skipping it in
+`scanUnorganised` alongside `junkFiles`. The proxy files were only reachable if
+a proxy tree ever moved under a year directory, and `.qcp-flags.json` was
+already caught by the dotfile filter; naming all four in one place is what makes
+the rule legible. Regression test in `organise_test.go`; without the guard the
+scan returns six manifests as well as the two clips.
+
 
 ### `-ingest` hung forever when a hot drive was already up to date
 
