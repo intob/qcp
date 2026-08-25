@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -75,5 +76,35 @@ func TestMissionDirPredicates(t *testing.T) {
 		if got := isNumberedMission(c.name); got != c.numbered {
 			t.Errorf("isNumberedMission(%q) = %v, want %v", c.name, got, c.numbered)
 		}
+	}
+}
+
+// missionDirs is the one enumeration every command that hashes, checks,
+// verifies, indexes or collects flags now shares. 000_* used to be filtered out
+// at each of those sites with isNumberedMission, so -sync wrote the copies and
+// nothing ever checked them.
+func TestMissionDirsIncludes000AndSkipsStrays(t *testing.T) {
+	year := t.TempDir()
+	for _, name := range []string{
+		"000_Edits", "042_Altissimo_with_Anton", "007_Bond",
+		"_unsorted", "proxies", "notamission",
+	} {
+		if err := os.MkdirAll(filepath.Join(year, name), 0777); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// a file whose name would parse as a mission is still not a directory
+	if err := os.WriteFile(filepath.Join(year, "099_File"), nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := missionDirs(year)
+	want := []string{"000_Edits", "007_Bond", "042_Altissimo_with_Anton"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("missionDirs = %v, want %v", got, want)
+	}
+
+	if got := missionDirs(filepath.Join(year, "nosuchdir")); got != nil {
+		t.Errorf("missionDirs of an unreadable directory = %v, want nil", got)
 	}
 }

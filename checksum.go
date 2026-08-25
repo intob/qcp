@@ -56,14 +56,8 @@ func runChecksumYear(cfg Config, year int) bool {
 
 	allSlugs := make(map[string]bool)
 	for _, dy := range drives {
-		entries, err := os.ReadDir(dy.yearDir)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if e.IsDir() && isNumberedMission(e.Name()) {
-				allSlugs[e.Name()] = true
-			}
+		for _, slug := range missionDirs(dy.yearDir) {
+			allSlugs[slug] = true
 		}
 	}
 	var slugs []string

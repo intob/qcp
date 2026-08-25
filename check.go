@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -333,35 +332,23 @@ func runCheck(cfg Config, year int) bool {
 	refBySlug := make(map[string]refMission)
 	for _, h := range hotDrives {
 		hotYearDir := filepath.Join(h.basePath(), h.Root, yearStr)
-		entries, err := os.ReadDir(hotYearDir)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if e.IsDir() && isNumberedMission(e.Name()) {
-				if _, seen := refBySlug[e.Name()]; !seen {
-					refBySlug[e.Name()] = refMission{
-						dir: filepath.Join(hotYearDir, e.Name()),
-						vol: h.name(),
-					}
+		for _, slug := range missionDirs(hotYearDir) {
+			if _, seen := refBySlug[slug]; !seen {
+				refBySlug[slug] = refMission{
+					dir: filepath.Join(hotYearDir, slug),
+					vol: h.name(),
 				}
 			}
 		}
 	}
 	for _, c := range coldDrives {
 		coldYearDir := filepath.Join(c.basePath(), c.Root, yearStr)
-		entries, err := os.ReadDir(coldYearDir)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if e.IsDir() && isNumberedMission(e.Name()) {
-				if _, seen := refBySlug[e.Name()]; !seen {
-					refBySlug[e.Name()] = refMission{
-						dir:     filepath.Join(coldYearDir, e.Name()),
-						vol:     c.name(),
-						coldVol: c.name(),
-					}
+		for _, slug := range missionDirs(coldYearDir) {
+			if _, seen := refBySlug[slug]; !seen {
+				refBySlug[slug] = refMission{
+					dir:     filepath.Join(coldYearDir, slug),
+					vol:     c.name(),
+					coldVol: c.name(),
 				}
 			}
 		}

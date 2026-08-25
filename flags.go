@@ -203,21 +203,14 @@ func (s *flagStore) all() []flaggedClip {
 			if !y.IsDir() || err != nil {
 				continue
 			}
-			missions, err := os.ReadDir(filepath.Join(root, y.Name()))
-			if err != nil {
-				continue
-			}
-			for _, m := range missions {
-				if !m.IsDir() || !isNumberedMission(m.Name()) {
-					continue
-				}
-				dir := filepath.Join(root, y.Name(), m.Name())
+			for _, slug := range missionDirs(filepath.Join(root, y.Name())) {
+				dir := filepath.Join(root, y.Name(), slug)
 				f, err := readMissionFlags(dir)
 				if err != nil || len(f.Flags) == 0 {
 					continue
 				}
 				for rel, c := range f.Flags {
-					key := strconv.Itoa(year) + "/" + m.Name() + "/" + rel
+					key := strconv.Itoa(year) + "/" + slug + "/" + rel
 					if seen[key] {
 						continue
 					}
@@ -227,7 +220,7 @@ func (s *flagStore) all() []flaggedClip {
 						colour = flagColour
 					}
 					out = append(out, flaggedClip{
-						Year: year, Slug: m.Name(), Rel: rel,
+						Year: year, Slug: slug, Rel: rel,
 						Path: filepath.Join(dir, rel), Colour: colour,
 					})
 				}

@@ -172,14 +172,8 @@ func runVerifyYear(cfg Config, year int) bool {
 		if !dirExists(base) {
 			continue
 		}
-		entries, err := os.ReadDir(filepath.Join(base, d.Root, yearStr))
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if e.IsDir() && isNumberedMission(e.Name()) {
-				slugSet[e.Name()] = true
-			}
+		for _, slug := range missionDirs(filepath.Join(base, d.Root, yearStr)) {
+			slugSet[slug] = true
 		}
 	}
 	var slugs []string

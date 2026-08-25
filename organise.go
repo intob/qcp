@@ -531,6 +531,27 @@ func isMissionDir(name string) bool {
 	return ok
 }
 
+// missionDirs lists the mission directories directly under a year directory,
+// sorted, 000_* included. Every command that enumerates whatever is on the
+// drive goes through this, so they all agree on what a mission is; only the
+// ones that resolve a mission *number* use isNumberedMission instead. An
+// unreadable directory yields nothing, matching the per-site ReadDir errors it
+// replaces.
+func missionDirs(yearDir string) []string {
+	entries, err := os.ReadDir(yearDir)
+	if err != nil {
+		return nil
+	}
+	var slugs []string
+	for _, e := range entries {
+		if e.IsDir() && isMissionDir(e.Name()) {
+			slugs = append(slugs, e.Name())
+		}
+	}
+	sort.Strings(slugs)
+	return slugs
+}
+
 func parseMissionNum(name string) (int, bool) {
 	parts := strings.SplitN(name, "_", 2)
 	if len(parts) < 2 {

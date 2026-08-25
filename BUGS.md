@@ -1,44 +1,17 @@
-# Open bugs
+# Bugs
 
 Findings from a read of the whole tree on 2026-08-25. `go build`, `go vet` and
-`go test ./...` are all clean, so none of these are caught by the existing
+`go test ./...` were all clean, so none of these were caught by the existing
 suite. Line numbers are against commit `d7d6706` plus the progress-bar fix.
 
-Findings that have since been fixed are recorded at the bottom for context —
+No open findings remain from that read. The fixed entries are kept for context —
 they explain why `progress.go`, the `metadataFiles` set in `util.go`, the hot
 manifest read in `evict.go`, the `name()` calls in `sync.go`, the hashed look
 IDs in `colour.go`, the `interruptTarget` in `main.go`, the `.qcp-part-`
 temporaries in `copy.go`, the verify-phase gates in `sync.go`, `replicate.go`
-and `main.go` and the `isMissionDir` predicate in `organise.go` look the way
-they do.
-
-Ordered by severity. Each entry says what is wrong, how it was confirmed, and
-what a fix would have to do; none of the open ones have been attempted.
-
----
-
-## 1. `000_*` missions are never hashed, checked or verified
-
-`checksum.go:64`, `check.go:341`, `check.go:358`, `verify.go:180`,
-`index.go:180`, `flags.go:211`
-
-Noticed while fixing the listing filter below. README.md says `000_*`
-directories "are synced like any mission but cannot be addressed by
-mission-number commands", and `-sync` (`sync.go:56`) does carry them: it takes
-every directory under the year that is not the proxy tree. But every command
-that enumerates missions for itself filters with `isNumberedMission`, which
-requires `n > 0`, so `000_Edits` gets no `checksums.b3` from `-checksum` (both
-the year-wide walk and a targeted `-checksum NNN`, which cannot name it), is
-not compared by `-check`, not re-hashed by `-verify`, not indexed, and its
-flags are not collected. `-sync` writes the copies; nothing ever checks them.
-
-**Fix direction.** Split the same way `-list` and `-status` were split below:
-the commands that operate on *whatever is on the drive* want `isMissionDir`,
-and only the ones that resolve a mission *number* — `-proxy`
-(`proxy.go:629`) and `-renumber` (`renumber.go:38`) — want
-`isNumberedMission`. Worth checking `-index` separately: `missionNum`
-(`index.go:97`) returns 0 for a `000_*` slug, which is honest, but the sort and
-the URL scheme may assume numbers are unique.
+and `main.go` and the `isMissionDir` predicate and `missionDirs` helper in
+`organise.go` look the way they do. Each entry says what was wrong, how it was
+confirmed, and what the fix does, newest first.
 
 ---
 
@@ -74,6 +47,49 @@ is called at the top of the handler, so the snapshot is taken before
 stops the goroutine, it does not undo the copies in flight; those are already
 safe by the `.qcp-part-` rename.
 
+### `000_*` missions were never hashed, checked or verified
+
+README.md says `000_*` directories "are synced like any mission but cannot be
+addressed by mission-number commands", and `-sync` (`sync.go:56`) did carry
+them: it takes every directory under the year that is not the proxy tree. But
+every command that enumerated missions for itself filtered with
+`isNumberedMission`, which requires `n > 0`, so `000_Edits` got no
+`checksums.b3` from `-checksum` (both the year-wide walk and a targeted
+`-checksum NNN`, which cannot name it), was not compared by `-check`, not
+re-hashed by `-verify`, not indexed, and its flags were not collected. `-sync`
+wrote the copies; nothing ever checked them. Noticed while fixing the listing
+filter below.
+
+Fixed by splitting the same way `-list` and `-status` were split: the commands
+that operate on *whatever is on the drive* want `isMissionDir`, and only the
+ones that resolve a mission *number* — `-proxy` (`proxy.go:629`) and
+`-renumber` (`renumber.go:38`) — want `isNumberedMission`. Rather than change
+the predicate at six call sites and leave six copies of the same walk, the walk
+itself became one helper: `missionDirs` (`organise.go:540`) reads a year
+directory and returns its mission slugs sorted, and `-checksum`, `-check` (both
+the hot and the cold pass), `-verify`, `-index` and the flag store all go
+through it. An enumeration that disagrees with the others is now a change to
+one function rather than a predicate someone forgot to update.
+
+`-index` was worth the separate look the finding asked for. `missionNum`
+(`index.go:97`) returns 0 for a `000_*` slug, which is honest, and the URL
+scheme turned out not to care — `indexhtml.go` keys clips and stills by
+`year/slug/rel` throughout, never by number. The sort did care: it was a
+`sort.Slice` on `Num` alone, which is not stable, so two `000_*` missions came
+out in arbitrary order. It now breaks ties on the slug.
+
+Regression test in `organise_test.go` on `missionDirs` against a real temporary
+year directory: it asserts `000_Edits` comes back alongside the numbered
+missions while `_unsorted`, `proxies` and a plain file that parses as a mission
+name do not. It fails on the old predicate.
+
+Left alone: the three listing sites in `status.go` still inline the same walk,
+because each does more with the `DirEntry` than take its name and routing them
+through `missionDirs` would mean re-`Stat`ing. They already use `isMissionDir`,
+so they agree with the helper; they just do not share it. Also left: `slugNum`
+(`renumber.go:136`) and `missionNum` (`index.go:97`) are still two more copies
+of the parse, both called on already-filtered slugs.
+
 ### `-list` and `-status` showed any directory under the year as a mission
 
 `runStatus` (`status.go:84`) and `runList` (`status.go:406`) accepted every
@@ -98,9 +114,9 @@ Regression test in `organise_test.go` on the two predicates rather than on the
 listings: `runStatus` and `runList` print straight to stdout from real drives,
 so the rows themselves are not assertable without splitting them up first.
 
-Left alone: the other `isNumberedMission` callers were not touched, and the gap
-that leaves is now finding 1 above — a separate change with its own blast
-radius, since it decides what `-checksum` writes and what `-check` compares.
+Left alone at the time: the other `isNumberedMission` callers, and the gap that
+left is the `000_*` finding above — a separate change with its own blast radius,
+since it decides what `-checksum` writes and what `-check` compares.
 Also left: `slugNum` (`renumber.go:136`) and `missionNum` (`index.go:97`) are
 still two more copies of the same parse, differing only in what they return for
 a non-mission name. Both are called on already-filtered slugs, so neither is

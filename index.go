@@ -172,14 +172,8 @@ func runIndex(cfg Config, out string) bool {
 		// Which drives hold each mission, and how complete each copy is.
 		slugSet := make(map[string]bool)
 		for _, d := range mounted {
-			entries, err := os.ReadDir(filepath.Join(d.basePath(), d.Root, yearStr))
-			if err != nil {
-				continue
-			}
-			for _, e := range entries {
-				if e.IsDir() && isNumberedMission(e.Name()) {
-					slugSet[e.Name()] = true
-				}
+			for _, slug := range missionDirs(filepath.Join(d.basePath(), d.Root, yearStr)) {
+				slugSet[slug] = true
 			}
 		}
 		if len(slugSet) == 0 {
@@ -260,7 +254,15 @@ func runIndex(cfg Config, out string) bool {
 			}
 			iy.Missions = append(iy.Missions, m)
 		}
-		sort.Slice(iy.Missions, func(i, j int) bool { return iy.Missions[i].Num < iy.Missions[j].Num })
+		// 000_* missions all share number 0, so the slug breaks the tie —
+		// sort.Slice is not stable and the URL scheme is keyed by slug, not
+		// number, so numbers need not be unique.
+		sort.Slice(iy.Missions, func(i, j int) bool {
+			if iy.Missions[i].Num != iy.Missions[j].Num {
+				return iy.Missions[i].Num < iy.Missions[j].Num
+			}
+			return iy.Missions[i].Slug < iy.Missions[j].Slug
+		})
 		if len(iy.Missions) > 0 {
 			data.Years = append(data.Years, iy)
 		}
