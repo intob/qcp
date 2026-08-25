@@ -662,6 +662,12 @@ func main() {
 			}
 		}
 
+		// Anything under a partMarker name is from a run that was killed outright:
+		// job removes its own temporary when a copy fails.
+		if n := sweepCopyParts(dstRoots); n > 0 {
+			fmt.Printf("  %s cleared %d unfinished file(s) from an interrupted run\n", dim("·"), n)
+		}
+
 		fmt.Printf("\n  %s  %s  %s\n\n", blue("↓"), bold("Copying"), dim(fmt.Sprintf("%d files  %s  →  %d drive(s)", dayFiles, fmtSize(uint64(dayTotal)), len(dstRoots))))
 
 		p1 := mpb.NewWithContext(ctx, mpb.WithWidth(64))

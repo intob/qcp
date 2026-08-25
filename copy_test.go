@@ -7,7 +7,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/vbauerster/mpb/v8"
 
@@ -203,5 +205,128 @@ func TestHashFileMatchesCopy(t *testing.T) {
 	p.Wait()
 	if got != wantHex {
 		t.Errorf("hashFile (with bar) gave %s, want %s", got, wantHex)
+	}
+}
+
+// A copy that is killed outright must leave nothing at the destination name.
+// Everything that decides what still needs copying goes by that name alone, so
+// a truncated file sitting there would pass for a finished one forever: never
+// re-copied, never verified, and eventually hashed into checksums.b3 as if the
+// short bytes were the footage.
+//
+// The source is a fifo, which pins the timing: job cannot open it until this
+// goroutine does, and the write below cannot return until job has read it —
+// which is after the destination file, whatever its name, has been created.
+func TestJobLeavesNothingAtTheDestinationMidCopy(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "card.fifo")
+	if err := syscall.Mkfifo(src, 0644); err != nil {
+		t.Skipf("mkfifo unavailable: %v", err)
+	}
+	dst := filepath.Join(dir, "001_Mission", "GX010001.MP4")
+
+	payload := make([]byte, copyBufSize+4096)
+	fill(payload, 31)
+
+	done := make(chan *result, 1)
+	go func() { done <- job(src, dst, nil) }()
+
+	w, err := os.OpenFile(src, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(payload[:copyBufSize]); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mid-copy: the bytes written so far are on the disk under some name, and
+	// that name must not be the destination's.
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Error("a copy in flight is sitting at the destination name")
+	}
+	if _, err := os.Stat(partPath(dst)); err != nil {
+		t.Errorf("no temporary at %s mid-copy: %v", partPath(dst), err)
+	}
+
+	if _, err := w.Write(payload[copyBufSize:]); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+
+	var r *result
+	select {
+	case r = <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("copy never finished")
+	}
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("nothing at the destination after a finished copy: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Error("destination content differs from source")
+	}
+	if r.srcHash != hex.EncodeToString([]byte(refHash(payload))) {
+		t.Error("reported hash differs from hashing the source directly")
+	}
+	if _, err := os.Stat(partPath(dst)); !os.IsNotExist(err) {
+		t.Error("the temporary outlived the copy")
+	}
+}
+
+// The rename must not cost the destination the source's permissions, which are
+// applied to the temporary while it still has its own name.
+func TestJobKeepsSourceModeThroughTheRename(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "in.MP4")
+	if err := os.WriteFile(src, []byte("footage"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "out", "in.MP4")
+	if r := job(src, dst, nil); r.err != nil {
+		t.Fatal(r.err)
+	}
+	info, err := os.Stat(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0640 {
+		t.Errorf("destination mode %v, want %v", info.Mode().Perm(), os.FileMode(0640))
+	}
+}
+
+// While it exists a temporary must be invisible to the scans — findFiles is how
+// -checksum, -sync and -list all see a mission — and the next run into that
+// mission must clear it, since nothing else ever will.
+func TestPartFilesAreUnseenAndThenSwept(t *testing.T) {
+	dir := t.TempDir()
+	keep := filepath.Join(dir, "GX010001.MP4")
+	drop := partPath(filepath.Join(dir, "GX010002.MP4"))
+	for _, f := range []string{keep, drop} {
+		if err := os.WriteFile(f, []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	files, err := findFiles(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].rel != "GX010001.MP4" {
+		t.Errorf("scan returned %v, want the one finished clip", files)
+	}
+
+	// The same directory twice: a mission reached by two jobs is swept once.
+	if n := sweepCopyParts([]string{dir, dir}); n != 1 {
+		t.Errorf("swept %d file(s), want 1", n)
+	}
+	if _, err := os.Stat(drop); !os.IsNotExist(err) {
+		t.Error("the leftover temporary survived the sweep")
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Error("the sweep took a finished file with it")
 	}
 }

@@ -7,44 +7,17 @@ suite. Line numbers are against commit `d7d6706` plus the progress-bar fix.
 Findings that have since been fixed are recorded at the bottom for context —
 they explain why `progress.go`, the `metadataFiles` set in `util.go`, the hot
 manifest read in `evict.go`, the `name()` calls in `sync.go`, the hashed look
-IDs in `colour.go` and the `interruptTarget` in `main.go` look the way they do.
+IDs in `colour.go`, the `interruptTarget` in `main.go` and the `.qcp-part-`
+temporaries in `copy.go` look the way they do.
 
 Ordered by severity. Each entry says what is wrong, how it was confirmed, and
 what a fix would have to do; none of them have been attempted.
 
 ---
 
-## 1. An interrupted copy leaves a truncated file that the re-run then skips
+## 1. Interrupt during the verify phase is not honoured in `-sync` / `-replicate`
 
-`copy.go:38` (`job`), `main.go:656` (the `missingByDst` scan)
-
-`job` writes straight to the destination path, and `copy.go` takes no context —
-so the only cleanup is the `os.Remove(dst)` on its own error returns. When the
-SIGINT handler calls `os.Exit(130)`, every copy in flight dies mid-write and
-leaves a short file behind at the final name. The `ctx.Err()` guards in the
-worker (`main.go:695`, `main.go:700`) only stop copies that have not started.
-
-The re-run cannot tell: `missingByDst` decides what to copy with a bare
-`os.Stat`, so a truncated file counts as present and is never re-copied or
-verified. It survives into `checksums.b3` the next time `-checksum` runs, at
-which point the manifest agrees with the corrupt bytes.
-
-Reachable from either answer to the delete prompt — `n` keeps the partial
-mission by design — and from the no-mission-in-flight path at `main.go:589`,
-which exits without prompting at all.
-
-**Fix direction.** Copy to a temporary name in the destination directory and
-rename once `Sync` and `Chmod` have returned, so an interrupted copy leaves
-either nothing or a complete file. `.qcp-part-*` leftovers would then need
-skipping in the scans and sweeping on the next run. Threading a context into
-`job` would narrow the window but not close it — the process can die between the
-last write and the removal.
-
----
-
-## 2. Interrupt during the verify phase is not honoured in `-sync` / `-replicate`
-
-`sync.go:336`, `replicate.go:317`
+`sync.go:346`, `replicate.go:327`
 
 The copy phase bails out with `if ctx.Err() != nil { select {} }`, handing
 control to the interrupt handler. The verify phase that follows has the per-file
@@ -53,14 +26,14 @@ control to the interrupt handler. The verify phase that follows has the per-file
 printing the success summary while the handler is still waiting on stdin for the
 delete prompt.
 
-`pull.go:280` and `pull.go:355` do have the gate on both phases, so this is an
+`pull.go:290` and `pull.go:365` do have the gate on both phases, so this is an
 inconsistency between the three, not a design decision.
 
 **Fix direction.** Add the same gate after `p2.Wait()` in both files.
 
 ---
 
-## 3. `-list` and `-status` do not filter to numbered missions
+## 2. `-list` and `-status` do not filter to numbered missions
 
 `status.go:84` (`runStatus`), `status.go:406` (`runList`)
 
@@ -82,6 +55,50 @@ than reusing.
 ---
 
 ## Fixed
+
+### An interrupted copy left a truncated file that the re-run then skipped
+
+`job` (`copy.go:39`) wrote straight to the destination path, so the only cleanup
+was the `os.Remove(dst)` on its own error returns. When the SIGINT handler
+called `os.Exit(130)`, every copy in flight died mid-write and left a short file
+behind at the final name. The `ctx.Err()` guards in the workers only stopped
+copies that had not started.
+
+The re-run could not tell. `missingByDst` (`main.go:656`) decides what to copy
+with a bare `os.Stat`, and the sync side compares `findFiles` listings, so a
+truncated file counted as present and was never re-copied or verified. It
+survived into `checksums.b3` the next time `-checksum` ran, at which point the
+manifest agreed with the corrupt bytes. Reachable from either answer to the
+delete prompt — `n` keeps the partial mission by design — and from the
+no-mission-in-flight path at `main.go:589`, which exits without prompting at
+all.
+
+Fixed by writing every copy to `partPath(dst)` — the destination name with
+`.qcp-part-` in front, in the destination's own directory so the rename is
+within one filesystem — and renaming only once `Sync`, `Close` and `Chmod` have
+returned. An interrupt now leaves either nothing or a whole file at the
+destination name, which is what makes "already present" a safe answer to "does
+this still need copying". Threading a context into `job` was rejected as the
+fix: it narrows the window rather than closing it, since the process can still
+die between the last write and the removal.
+
+The leading dot is doing real work. `findFiles` and `scanUnorganised` both skip
+any path component starting with one, so a leftover temporary is invisible to
+`-checksum`, `-sync`, `-list` and `-reorganise` rather than being taken for
+footage — the same trick the flags file and the proxy lock already use.
+Reclaiming the bytes is a separate matter, so `sweepCopyParts` clears the
+mission directories a run is about to copy into, before any copy starts, and
+prints what it cleared; `.qcp-part` is now a shared constant with the ffmpeg
+temporaries in `proxy.go`, which `sweepPartFiles` already collected the same
+way. Regression tests in `copy_test.go`: a fifo source pins the timing, so the
+mid-copy assertion that nothing sits at the destination name is deterministic
+rather than a race, and it fails on the old code.
+
+Left alone: the sweep covers only the missions a run touches, so a mission
+abandoned and never copied into again keeps its hidden leftovers. Sweeping the
+whole drive on every run would mean walking the entire archive to reclaim a
+handful of files, and would be unsafe besides — nothing locks a footage tree, so
+a wider sweep could take a concurrent run's work in progress.
 
 ### The ingest interrupt state was shared with the signal handler unguarded
 

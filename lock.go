@@ -48,17 +48,18 @@ func lockProxyTree(root string) (func(), error) {
 	}, nil
 }
 
-// sweepPartFiles removes .qcp-part temporaries under root. encodeOutputs
-// already deletes its own on failure, so anything left is from a run that was
-// killed outright and never got to. It is only safe to do this while holding
-// the tree lock — otherwise it would delete a live run's work in progress.
+// sweepPartFiles removes partMarker temporaries under root, whether written by
+// encodeOutputs or by a copy. Both delete their own on failure, so anything
+// left is from a run that was killed outright and never got to. It is only safe
+// while nothing else is writing under root — a live run's work in progress is
+// named the same way — which for a proxy tree means holding the tree lock.
 func sweepPartFiles(root string) []string {
 	var found []string
 	filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
 		}
-		if strings.Contains(d.Name(), ".qcp-part") {
+		if strings.Contains(d.Name(), partMarker) {
 			if os.Remove(path) == nil {
 				found = append(found, path)
 			}

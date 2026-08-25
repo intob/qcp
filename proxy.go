@@ -526,7 +526,7 @@ func encodeOutputs(outs []string, build func(tmps []string) []string, duration f
 			return err
 		}
 		ext := filepath.Ext(out)
-		tmps[i] = strings.TrimSuffix(out, ext) + ".qcp-part" + ext
+		tmps[i] = strings.TrimSuffix(out, ext) + partMarker + ext
 	}
 	cleanup := func() {
 		for _, t := range tmps {

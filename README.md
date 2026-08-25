@@ -111,6 +111,8 @@ qcp -ingest "Altissimo" -proxy=false  # skip proxy generation
 
 Scans all mounted cards, copies to every mounted hot drive, verifies each file against its BLAKE3 hash, and writes `checksums.b3`. Files already present on a drive are skipped — safe to run with partially mounted drives or across multiple card batches.
 
+Every copy — here, and in `-sync`, `-replicate` and `-pull` — is written under a hidden `.qcp-part-` name and takes its real one only once the bytes are on the disk. A run killed mid-copy therefore leaves either nothing or a whole file at the destination, so "already present" stays a safe answer to "does this still need copying". The leftovers are invisible to every listing and are cleared by the next run that copies into that mission.
+
 Once a mission verifies, browse-tier proxies and stills are generated for it while the cards are still mounted. Pass `-proxy=false` to skip that. The ProRes edit tier is never generated here — ask for it explicitly with `qcp -proxy <n> -tier edit`.
 
 ### Archive

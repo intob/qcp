@@ -52,7 +52,14 @@ func job(src, dst string, bar *barTracker) *result {
 	if err := os.MkdirAll(filepath.Dir(dst), 0777); err != nil {
 		return &result{err: err}
 	}
-	wr, err := os.Create(dst)
+	// The bytes go to a temporary and only take the destination name once they
+	// are on the disk, so a run killed mid-copy leaves either nothing or a
+	// whole file at dst. Everything that decides what still needs copying goes
+	// by that name alone — the os.Stat in the ingest scan, findFiles on the
+	// sync side — so a truncated file left sitting there would pass for a
+	// finished one and never be copied or verified again.
+	tmp := partPath(dst)
+	wr, err := os.Create(tmp)
 	if err != nil {
 		return &result{err: err}
 	}
@@ -66,24 +73,66 @@ func job(src, dst string, bar *barTracker) *result {
 	syncErr := wr.Sync()
 	closeErr := wr.Close()
 	if err != nil {
-		os.Remove(dst)
+		os.Remove(tmp)
 		return &result{err: err}
 	}
 	if syncErr != nil {
-		os.Remove(dst)
+		os.Remove(tmp)
 		return &result{err: syncErr}
 	}
 	if closeErr != nil {
-		os.Remove(dst)
+		os.Remove(tmp)
 		return &result{err: closeErr}
 	}
 
-	if err := os.Chmod(dst, perm); err != nil {
-		os.Remove(dst)
+	if err := os.Chmod(tmp, perm); err != nil {
+		os.Remove(tmp)
+		return &result{err: err}
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		os.Remove(tmp)
 		return &result{err: err}
 	}
 
 	return &result{n: n, srcHash: hex.EncodeToString(h.Sum(nil))}
+}
+
+// partMarker is in the name of every file qcp is still writing — a copy in
+// flight here, an ffmpeg rendition in proxy.go. sweepPartFiles finds them by it.
+const partMarker = ".qcp-part"
+
+// partPath is the temporary a copy is written under: the destination name with
+// partMarker in front of it, in the destination's own directory so the rename
+// is within one filesystem. The leading dot is what keeps a temporary out of
+// the scans while it exists — findFiles skips any path component starting with
+// one, as does scanUnorganised — so a leftover from a run that was killed
+// outright is invisible rather than being taken for footage and carried into a
+// manifest, a cold drive or a new mission.
+func partPath(dst string) string {
+	return filepath.Join(filepath.Dir(dst), partMarker+"-"+filepath.Base(dst))
+}
+
+// sweepCopyParts clears copy temporaries out of dirs and reports how many went,
+// so the bytes a killed run left behind are reclaimed rather than sitting
+// hidden on the drive forever. Callers sweep the mission directories they are
+// about to copy into, before any copy of the run has started.
+//
+// There is no lock over footage the way there is over a proxy tree, so a second
+// qcp copying into the same mission at the same time can have a temporary swept
+// from under it. That copy fails its rename and is reported as a failed file —
+// loud, and no worse than two runs racing for the same destination name already
+// is.
+func sweepCopyParts(dirs []string) int {
+	seen := make(map[string]bool, len(dirs))
+	var n int
+	for _, dir := range dirs {
+		if seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		n += len(sweepPartFiles(dir))
+	}
+	return n
 }
 
 // copyPipelined streams src into dst with reads and writes overlapped, so a

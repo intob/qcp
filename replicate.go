@@ -258,6 +258,16 @@ func runReplicate(cfg Config, year int, skipConf bool) bool {
 		fmt.Printf("  %s %s: %s\n", dim("to  "), bold(vol), info)
 	}
 
+	var sweepDirs []string
+	for _, j := range jobs {
+		sweepDirs = append(sweepDirs, j.dstDir)
+	}
+	// Anything under a partMarker name is from a run that was killed outright:
+	// job removes its own temporary when a copy fails.
+	if n := sweepCopyParts(sweepDirs); n > 0 {
+		fmt.Printf("  %s cleared %d unfinished file(s) from an interrupted run\n", dim("·"), n)
+	}
+
 	// Phase 1: copy
 	fmt.Printf("\n%s\n\n", dim("copying..."))
 	p1 := mpb.NewWithContext(ctx, mpb.WithWidth(64))
