@@ -203,7 +203,8 @@ func runOrganise(cfg Config, year int, skipConf bool, regroup bool) {
 }
 
 // scanUnorganised walks yearDir and extracts dates from all files that are not
-// already inside a numbered or underscore-prefixed folder.
+// already inside a mission or underscore-prefixed folder — see skipOrganise for
+// which of those a regroup descends into.
 func scanUnorganised(yearDir string, regroup bool) ([]fileWithDate, error) {
 	type rawFile struct{ path, rel, name string }
 	var rawFiles []rawFile
@@ -221,7 +222,7 @@ func scanUnorganised(yearDir string, regroup bool) ([]fileWithDate, error) {
 			}
 			rel := strings.TrimPrefix(path, yearDir+string(os.PathSeparator))
 			top := strings.SplitN(rel, string(os.PathSeparator), 2)[0]
-			if strings.HasPrefix(top, "_") || (!regroup && isNumberedMission(top)) {
+			if strings.HasPrefix(top, "_") || skipOrganise(top, regroup) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -513,6 +514,24 @@ func filenameDate(base string) (time.Time, bool) {
 		return time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC), true
 	}
 	return time.Time{}, false
+}
+
+// skipOrganise reports whether a directory under the year is a mission the
+// scan must leave alone rather than take apart into loose files.
+//
+// -organise groups what is *not* yet in a mission, so every mission is off
+// limits to it — the predicate here was isNumberedMission, which requires
+// n > 0, so 000_Edits read as loose files and had its contents dated by mtime
+// and moved into NNN_Season. -reorganise does re-bucket missions, which is what
+// it is for, but 000_* sits outside the numbering by construction — it is a
+// named mission rather than a season's worth of footage — so it is left alone
+// by both.
+func skipOrganise(name string, regroup bool) bool {
+	n, ok := parseMissionNum(name)
+	if !ok {
+		return false
+	}
+	return !regroup || n == 0
 }
 
 // isNumberedMission reports whether name can be addressed by a mission number.

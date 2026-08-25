@@ -16,6 +16,34 @@ being written.
 
 ## Fixed
 
+### `-organise` took `000_*` missions apart
+
+`scanUnorganised` (`organise.go:224`) decided "already in a mission, leave it
+alone" with `isNumberedMission(top)`, which requires `n > 0`. It was the last
+caller of that predicate that is not resolving a mission *number* — `-proxy` and
+`-renumber` genuinely are — and so the one the `000_*` sweep below missed.
+
+A plain `qcp -organise` therefore walked into `000_Edits`, dated its contents by
+mtime like any loose file and planned to move them into `NNN_Season`;
+`removeEmptyDirs` then took the emptied `000_Edits` away. Confirmed end to end
+on a temporary drive: `000_Edits/cut_v3.mov` came out as `043_Summer/cut_v3.mov`
+and the year directory held only `043_Summer`. README.md:92 is explicit that
+these are missions and only unaddressable *by number*.
+
+Fixed with `skipOrganise` (`organise.go:529`), which parses the number once and
+answers for both commands: `-organise` groups what is not yet in a mission, so
+every mission is off limits to it; `-reorganise` does re-bucket missions, which
+is what it is for, but `000_*` sits outside the numbering by construction — a
+named mission rather than a season's worth of footage — so it is left alone by
+that too. That second half is a deliberate widening beyond the reported bug:
+regrouping `000_Edits` into `NNN_Winter` is meaningless and there was no way to
+opt out of it.
+
+Regression test in `organise_test.go` on both `scanUnorganised` — asserting the
+exact file list for each of `regroup` false and true, so it pins what
+`-reorganise` still does pick up as well as what neither touches — and on
+`skipOrganise` as a table.
+
 ### A bare `qcp -init` rewound the mission counter to whatever was mounted
 
 `main.go:334` passed `!yearAll` as `runInit`'s `yearExplicit`, so a bare

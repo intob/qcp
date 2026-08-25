@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
+	"strings"
 	"testing"
 )
 
@@ -106,5 +108,78 @@ func TestMissionDirsIncludes000AndSkipsStrays(t *testing.T) {
 
 	if got := missionDirs(filepath.Join(year, "nosuchdir")); got != nil {
 		t.Errorf("missionDirs of an unreadable directory = %v, want nil", got)
+	}
+}
+
+// -organise groups what is not yet in a mission, so every mission is off limits
+// to it. The predicate deciding "already a mission" was isNumberedMission, which
+// requires n > 0, so a plain -organise walked into 000_Edits, dated its contents
+// by mtime and planned to move them into NNN_Season — and removeEmptyDirs then
+// took the emptied 000_Edits away. README.md is explicit that 000_* directories
+// are missions and only unaddressable by number.
+//
+// -reorganise does re-bucket missions, which is what it is for, but 000_* sits
+// outside the numbering by construction — a named mission rather than a season's
+// worth of footage — so it is left alone by that too.
+func TestScanUnorganisedLeaves000MissionsAlone(t *testing.T) {
+	year := t.TempDir()
+	for _, mission := range []string{"000_Edits", "042_Real"} {
+		dir := filepath.Join(year, mission)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "clip.mp4"), []byte("footage"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// the loose file -organise actually exists to pick up
+	if err := os.WriteFile(filepath.Join(year, "loose.mp4"), []byte("footage"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, c := range []struct {
+		regroup bool
+		want    []string
+	}{
+		{false, []string{"loose.mp4"}},
+		{true, []string{"042_Real/clip.mp4", "loose.mp4"}},
+	} {
+		files, err := scanUnorganised(year, c.regroup)
+		if err != nil {
+			t.Fatalf("scanUnorganised(regroup=%v): %v", c.regroup, err)
+		}
+		var got []string
+		for _, f := range files {
+			got = append(got, filepath.ToSlash(f.rel))
+		}
+		sort.Strings(got)
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("scanUnorganised(regroup=%v) = %v, want %v", c.regroup, got, c.want)
+		}
+		for _, rel := range got {
+			if strings.HasPrefix(rel, "000_") {
+				t.Errorf("regroup=%v took a 000_* mission apart: %s", c.regroup, rel)
+			}
+		}
+	}
+}
+
+func TestSkipOrganise(t *testing.T) {
+	cases := []struct {
+		name            string
+		organise, reorg bool
+	}{
+		{"042_Altissimo_with_Anton", true, false}, // -reorganise re-buckets it
+		{"000_Edits", true, true},                 // neither touches it
+		{"loose_footage", false, false},           // not a mission at all
+		{"DCIM", false, false},
+	}
+	for _, c := range cases {
+		if got := skipOrganise(c.name, false); got != c.organise {
+			t.Errorf("skipOrganise(%q, regroup=false) = %v, want %v", c.name, got, c.organise)
+		}
+		if got := skipOrganise(c.name, true); got != c.reorg {
+			t.Errorf("skipOrganise(%q, regroup=true) = %v, want %v", c.name, got, c.reorg)
+		}
 	}
 }
