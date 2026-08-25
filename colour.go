@@ -2,12 +2,15 @@ package main
 
 import (
 	"bytes"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"lukechampine.com/blake3"
 )
 
 // Colour handling for the browse tier.
@@ -239,9 +242,21 @@ var (
 // gamut matrix, tone-map and gamma encode it would otherwise go through are all
 // replaced — a look is the whole conversion, not a layer on top of one.
 //
-// The cached basename is derived from the look's own name so two different
-// looks cannot collide in one proxy tree, and so a tree records which was used.
-func lookTransform(path string) colourTransform {
+// Both the transform ID and the cached basename carry a hash of the cube's
+// contents as well as the look's own name. The name is what makes a proxy tree
+// say which look it was baked with; the hash is what makes an edit *to that
+// look* land. Editing a cube in place changes the ID, which marks every clip
+// that recorded the old one stale, and changes the cache entry, so the rebuild
+// bakes the new cube rather than the copy already sitting in the tree. It also
+// means two looks that share a filename in different directories cannot
+// collide.
+func lookTransform(path string) (colourTransform, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return colourTransform{}, fmt.Errorf("look %s: %w", path, err)
+	}
+	sum := blake3.Sum256(data)
+	hash := hex.EncodeToString(sum[:4])
 	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	safe := strings.Map(func(r rune) rune {
 		switch {
@@ -250,7 +265,11 @@ func lookTransform(path string) colourTransform {
 		}
 		return '_'
 	}, base)
-	return colourTransform{ID: "look/" + base, LUT: "look_" + safe + ".cube", Look: path}
+	return colourTransform{
+		ID:   "look/" + base + "@" + hash,
+		LUT:  "look_" + safe + "_" + hash + ".cube",
+		Look: path,
+	}, nil
 }
 
 // pickTransform maps a clip's capture gamma and colour primaries onto a

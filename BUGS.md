@@ -6,43 +6,15 @@ suite. Line numbers are against commit `d7d6706` plus the progress-bar fix.
 
 Findings that have since been fixed are recorded at the bottom for context —
 they explain why `progress.go`, the `metadataFiles` set in `util.go`, the hot
-manifest read in `evict.go` and the `name()` calls in `sync.go` look the way they
-do.
+manifest read in `evict.go`, the `name()` calls in `sync.go` and the hashed look
+IDs in `colour.go` look the way they do.
 
 Ordered by severity. Each entry says what is wrong, how it was confirmed, and
 what a fix would have to do; none of them have been attempted.
 
 ---
 
-## 1. A look edited in place is never picked up
-
-`colour.go:282` — `ensureLUT`, with `lookTransform` at `colour.go:244`
-
-`lookTransform` derives both the transform ID (`"look/" + base`) and the cache
-filename (`"look_" + safe + ".cube"`) from the look's **basename**. `ensureLUT`
-then returns the cached cube whenever it exists and is non-empty.
-
-So editing `My Look.cube` in place leaves the ID unchanged — nothing is marked
-stale by the `meta.Transform != transforms[i].ID` check at `proxy.go:745` — *and*
-keeps serving the old cached copy. The change never reaches a proxy, by either
-route.
-
-This contradicts README.md: "Changing or removing the look changes the transform
-recorded per clip, which marks the affected proxies stale and rebuilds them as
-you touch each mission." That holds only when the change is to a *different
-file*.
-
-Two different looks that share a filename in different directories collide the
-same way, despite the comment at `colour.go:243` claiming they cannot.
-
-**Fix direction.** Fold a hash of the cube's contents into the ID and the cached
-filename. That makes an in-place edit stale by construction and makes the
-collision impossible. Note the cache lives in the proxy tree, so old cubes will
-accumulate under their old hashes — decide whether that matters.
-
----
-
-## 2. Data race on the ingest interrupt state
+## 1. Data race on the ingest interrupt state
 
 `main.go:553-554`, written at `792`, `864-865`, `953-954`, read at `564`, `580`, `584`
 
@@ -65,7 +37,7 @@ Clearing the pair unconditionally at the end of `runDay` fixes the second half.
 
 ---
 
-## 3. Interrupt during the verify phase is not honoured in `-sync` / `-replicate`
+## 2. Interrupt during the verify phase is not honoured in `-sync` / `-replicate`
 
 `sync.go:336`, `replicate.go:317`
 
@@ -83,7 +55,7 @@ inconsistency between the three, not a design decision.
 
 ---
 
-## 4. `-list` and `-status` do not filter to numbered missions
+## 3. `-list` and `-status` do not filter to numbered missions
 
 `status.go:84` (`runStatus`), `status.go:406` (`runList`)
 
@@ -105,6 +77,35 @@ than reusing.
 ---
 
 ## Fixed
+
+### A look edited in place never reached a proxy
+
+`lookTransform` (`colour.go:244`) derived both the transform ID (`"look/" +
+base`) and the cache filename (`"look_" + safe + ".cube"`) from the look's
+basename alone. Editing `My Look.cube` in place therefore left the ID unchanged,
+so nothing was marked stale by the `meta.Transform != transforms[i].ID` check at
+`proxy.go:745`, *and* left the cache entry unchanged, so `ensureLUT` went on
+returning the old cube it had copied in. The change reached nothing by either
+route, contradicting README.md's promise that changing the look rebuilds the
+affected proxies. Two looks sharing a filename in different directories collided
+the same way, despite the comment claiming they could not.
+
+Fixed by folding a blake3 hash of the cube's contents into both names:
+`look/<name>@<hash>` and `look_<safe>_<hash>.cube`. An in-place edit is now
+stale by construction and the collision is impossible, with the look's own name
+kept in both so a proxy tree still says which look it was. `lookTransform` reads
+the file, so it now returns an error: `runProxy` resolves the look once before
+planning and exits on failure, `runIngestProxies` warns and skips the tier
+rather than silently baking the technical conversion instead, and `planMission`
+takes the resolved transform rather than a path — one reading per run, and a bad
+look surfaces before any work starts. Regression tests in `colour_test.go`;
+with the hash fixed to a constant, the edit test fails on both the ID and the
+cache entry and the collision test fails too.
+
+Left alone: old cubes accumulate in `proxies/luts/` under their old hashes.
+Each is a few hundred KB, nothing else in the tree is garbage-collected either,
+and keeping them is what lets an old proxy be traced to the exact bytes baked
+into it.
 
 ### `-sync` named every hot drive by `volume`, so a `path`-only drive had none
 

@@ -562,11 +562,21 @@ against this library's own statistics — median +3.31 stops, p95 +5.25 on a
 representative flying shot — and a look handles highlights its own way instead.
 That is inherent in baking a grade, not a defect in the plumbing.
 
-The cube is copied into `proxies/luts/` under a name derived from its own, so
-the tree records which look it was baked with and still resolves after the
-original moves. The per-clip transform ID changes from `s-log3/s-gamut3-cine` to
-`look/<name>`, and the existing staleness check on that ID rebuilds affected
-proxies without any new mechanism.
+The cube is copied into `proxies/luts/` under a name derived from its own plus a
+hash of its contents, so the tree records which look it was baked with and still
+resolves after the original moves. The per-clip transform ID changes from
+`s-log3/s-gamut3-cine` to `look/<name>@<hash>`, and the existing staleness check
+on that ID rebuilds affected proxies without any new mechanism.
+
+The hash is what makes an edit *to the look itself* land. Without it the ID and
+the cache entry both come from the filename alone: editing `My Look.cube` in
+place left every clip looking current, and `ensureLUT` went on serving the copy
+already in the tree, so the change reached nothing by either route. Hashing the
+contents makes both stale by construction, and makes two looks that share a
+filename in different directories impossible to confuse. Old cubes stay in
+`proxies/luts/` under their old hashes — a few hundred KB each, and the price of
+being able to read a proxy tree years later and see exactly which bytes were
+baked into it.
 
 ### Verified against the measurements
 

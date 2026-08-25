@@ -246,34 +246,114 @@ func TestLUTRoundTripThroughFFmpeg(t *testing.T) {
 	}
 }
 
+// writeLook puts a cube with the given contents on disk and returns its path.
+func writeLook(t *testing.T, dir, name, body string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.MkdirAll(filepath.Dir(p), 0777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 // A look replaces the whole technical conversion rather than layering on it,
 // so it must land as its own transform with its own cache entry — two looks
 // must never collide in one proxy tree, and a tree must record which was used.
 func TestLookTransformIsSelfIdentifying(t *testing.T) {
-	lt := lookTransform("/LUT/Alister/Super Hero Final-33x.cube")
+	dir := t.TempDir()
+	path := writeLook(t, dir, "Super Hero Final-33x.cube", "LUT_3D_SIZE 2\n")
+	lt, err := lookTransform(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if lt.passthrough() {
 		t.Fatal("a look must not pass through")
 	}
-	if lt.Look != "/LUT/Alister/Super Hero Final-33x.cube" {
+	if lt.Look != path {
 		t.Errorf("source path not carried: %q", lt.Look)
 	}
 	// The cached name is derived from the look's own, so the proxy tree says
 	// which look it was baked with.
-	if lt.LUT != "look_Super_Hero_Final-33x.cube" {
+	if !strings.HasPrefix(lt.LUT, "look_Super_Hero_Final-33x_") || !strings.HasSuffix(lt.LUT, ".cube") {
 		t.Errorf("cache name = %q", lt.LUT)
 	}
 	// Spaces and punctuation must not reach a filesystem path or a filter arg.
 	if strings.ContainsAny(lt.LUT, " '\\:") {
 		t.Errorf("cache name is not filter-safe: %q", lt.LUT)
 	}
-	// Two different looks must not share a cache entry.
-	if other := lookTransform("/LUT/Other/Moody.cube"); other.LUT == lt.LUT {
+	// Two different looks must not share a cache entry — including two that
+	// share a filename in different directories.
+	other, err := lookTransform(writeLook(t, dir, "Other/Moody.cube", "LUT_3D_SIZE 2\n# moody\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.LUT == lt.LUT || other.ID == lt.ID {
 		t.Error("two looks collide in the cache")
+	}
+	same, err := lookTransform(writeLook(t, dir, "Elsewhere/Super Hero Final-33x.cube", "LUT_3D_SIZE 2\n# different\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if same.LUT == lt.LUT || same.ID == lt.ID {
+		t.Error("two looks sharing a filename collide in the cache")
 	}
 	// The ID is what marks a cached clip stale when the look changes, so it
 	// must differ from the technical transform it replaces.
 	if lt.ID == transformSGamut3Cine.ID || lt.ID == transformNone.ID {
 		t.Errorf("look ID %q does not distinguish itself", lt.ID)
+	}
+	// A look that is not there is an error, not a silent pass through: baking
+	// the technical conversion instead grades every clip with something other
+	// than what was asked for.
+	if _, err := lookTransform(filepath.Join(dir, "absent.cube")); err == nil {
+		t.Error("a missing look was accepted")
+	}
+}
+
+// Editing a look in place must reach the proxies. The identity of a look is
+// its contents, not its name: the ID marks every clip baked with the old cube
+// stale, and the cache entry is a different file, so the rebuild reads the new
+// cube rather than the copy already in the tree.
+func TestLookEditedInPlaceIsPickedUp(t *testing.T) {
+	dir := t.TempDir()
+	path := writeLook(t, dir, "My Look.cube", "LUT_3D_SIZE 2\n0 0 0\n1 1 1\n")
+	before, err := lookTransform(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := t.TempDir()
+	cubeBefore, err := ensureLUT(cache, before)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	writeLook(t, dir, "My Look.cube", "LUT_3D_SIZE 2\n0 0 0\n0.5 0.5 0.5\n")
+	after, err := lookTransform(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ID == before.ID {
+		t.Error("the edit left the transform ID unchanged — no clip is marked stale")
+	}
+	if after.LUT == before.LUT {
+		t.Fatal("the edit left the cache entry unchanged — the old cube is served")
+	}
+	cubeAfter, err := ensureLUT(cache, after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(cubeAfter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "0.5 0.5 0.5") {
+		t.Errorf("cached cube is not the edited one: %q", got)
+	}
+	if cubeAfter == cubeBefore {
+		t.Error("both versions share one cached path")
 	}
 }
 
@@ -297,7 +377,10 @@ func TestLookOnlyDisplacesALogConversion(t *testing.T) {
 	}
 	// planMission substitutes only where a conversion already existed; mirror
 	// that rule here so the invariant is pinned even if the caller moves.
-	lt := lookTransform("/LUT/x.cube")
+	lt, err := lookTransform(writeLook(t, t.TempDir(), "x.cube", "LUT_3D_SIZE 2\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for i := range got {
 		if !got[i].passthrough() {
 			got[i] = lt

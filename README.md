@@ -236,11 +236,12 @@ bump on its own would have been a downgrade. See `PROXIES.md`.
 
 Set `look` in `~/.qcp` to bake a creative grade into the browse tier instead of
 the technical conversion. The cube is copied into `proxies/luts/` under a name
-derived from its own, so the proxy tree records which look it was baked with and
-stays readable after the original moves. Changing or removing the look changes
-the transform recorded per clip, which marks the affected proxies stale and
-rebuilds them as you touch each mission. The edit tier is never graded, and the
-camera originals are never touched.
+derived from its own plus a hash of its contents, so the proxy tree records
+which look it was baked with and stays readable after the original moves.
+Changing the look — pointing at a different cube, editing one in place, or
+removing it — changes the transform recorded per clip, which marks the affected
+proxies stale and rebuilds them as you touch each mission. The edit tier is
+never graded, and the camera originals are never touched.
 
 Only one `-proxy` run may work on a drive's proxy tree at a time; a second is
 turned away rather than queued, because two runs over one mission overwrite each

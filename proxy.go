@@ -677,7 +677,12 @@ type missionPlan struct {
 // skipped when its renditions are on disk and the recorded source hash still
 // matches — the manifest also carries the parsed sidecar, so a re-run does not
 // re-read every XML.
-func planMission(src proxySource, outDir string, tiers proxyTiers, look string) missionPlan {
+//
+// look is the resolved creative look, or the zero transform when none is
+// configured. It is resolved once per run rather than per mission so that an
+// unreadable cube is reported before any work starts, and so the whole batch
+// is planned against one reading of it.
+func planMission(src proxySource, outDir string, tiers proxyTiers, look colourTransform) missionPlan {
 	p := missionPlan{src: src, outDir: outDir, existing: readProxyManifest(outDir).byRel()}
 
 	// Sidecars are only read for clips with no usable cached entry.
@@ -709,11 +714,10 @@ func planMission(src proxySource, outDir string, tiers proxyTiers, look string) 
 	// *which* clips are log; the look only changes what they are taken through.
 	// Clips that pass through are already Rec.709 and stay untouched — the cube
 	// expects log, and there is none to give it.
-	if look != "" {
-		lt := lookTransform(look)
+	if !look.passthrough() {
 		for i := range transforms {
 			if !transforms[i].passthrough() {
-				transforms[i] = lt
+				transforms[i] = look
 			}
 		}
 	}
@@ -1032,6 +1036,17 @@ func runProxy(cfg Config, missions []int, year int, all bool, tiers proxyTiers, 
 	}
 
 	// Resolve everything before generating anything, so a bad mission number
+	// surfaces up front rather than mid-batch. The look is read here for the
+	// same reason, and because its content hash decides which cached proxies
+	// the plans below consider stale.
+	var look colourTransform
+	if cfg.Look != "" {
+		look, err = lookTransform(cfg.Look)
+		if err != nil {
+			exit(1, "%v", err)
+		}
+	}
+	// Resolve everything before generating anything, so a bad mission number
 	// surfaces up front rather than mid-batch.
 	var plans []missionPlan
 	failed := 0
@@ -1042,7 +1057,7 @@ func runProxy(cfg Config, missions []int, year int, all bool, tiers proxyTiers, 
 			failed++
 			continue
 		}
-		plans = append(plans, planMission(src, filepath.Join(yearRoot, src.slug), tiers, cfg.Look))
+		plans = append(plans, planMission(src, filepath.Join(yearRoot, src.slug), tiers, look))
 	}
 	if len(plans) == 0 {
 		exit(1, "nothing to proxy")
@@ -1292,9 +1307,21 @@ func runIngestProxies(cfg Config, year int, slug string) {
 		fmt.Printf("\n  %s  %s\n", yellow("⚠"), dim("no clips to proxy: "+err.Error()))
 		return
 	}
+	// A look that cannot be read would silently bake the technical conversion
+	// instead, so the whole tier waits rather than producing proxies that are
+	// not the ones asked for. The footage is copied and verified either way.
+	var look colourTransform
+	if cfg.Look != "" {
+		look, err = lookTransform(cfg.Look)
+		if err != nil {
+			fmt.Printf("\n  %s  %s\n", yellow("⚠"), dim(err.Error()+" — skipping proxies"))
+			return
+		}
+	}
+
 	tiers := proxyTiers{browse: true}
 	outDir := filepath.Join(proxyRoot(dst.basePath()), yearStr, slug)
-	plan := planMission(src, outDir, tiers, cfg.Look)
+	plan := planMission(src, outDir, tiers, look)
 	if plan.todo == 0 {
 		return
 	}
