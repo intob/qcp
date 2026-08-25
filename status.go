@@ -81,7 +81,7 @@ func runStatus(cfg Config, year int) {
 			continue
 		}
 		for _, e := range entries {
-			if !e.IsDir() {
+			if !e.IsDir() || !isMissionDir(e.Name()) {
 				continue
 			}
 			slug := e.Name()
@@ -295,7 +295,7 @@ func runListAll(cfg Config) {
 				continue
 			}
 			for _, e := range entries {
-				if !e.IsDir() || !isNumberedMission(e.Name()) {
+				if !e.IsDir() || !isMissionDir(e.Name()) {
 					continue
 				}
 				slug := e.Name()
@@ -403,7 +403,7 @@ func runList(cfg Config, year int) {
 		}
 		driveNames = append(driveNames, d.name())
 		for _, e := range entries {
-			if !e.IsDir() {
+			if !e.IsDir() || !isMissionDir(e.Name()) {
 				continue
 			}
 			slug := e.Name()

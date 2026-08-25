@@ -8,36 +8,16 @@ Findings that have since been fixed are recorded at the bottom for context —
 they explain why `progress.go`, the `metadataFiles` set in `util.go`, the hot
 manifest read in `evict.go`, the `name()` calls in `sync.go`, the hashed look
 IDs in `colour.go`, the `interruptTarget` in `main.go`, the `.qcp-part-`
-temporaries in `copy.go` and the verify-phase gates in `sync.go` and
-`replicate.go` look the way they do.
+temporaries in `copy.go`, the verify-phase gates in `sync.go` and
+`replicate.go` and the `isMissionDir` predicate in `organise.go` look the way
+they do.
 
 Ordered by severity. Each entry says what is wrong, how it was confirmed, and
 what a fix would have to do; none of the open ones have been attempted.
 
 ---
 
-## 1. `-list` and `-status` do not filter to numbered missions
-
-`status.go:84` (`runStatus`), `status.go:406` (`runList`)
-
-Both accept any directory under the year directory as a mission. `runListAll`
-(`status.go:298`) and `-check` (`check.go:341`) filter with `isNumberedMission`.
-The result is that `_unsorted` — which `-organise` creates — and any other stray
-directory appears as a mission row in `-list` and `-status` but not in
-`-list -year all`.
-
-**Fix direction.** Add the `isNumberedMission` guard to both, matching
-`runListAll`. Worth confirming the intent for `000_*` directories first:
-`isNumberedMission` rejects them (it requires `n > 0`), so adding the guard would
-drop `000_Edits` from `-list` and `-status`, where it currently shows. README.md
-says those directories "sort to the top and are synced like any mission but
-cannot be addressed by mission-number commands", which suggests they *should*
-stay visible in listings — in which case the predicate needs splitting rather
-than reusing.
-
----
-
-## 2. `-ingest` has no interrupt gate after either phase
+## 1. `-ingest` has no interrupt gate after either phase
 
 `main.go:729` (after `p1.Wait()`), `main.go:801` (after `p2.Wait()`)
 
@@ -62,7 +42,64 @@ failure is not reachable, but every other consequence is.
 
 ---
 
+## 2. `000_*` missions are never hashed, checked or verified
+
+`checksum.go:64`, `check.go:341`, `check.go:358`, `verify.go:180`,
+`index.go:180`, `flags.go:211`
+
+Noticed while fixing the listing filter below. README.md says `000_*`
+directories "are synced like any mission but cannot be addressed by
+mission-number commands", and `-sync` (`sync.go:56`) does carry them: it takes
+every directory under the year that is not the proxy tree. But every command
+that enumerates missions for itself filters with `isNumberedMission`, which
+requires `n > 0`, so `000_Edits` gets no `checksums.b3` from `-checksum` (both
+the year-wide walk and a targeted `-checksum NNN`, which cannot name it), is
+not compared by `-check`, not re-hashed by `-verify`, not indexed, and its
+flags are not collected. `-sync` writes the copies; nothing ever checks them.
+
+**Fix direction.** Split the same way `-list` and `-status` were split below:
+the commands that operate on *whatever is on the drive* want `isMissionDir`,
+and only the ones that resolve a mission *number* — `-proxy`
+(`proxy.go:629`) and `-renumber` (`renumber.go:38`) — want
+`isNumberedMission`. Worth checking `-index` separately: `missionNum`
+(`index.go:97`) returns 0 for a `000_*` slug, which is honest, but the sort and
+the URL scheme may assume numbers are unique.
+
+---
+
 ## Fixed
+
+### `-list` and `-status` showed any directory under the year as a mission
+
+`runStatus` (`status.go:84`) and `runList` (`status.go:406`) accepted every
+directory under the year directory as a mission row, so `_unsorted` — which
+`-organise` creates for files whose date it could not resolve — was listed
+alongside real missions, with a size and a per-drive presence marker, as were
+any other strays. `runListAll` (`status.go:298`) already filtered, with
+`isNumberedMission`, so the same `-list` disagreed with itself between
+`-year 2026` and `-year all`.
+
+Reusing `isNumberedMission` for the two unfiltered sites would have traded one
+wrong row for a missing one: it requires `n > 0`, so it drops `000_Edits`, and
+README.md is explicit that `000_*` directories are "synced like any mission" and
+only unaddressable *by mission number*. Listing is not addressing. So the
+predicate was split instead: `isMissionDir` (`organise.go:529`) accepts any
+`NNN_` prefix including `000_`, `isNumberedMission` keeps the `n > 0` rule for
+callers that resolve a mission number, and both now share one parse. All three
+listing sites use `isMissionDir`, which also puts `000_*` back into
+`-list -year all` where it belonged.
+
+Regression test in `organise_test.go` on the two predicates rather than on the
+listings: `runStatus` and `runList` print straight to stdout from real drives,
+so the rows themselves are not assertable without splitting them up first.
+
+Left alone: the other `isNumberedMission` callers were not touched, and the gap
+that leaves is now finding 2 above — a separate change with its own blast
+radius, since it decides what `-checksum` writes and what `-check` compares.
+Also left: `slugNum` (`renumber.go:136`) and `missionNum` (`index.go:97`) are
+still two more copies of the same parse, differing only in what they return for
+a non-mission name. Both are called on already-filtered slugs, so neither is
+wrong today.
 
 ### An interrupt during the verify phase was ignored by `-sync` and `-replicate`
 

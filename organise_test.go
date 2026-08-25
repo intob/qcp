@@ -50,3 +50,30 @@ func TestScanUnorganisedSkipsMetadata(t *testing.T) {
 		}
 	}
 }
+
+// -list and -status walk the year directory and previously took every directory
+// under it for a mission, so -organise's _unsorted showed up as a mission row.
+// The guard they gained has to keep 000_* visible: those are synced like any
+// mission and only mission-number commands cannot address them.
+func TestMissionDirPredicates(t *testing.T) {
+	cases := []struct {
+		name     string
+		mission  bool
+		numbered bool
+	}{
+		{"042_Altissimo_with_Anton", true, true},
+		{"000_Edits", true, false},
+		{"_unsorted", false, false},
+		{"proxies", false, false},
+		{"-1_Backwards", false, false},
+		{"042", false, false},
+	}
+	for _, c := range cases {
+		if got := isMissionDir(c.name); got != c.mission {
+			t.Errorf("isMissionDir(%q) = %v, want %v", c.name, got, c.mission)
+		}
+		if got := isNumberedMission(c.name); got != c.numbered {
+			t.Errorf("isNumberedMission(%q) = %v, want %v", c.name, got, c.numbered)
+		}
+	}
+}

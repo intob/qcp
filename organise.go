@@ -515,13 +515,32 @@ func filenameDate(base string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
+// isNumberedMission reports whether name can be addressed by a mission number.
+// 000_* directories are missions but not addressable, so they fail this and
+// pass isMissionDir.
 func isNumberedMission(name string) bool {
+	n, ok := parseMissionNum(name)
+	return ok && n > 0
+}
+
+// isMissionDir reports whether name is a mission directory of any number,
+// 000_* included. Listings use this so that a stray directory under the year —
+// _unsorted, say — is not shown as a mission while 000_Edits still is.
+func isMissionDir(name string) bool {
+	_, ok := parseMissionNum(name)
+	return ok
+}
+
+func parseMissionNum(name string) (int, bool) {
 	parts := strings.SplitN(name, "_", 2)
 	if len(parts) < 2 {
-		return false
+		return 0, false
 	}
 	n, err := strconv.Atoi(parts[0])
-	return err == nil && n > 0
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 func removeEmptyDirs(root string) {
