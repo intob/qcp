@@ -16,6 +16,37 @@ being written.
 
 ## Fixed
 
+### A bare `qcp -init` rewound the mission counter to whatever was mounted
+
+`main.go:334` passed `!yearAll` as `runInit`'s `yearExplicit`, so a bare
+`qcp -init` took the branch whose own comment said "when a year is explicitly
+requested" — and that branch drops the `max > current` guard and lets the
+counter move *down* (`init.go:62`).
+
+The counter is a promise never to mint a number twice, and what a scan can see
+depends on what is plugged in. The archive being in a drawer is the normal
+state, and `-evict` exists to take old missions off the hot drives, so the
+ordinary shape of this tool produces exactly the situation where the visible
+maximum is far below the counter. Confirmed with `seq[2026] = 42` and only a
+drive holding `030_Recent` mounted: `2026: 042 → 030`, after which the next
+`-ingest` mints `031` over a mission that already exists on the unmounted drive.
+
+Fixed by separating the two things the one flag controlled. `runInit` now takes
+`scopeToYear` (which year directories to scan, still `!yearAll`) and `rewindOK`
+(`*yearFlag != "" && !yearAll`), so only a `-year` the user actually typed
+licenses a rewind. Raising is unconditional, as before. A declined rewind is not
+reported as "already up to date" any more — it says what the drives show and
+names the flag that would apply it — and an accepted one prints a warning that
+every drive holding the year has to be mounted.
+
+Regression test in `init_test.go`: the same unmounted-archive fixture, asserting
+the counter holds at 42 without an explicit year, moves to 30 with one, and
+still rises to 30 from 7 either way.
+
+Left alone: `-init -year 2026` still rewinds on a partial view if that is what
+you ask for. That is the documented repair for a counter that ran ahead, and the
+warning is what makes the requirement explicit.
+
 ### `-replicate` could never fill a gap in the first cold drive
 
 `runReplicate` took the first cold drive holding a mission as its source

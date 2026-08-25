@@ -392,7 +392,9 @@ qcp -init                             # sync sequence counter to what's on disk
 qcp -init -year all                   # scan all years
 ```
 
-`-organise` extracts shoot dates from filenames and media metadata (via `ffprobe`) and groups files into `NNN_Spring`, `NNN_Summer`, `NNN_Autumn`, `NNN_Winter` folders. `-reorganise` re-runs the same grouping over already-numbered missions. `-renumber` fixes duplicate or gapped numbers after any reorganisation. `-init` is a recovery command: scans the drives and resets the sequence counter to match what's actually on disk.
+`-organise` extracts shoot dates from filenames and media metadata (via `ffprobe`) and groups files into `NNN_Spring`, `NNN_Summer`, `NNN_Autumn`, `NNN_Winter` folders. `-reorganise` re-runs the same grouping over already-numbered missions. `-renumber` fixes duplicate or gapped numbers after any reorganisation.
+
+`-init` is a recovery command: it scans the drives and resets the sequence counter to the highest mission number it can see. Raising the counter is always safe. Moving it *back* needs `-year` given explicitly, because what a scan can see depends on what is plugged in — with the archive unmounted and old missions already evicted off the hot drives, a bare `-init` would otherwise hand the next `-ingest` a number that already names a mission. When the counter is ahead of the drives, `-init` says so and names the flag that would apply the change.
 
 ### Maintenance
 

@@ -331,7 +331,9 @@ func main() {
 	}
 
 	if *doInit {
-		runInit(cfg, year, !yearAll)
+		// A -year the user typed is what licenses -init to move a counter back;
+		// the bare command defaults to this year but asserts nothing about it.
+		runInit(cfg, year, !yearAll, *yearFlag != "" && !yearAll)
 		return
 	}
 
