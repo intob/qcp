@@ -30,13 +30,14 @@ type evictBackup struct {
 	size     int64
 }
 
-// evictPlan is one mission's eviction: the hot copies to remove and the cold
-// copies that justify removing them.
+// evictPlan is one mission's eviction: the hot copies to remove, the cold
+// copies that justify removing them, and the flags those hot copies hold.
 type evictPlan struct {
 	num     int
 	slug    string
 	targets []evictTarget
 	backups []evictBackup
+	flags   missionFlags // merged across the targets, carried to the backups
 }
 
 // runEvict deletes missions from hot drives once cold copies are proven good.
@@ -106,7 +107,17 @@ func runEvict(cfg Config, missions []int, year int, from []string, minCopies int
 			refused++
 			continue
 		}
-		plans = append(plans, evictPlan{num, slug, targets, backups})
+		flags, err := targetFlags(targets)
+		if err != nil {
+			// Same stance as flagStore.read: an unreadable flags file is not an
+			// empty one. Deleting the hot copy is what makes it unrecoverable,
+			// so "I could not read it" refuses here too.
+			fmt.Printf("%s %s\n", red("✗"), bold(slug))
+			fmt.Printf("    %s\n", err)
+			refused++
+			continue
+		}
+		plans = append(plans, evictPlan{num, slug, targets, backups, flags})
 	}
 
 	if len(plans) == 0 {
@@ -130,6 +141,11 @@ func runEvict(cfg Config, missions []int, year int, from []string, minCopies int
 	var removed, failed int
 	fmt.Println()
 	for _, p := range plans {
+		if err := carryFlags(p); err != nil {
+			fmt.Printf("%s carrying flags for %s: %v %s\n", red("ERROR"), p.slug, err, dim("— not deleted"))
+			failed++
+			continue
+		}
 		for _, t := range p.targets {
 			if err := os.RemoveAll(t.dir); err != nil {
 				fmt.Printf("%s removing %s: %v\n", red("ERROR"), t.dir, err)
@@ -145,6 +161,47 @@ func runEvict(cfg Config, missions []int, year int, from []string, minCopies int
 	if failed > 0 || refused > 0 {
 		os.Exit(1)
 	}
+}
+
+// targetFlags merges the flags across every hot copy about to be deleted.
+func targetFlags(targets []evictTarget) (missionFlags, error) {
+	all := make([]missionFlags, 0, len(targets))
+	for _, t := range targets {
+		f, err := readMissionFlags(t.dir)
+		if err != nil {
+			return missionFlags{}, fmt.Errorf("%s: %v", bold(t.vol), err)
+		}
+		all = append(all, f)
+	}
+	return mergeMissionFlags(all), nil
+}
+
+// carryFlags puts the mission's flags on the cold copies that are about to
+// become its only copies, before the hot ones go.
+//
+// -evict proves every *file* survives on cold and then removes the whole hot
+// directory, which took the flags with it — and flags are deliberately never
+// synced, so there was nothing to bring them back from. They are a dotfile, so
+// writing one to a cold drive is invisible to findFiles, checksums.b3, -verify
+// and -check and cannot make the archive look out of date; and flagStore reads
+// every mounted drive holding the mission, so -serve and -resolve pick a cold
+// copy's flags up exactly like a hot one's. The cold drive is already mounted
+// and being read at this point, so this costs nothing that evicting did not
+// already cost.
+func carryFlags(p evictPlan) error {
+	if len(p.flags.Flags) == 0 {
+		return nil
+	}
+	for _, b := range p.backups {
+		cur, err := readMissionFlags(b.dir)
+		if err != nil {
+			return fmt.Errorf("%s: %v", bold(b.vol), err)
+		}
+		if err := writeMissionFlags(b.dir, mergeMissionFlags([]missionFlags{cur, p.flags})); err != nil {
+			return fmt.Errorf("%s: %v", bold(b.vol), err)
+		}
+	}
+	return nil
 }
 
 // qualifyBackups returns the cold copies that justify deleting the hot ones,
@@ -275,8 +332,12 @@ func printEvictPlan(plans []evictPlan, minCopies int, quick bool) {
 		for _, b := range p.backups {
 			keep = append(keep, b.vol)
 		}
-		fmt.Printf("  %-*s  %s %s  %s %s\n", width, p.slug,
+		fmt.Printf("  %-*s  %s %s  %s %s", width, p.slug,
 			red("−"), strings.Join(from, ", "), dim("keeping"), green(strings.Join(keep, ", ")))
+		if n := len(p.flags.Flags); n > 0 {
+			fmt.Printf("  %s", dim(fmt.Sprintf("· %d flag(s) carried across", n)))
+		}
+		fmt.Println()
 	}
 	fmt.Println()
 	if quick {

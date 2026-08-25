@@ -1,21 +1,53 @@
 # Bugs
 
-Findings from a read of the whole tree on 2026-08-25. `go build`, `go vet` and
-`go test ./...` were all clean, so none of these were caught by the existing
-suite. Line numbers are against commit `d7d6706` plus the progress-bar fix.
+Findings from two reads of the whole tree, both on 2026-08-25. `go build`,
+`go vet` and `go test -race ./...` were clean before each of them, so nothing
+here was caught by the existing suite. Line numbers for the first read are
+against commit `d7d6706` plus the progress-bar fix; for the second, against
+commit `156d41c`.
 
-No open findings remain from that read. The fixed entries are kept for context —
-they explain why `progress.go`, the `metadataFiles` set in `util.go`, the hot
-manifest read in `evict.go`, the `name()` calls in `sync.go`, the hashed look
-IDs in `colour.go`, the `interruptTarget` in `main.go`, the `.qcp-part-`
-temporaries in `copy.go`, the verify-phase gates in `sync.go`, `replicate.go`
-and `main.go` and the `isMissionDir` predicate and `missionDirs` helper in
-`organise.go` look the way they do. Each entry says what was wrong, how it was
-confirmed, and what the fix does, newest first.
+No open findings remain. The fixed entries are kept for context — each says what
+was wrong, how it was confirmed, and what the fix does, newest first. Every
+entry from the second read has a regression test that fails with the fix
+reverted and passes with it in place; each was confirmed the same way before
+being written.
 
 ---
 
 ## Fixed
+
+### `-evict` destroyed the mission's flags
+
+`qualifyBackups` proves every *file* survives on cold, and `runEvict` then
+removed the whole hot directory (`evict.go:134`) — which took
+`.qcp-flags.json` with it. Flags are deliberately never synced, so there was
+nothing to bring them back from: the one piece of state in qcp a person creates
+rather than derives, destroyed by the one command that deletes, with no warning
+in the plan and no way back. Confirmed by evicting a mission with a flag set and
+finding the file gone.
+
+Fixed by carrying them. `targetFlags` merges the flags across the hot copies
+about to go, `carryFlags` merges that into each qualifying cold copy — newest
+timestamp winning, the same rule `mergeMissionFlags` already applies across
+drives — and a mission whose flags could not be read or written is refused
+rather than deleted, matching the stance `flagStore.read` takes and the one
+`qualifyBackups` takes on an unreadable manifest. The plan says how many flags
+are being carried.
+
+Writing to a cold drive here breaks no invariant: a dotfile is invisible to
+`findFiles`, `checksums.b3`, `-verify` and `-check`, so it cannot make an
+archive look out of date, and the cold drive is already mounted and being read
+at that point. `flagStore` reads every mounted drive holding a mission, so
+`-serve` and `-resolve` pick a cold copy's flags up exactly like a hot one's.
+
+Regression test in `evict_test.go`: a flag on the hot copy and an older,
+different one already on the cold copy, asserting both survive the eviction and
+that `flagStore.read` returns the union afterwards from the cold drive alone.
+
+Left alone: flags on an evicted mission become read-only, because
+`flagStore.set` writes to hot drives only and there is no longer a hot copy.
+That is the pre-existing rule about never spinning up an archive HDD to toggle a
+flag, and it now fails with a message rather than silently.
 
 ### `-ingest` had no interrupt gate after either phase
 
