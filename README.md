@@ -195,7 +195,7 @@ qcp -check all                        # check every mission in current year
 qcp -check all -year all              # check the entire archive
 ```
 
-`-check` also compares the `checksums.b3` files between drives and reports any file whose recorded hash differs (`≠`). This is the one thing `-verify` cannot catch: it holds each drive to its own manifest, so two copies that differ but are each self-consistent both pass. Comparing the stored manifests costs nothing beyond reading them.
+`-check` compares the mission's content — what a transfer would carry, so each drive's own `checksums.b3` is not one of the files compared. It also compares the `checksums.b3` files between drives and reports any file whose recorded hash differs (`≠`). This is the one thing `-verify` cannot catch: it holds each drive to its own manifest, so two copies that differ but are each self-consistent both pass. Comparing the stored manifests costs nothing beyond reading them.
 
 `-list` shows each mission's size and a column per drive: `✓` where that drive's copy is fully covered by its `checksums.b3`, `·` where the mission is present but not (or only partly) checksummed, `−` where it is absent. Sizes come from the first drive holding the mission and exclude `checksums.b3` itself, so they match across drives. Getting them means walking each mission directory, so `-list` does real work now rather than only reading directory names. `-check` / `-check all` compare each mission against every cold drive scoped for that year and report missing or extra files. Exits 1 if any mission is incomplete.
 

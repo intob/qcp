@@ -119,8 +119,36 @@ func findFiles(root string) ([]fileEntry, error) {
 	return files, err
 }
 
-// missionFiles returns the mission's files as they are on disk, excluding
-// checksums.b3 itself. The third return value is the number of files listed in
+// contentFiles lists a mission's content: everything findFiles sees, less qcp's
+// own bookkeeping at the top level.
+//
+// This is the answer to "what is this mission", and every command that compares
+// or transfers one has to use the same answer. A manifest describes the
+// directory it sits in, so it is not part of the mission it describes: -sync
+// and -replicate never carry one across, and -check must not therefore read a
+// cold copy that has not been checksummed yet as a copy that is missing a file
+// — it used to, and then told the user to run -sync, which would never copy it.
+//
+// Only top-level entries are excluded, matching what the transfers skip.
+// .qcp-flags.json is in metadataFiles for completeness; findFiles already drops
+// it with every other dotfile.
+func contentFiles(dir string) ([]fileEntry, error) {
+	all, err := findFiles(dir)
+	if err != nil {
+		return nil, err
+	}
+	files := make([]fileEntry, 0, len(all))
+	for _, f := range all {
+		if metadataFiles[f.rel] {
+			continue
+		}
+		files = append(files, f)
+	}
+	return files, nil
+}
+
+// missionFiles returns the mission's content as it is on disk — contentFiles,
+// so without checksums.b3 or the other bookkeeping. The third return value is the number of files listed in
 // checksums.b3 but absent from disk; callers should treat a non-zero value as
 // an error.
 //
@@ -130,18 +158,13 @@ func findFiles(root string) ([]fileEntry, error) {
 // be invisible to -checksum, which would then rewrite the manifest without it,
 // and to -sync, which would never copy it to a cold drive.
 func missionFiles(dir string) ([]fileEntry, int64, int, error) {
-	all, err := findFiles(dir)
+	files, err := contentFiles(dir)
 	if err != nil {
 		return nil, 0, 0, err
 	}
-	files := make([]fileEntry, 0, len(all))
-	onDisk := make(map[string]bool, len(all))
+	onDisk := make(map[string]bool, len(files))
 	var total int64
-	for _, f := range all {
-		if f.rel == "checksums.b3" {
-			continue
-		}
-		files = append(files, f)
+	for _, f := range files {
 		onDisk[f.rel] = true
 		total += f.size
 	}
@@ -244,14 +267,11 @@ func isFullyChecksummed(dir string) bool {
 	if len(manifest) == 0 {
 		return false
 	}
-	files, err := findFiles(dir)
+	files, err := contentFiles(dir)
 	if err != nil || len(files) == 0 {
 		return false
 	}
 	for _, f := range files {
-		if f.rel == "checksums.b3" {
-			continue // manifest never lists itself
-		}
 		if manifest[f.rel] == "" {
 			return false
 		}

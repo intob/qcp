@@ -133,7 +133,7 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 		return false
 	}
 
-	refFiles, err := findFiles(refDir)
+	refFiles, err := contentFiles(refDir)
 	if err != nil {
 		fmt.Printf("%s scanning %s on %s: %v\n", red("ERROR"), slug, refVol, err)
 		return false
@@ -184,7 +184,7 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 			totalMissing += len(refFiles)
 			continue
 		}
-		coldFiles, err := findFiles(coldDir)
+		coldFiles, err := contentFiles(coldDir)
 		if err != nil {
 			header()
 			fmt.Printf("%s scanning %s on %s: %v\n", red("ERROR"), slug, cold.name(), err)
@@ -383,7 +383,7 @@ func runCheck(cfg Config, year int) bool {
 
 	for _, slug := range slugs {
 		rm := refBySlug[slug]
-		refFiles, err := findFiles(rm.dir)
+		refFiles, err := contentFiles(rm.dir)
 		if err != nil {
 			fmt.Printf("%s scanning %s on %s: %v\n", red("ERROR"), slug, rm.vol, err)
 			continue
@@ -419,7 +419,7 @@ func runCheck(cfg Config, year int) bool {
 				totalMissing += len(refFiles)
 				continue
 			}
-			coldFiles, err := findFiles(coldDir)
+			coldFiles, err := contentFiles(coldDir)
 			if err != nil {
 				fmt.Printf("%s scanning %s on %s: %v\n", red("ERROR"), slug, cold.name(), err)
 				gaps = append(gaps, gap{

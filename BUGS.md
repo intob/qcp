@@ -16,6 +16,38 @@ being written.
 
 ## Fixed
 
+### `-check` failed over a file `-sync` will never copy, and told you to run `-sync`
+
+`-check` listed a mission with `findFiles`, which includes `checksums.b3`, while
+`-sync` and `-replicate` plan from `missionFiles`, which deliberately excludes
+it. A cold copy that had not been checksummed yet therefore read as a copy
+missing a file: `− checksums.b3`, counted into the total, exit 1, and
+`run -sync to copy missing files to cold drives` — which never copies one. The
+reverse pairing reported it as an extra file on the cold drive.
+
+Confirmed on one tree: `-sync` printed `all drives are in sync` while `-check`
+printed `1 files missing from cold drives` and returned false. A cold drive
+unmounted during `-checksum` is the ordinary way in, and there is no `-sync` that
+resolves it — only `-checksum` on the drive that is short.
+
+Fixed with `contentFiles` (`util.go:135`), one answer to "what is this mission" that
+the planner and the checker share: everything `findFiles` sees, less the
+`metadataFiles` names at the top level. `missionFiles` and `isFullyChecksummed`
+now build on it — which widens their existing `checksums.b3` skip to the other
+three, none of which can legitimately be footage — and the four `findFiles`
+calls in `check.go` go through it.
+
+Regression test in `check_test.go`: the same mission with neither copy
+checksummed, then each in turn, asserting `-check`, `-check 42` and `-sync` all
+agree it is complete in all three cases. Plus a unit test that `contentFiles`
+excludes only top-level bookkeeping — a nested `checksums.b3` is footage until
+something says otherwise, matching what the transfers carry.
+
+Left alone: `scanMissions` (`status.go:173`) still inlines its own
+`checksums.b3` skip for the sizes `-list` prints. It agrees with the helper on
+the only file that can occur there, and routing it through would mean giving up
+the single walk it does.
+
 ### `-evict` destroyed the mission's flags
 
 `qualifyBackups` proves every *file* survives on cold, and `runEvict` then
