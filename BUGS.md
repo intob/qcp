@@ -7,33 +7,16 @@ suite. Line numbers are against commit `d7d6706` plus the progress-bar fix.
 Findings that have since been fixed are recorded at the bottom for context —
 they explain why `progress.go`, the `metadataFiles` set in `util.go`, the hot
 manifest read in `evict.go`, the `name()` calls in `sync.go`, the hashed look
-IDs in `colour.go`, the `interruptTarget` in `main.go` and the `.qcp-part-`
-temporaries in `copy.go` look the way they do.
+IDs in `colour.go`, the `interruptTarget` in `main.go`, the `.qcp-part-`
+temporaries in `copy.go` and the verify-phase gates in `sync.go` and
+`replicate.go` look the way they do.
 
 Ordered by severity. Each entry says what is wrong, how it was confirmed, and
-what a fix would have to do; none of them have been attempted.
+what a fix would have to do; none of the open ones have been attempted.
 
 ---
 
-## 1. Interrupt during the verify phase is not honoured in `-sync` / `-replicate`
-
-`sync.go:346`, `replicate.go:327`
-
-The copy phase bails out with `if ctx.Err() != nil { select {} }`, handing
-control to the interrupt handler. The verify phase that follows has the per-file
-`ctx.Err()` guards inside the workers but no equivalent gate after
-`p2.Wait()` — so an interrupt there falls through to writing `checksums.b3` and
-printing the success summary while the handler is still waiting on stdin for the
-delete prompt.
-
-`pull.go:290` and `pull.go:365` do have the gate on both phases, so this is an
-inconsistency between the three, not a design decision.
-
-**Fix direction.** Add the same gate after `p2.Wait()` in both files.
-
----
-
-## 2. `-list` and `-status` do not filter to numbered missions
+## 1. `-list` and `-status` do not filter to numbered missions
 
 `status.go:84` (`runStatus`), `status.go:406` (`runList`)
 
@@ -54,7 +37,64 @@ than reusing.
 
 ---
 
+## 2. `-ingest` has no interrupt gate after either phase
+
+`main.go:729` (after `p1.Wait()`), `main.go:801` (after `p2.Wait()`)
+
+Found while fixing the entry below. `runDay` is the fourth copy-then-verify
+function in the tree and the only one with no `ctx.Err()` gate at all: the other
+three now stop after both phases. An interrupt during either phase therefore
+runs on to write `checksums.b3`, print `✓ Done … copied and verified`, call
+`intr.clear()` and start `runIngestProxies` — ffmpeg competing for the terminal
+while the handler is still waiting on stdin for the delete prompt. If the answer
+is `y` the mission is then removed, after the run has already claimed it
+verified.
+
+Worse than the sync case, because the workers' own `ctx.Err()` guards make it
+look clean: the copies and verifies that had not started return early, so
+`copyFailed` and `verifyFailed` are both zero and the manifest is written from
+whatever subset happened to finish.
+
+**Fix direction.** The same gate after both `p1.Wait()` and `p2.Wait()`. Note
+that `intr.get()` is called at the top of the handler, so the snapshot is
+already taken by the time `intr.clear()` runs — the wrong-mission-deleted
+failure is not reachable, but every other consequence is.
+
+---
+
 ## Fixed
+
+### An interrupt during the verify phase was ignored by `-sync` and `-replicate`
+
+Both gated the copy phase with `if ctx.Err() != nil { select {} }` after
+`p1.Wait()`, handing control to the interrupt handler, and both then ran the
+verify phase with no equivalent gate after `p2.Wait()`. The per-file `ctx.Err()`
+checks inside the verify workers only stopped hashes that had not started, so an
+interrupt there fell through to writing `checksums.b3` and printing the success
+summary — `✓ N synced to M archive(s)` — while the handler was still blocked on
+stdin asking whether to delete the partial directories. Answering `y` then
+deleted what the run had just reported as synced.
+
+The manifest was the durable half of the damage. Only the files whose verify
+happened to finish before the cancel land in `checksums`, and `mergeChecksums`
+merges them into any existing `checksums.b3`, so an interrupted sync left a
+manifest that agreed with a partial directory: a later `-evict` reads that
+manifest as a full accounting of the cold copy, and `-check` compares against it.
+
+Fixed by adding the gate after `p2.Wait()` in both files, matching `pull.go:365`
+which already had it on both phases — this was an inconsistency between the
+three, not a design decision. `replicate.go`'s bare `select {}` on the copy
+phase picked up the same comment as the other three sites while there.
+
+No regression test: `runSync` and `runReplicate` are single ~390-line functions
+that scan real drives, print and prompt, so the interrupt path is not reachable
+from a unit test without splitting them up first — the same reason the hot-drive
+naming fix below has none.
+
+Left alone: the gate stops the goroutine, it does not undo the copies in
+flight. Those are already safe by the `.qcp-part-` rename below, so an interrupt
+leaves whole files or nothing, and the handler's offer to delete the directories
+it created is what covers the rest.
 
 ### An interrupted copy left a truncated file that the re-run then skipped
 

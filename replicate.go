@@ -324,7 +324,7 @@ func runReplicate(cfg Config, year int, skipConf bool) bool {
 	}
 	p1.Wait()
 	if ctx.Err() != nil {
-		select {}
+		select {} // interrupt handler will os.Exit after user responds
 	}
 
 	var copyFailed int
@@ -396,6 +396,9 @@ func runReplicate(cfg Config, year int, skipConf bool) bool {
 		t.flush()
 	}
 	p2.Wait()
+	if ctx.Err() != nil {
+		select {} // interrupt handler will os.Exit after user responds
+	}
 
 	if verifyFailed.Load() > 0 {
 		exit(1, "%d file(s) failed verification", verifyFailed.Load())

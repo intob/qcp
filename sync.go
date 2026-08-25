@@ -416,6 +416,9 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 		t.flush()
 	}
 	p2.Wait()
+	if ctx.Err() != nil {
+		select {} // interrupt handler will os.Exit after user responds
+	}
 
 	if verifyFailed.Load() > 0 {
 		exit(1, "%d file(s) failed verification", verifyFailed.Load())
