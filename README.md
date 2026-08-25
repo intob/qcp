@@ -273,8 +273,10 @@ The transform is chosen per clip from the Sony `*M01.XML` sidecar, which records
 
 The two 33³ `.cube` files are computed in Go at first use and cached under
 `<drive>/proxies/luts/`. Nothing binary is committed and nothing is downloaded.
-A clip with no sidecar inherits the most common transform in its mission, since
-capture settings do not change mid-card.
+A clip with no sidecar inherits the most common transform on its own card,
+since capture settings do not change mid-card. A card with no sidecar anywhere
+on it — a GoPro or drone card sitting in a mission alongside Sony ones — has
+nothing to inherit and passes through.
 
 Proxies mirror the mission layout on the target drive:
 

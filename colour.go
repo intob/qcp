@@ -352,22 +352,32 @@ func readSidecarColour(clip string) (gamma, prim string, ok bool) {
 	return gamma, prim, true
 }
 
-// clipColour is what a clip's sidecar said about how it was shot. Found is
-// false when there was no sidecar to read.
+// clipColour is what a clip's sidecar said about how it was shot, and which
+// card it came off. Found is false when there was no sidecar to read.
 type clipColour struct {
+	// Card is the card volume subfolder, "" for a flat mission. It is the
+	// scope inheritance works within — see fillMissingColour.
+	Card  string
 	Gamma string
 	Prim  string
 	Found bool
 }
 
 // fillMissingColour resolves the transform for every clip in one mission,
-// giving clips with no sidecar the most common transform among those that have
-// one. Seven of the 2,530 MXF in the library are missing a sidecar; capture
-// settings do not change mid-card, so the mission is the right scope to
-// inherit from. A mission with nothing to inherit passes through.
+// giving a clip with no sidecar the most common transform among the clips that
+// share its card. Seven of the 2,530 MXF in the library are missing a sidecar
+// and capture settings do not change mid-card, so a card is the right scope to
+// inherit within. It has to be the card and not the mission, because a mission
+// routinely holds more than one camera: 002_Portugal pairs 147 Sony MXF with 19
+// DJI clips under Drone_Andu/, and inheriting mission-wide handed the Sony
+// S-Log3 conversion to every one of the DJI ones — which, once a look was
+// configured, baked an S-Log3 grade onto footage that never was S-Log3.
+//
+// A card with no sidecar anywhere on it has nothing to inherit and passes
+// through, which is the right answer for a card full of GoPro or DJI clips.
 func fillMissingColour(clips []clipColour) []colourTransform {
 	out := make([]colourTransform, len(clips))
-	counts := make(map[string]int)
+	counts := make(map[string]map[string]int)
 	byID := make(map[string]colourTransform)
 	for i, c := range clips {
 		if !c.Found {
@@ -375,22 +385,36 @@ func fillMissingColour(clips []clipColour) []colourTransform {
 		}
 		t := pickTransform(c.Gamma, c.Prim)
 		out[i] = t
-		counts[t.ID]++
+		if counts[c.Card] == nil {
+			counts[c.Card] = make(map[string]int)
+		}
+		counts[c.Card][t.ID]++
 		byID[t.ID] = t
 	}
 
-	fallback := transformNone
-	best := 0
-	// Ties break on ID so a re-run picks the same transform as the last one.
-	for id, n := range counts {
-		if n > best || (n == best && id < fallback.ID) {
-			fallback, best = byID[id], n
+	fallback := make(map[string]colourTransform, len(counts))
+	for card, tally := range counts {
+		best, bestN := transformNone, 0
+		// Ties break on ID so a re-run picks the same transform as the last one.
+		for id, n := range tally {
+			if n > bestN || (n == bestN && id < best.ID) {
+				best, bestN = byID[id], n
+			}
 		}
+		fallback[card] = best
 	}
 	for i, c := range clips {
-		if !c.Found {
-			out[i] = fallback
+		if c.Found {
+			continue
 		}
+		// Explicitly transformNone rather than the zero value, so a card with
+		// nothing to inherit records "none" in the manifest like any other
+		// pass-through clip instead of an empty transform ID.
+		t, ok := fallback[c.Card]
+		if !ok {
+			t = transformNone
+		}
+		out[i] = t
 	}
 	return out
 }

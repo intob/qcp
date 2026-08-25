@@ -96,7 +96,7 @@ type clipMeta struct {
 
 	Gamma     string `json:"gamma,omitempty"`
 	Primaries string `json:"primaries,omitempty"`
-	Sidecar   bool   `json:"sidecar"`   // false = inherited from the rest of the mission
+	Sidecar   bool   `json:"sidecar"`   // false = inherited from the rest of the card
 	Transform string `json:"transform"` // transform ID actually applied
 
 	// BrowseSpec is the tier the browse rendition was built with, so a change
@@ -695,20 +695,20 @@ func planMission(src proxySource, outDir string, tiers proxyTiers, look string) 
 		prev, ok := p.existing[f.rel]
 		if ok && !prev.stale(j.size, j.mtime, j.srcHash) {
 			j.meta, j.cached, cached[i] = prev, true, true
-			colours[i] = clipColour{Gamma: prev.Gamma, Prim: prev.Primaries, Found: prev.Sidecar}
+			colours[i] = clipColour{Card: cardOf(f.rel), Gamma: prev.Gamma, Prim: prev.Primaries, Found: prev.Sidecar}
 		} else {
 			gamma, prim, found := readSidecarColour(j.src)
-			colours[i] = clipColour{Gamma: gamma, Prim: prim, Found: found}
+			colours[i] = clipColour{Card: cardOf(f.rel), Gamma: gamma, Prim: prim, Found: found}
 		}
 		jobs[i] = j
 	}
 
 	transforms := fillMissingColour(colours)
 	// A configured look replaces the technical conversion wherever there was
-	// one to replace. Detection and the mission-wide inheritance above still
-	// decide *which* clips are log; the look only changes what they are taken
-	// through. Clips that pass through are already Rec.709 and stay untouched —
-	// the cube expects log, and there is none to give it.
+	// one to replace. Detection and the per-card inheritance above still decide
+	// *which* clips are log; the look only changes what they are taken through.
+	// Clips that pass through are already Rec.709 and stay untouched — the cube
+	// expects log, and there is none to give it.
 	if look != "" {
 		lt := lookTransform(look)
 		for i := range transforms {

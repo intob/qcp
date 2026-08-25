@@ -92,7 +92,7 @@ func TestPickTransform(t *testing.T) {
 }
 
 // Seven of 2,530 MXF in the library have no sidecar. Capture settings do not
-// change mid-card, so those inherit whatever the rest of the mission used.
+// change mid-card, so those inherit whatever the rest of their card used.
 func TestFillMissingColour(t *testing.T) {
 	cine := clipColour{Gamma: "s-log3-cine", Prim: "s-gamut3-cine", Found: true}
 	plain := clipColour{Gamma: "s-log3", Prim: "s-gamut3", Found: true}
@@ -123,6 +123,30 @@ func TestFillMissingColour(t *testing.T) {
 			"a lone sidecar is enough to inherit from",
 			[]clipColour{none, cine, none},
 			[]string{transformSGamut3Cine.ID, transformSGamut3Cine.ID, transformSGamut3Cine.ID},
+		},
+		{
+			// 002_Portugal: 147 Sony MXF at the mission root beside 19 DJI
+			// clips under Drone_Andu/. Inheriting mission-wide handed the
+			// Sony conversion to the drone card and baked a grade onto
+			// footage that never was S-Log3.
+			"a second camera's card does not inherit the Sony conversion",
+			[]clipColour{
+				{Card: "", Gamma: "s-log3-cine", Prim: "s-gamut3-cine", Found: true},
+				{Card: "", Gamma: "s-log3-cine", Prim: "s-gamut3-cine", Found: true},
+				{Card: "Drone_Andu"},
+				{Card: "Drone_Andu"},
+			},
+			[]string{transformSGamut3Cine.ID, transformSGamut3Cine.ID, transformNone.ID, transformNone.ID},
+		},
+		{
+			"a sidecar-less clip still inherits from its own card",
+			[]clipColour{
+				{Card: "A", Gamma: "s-log3", Prim: "s-gamut3", Found: true},
+				{Card: "A"},
+				{Card: "B", Gamma: "s-log3-cine", Prim: "s-gamut3-cine", Found: true},
+				{Card: "B"},
+			},
+			[]string{transformSGamut3.ID, transformSGamut3.ID, transformSGamut3Cine.ID, transformSGamut3Cine.ID},
 		},
 	} {
 		got := fillMissingColour(tc.clips)
@@ -259,6 +283,7 @@ func TestLookOnlyDisplacesALogConversion(t *testing.T) {
 	clips := []clipColour{
 		{Gamma: "s-log3-cine", Prim: "s-gamut3-cine", Found: true},
 		{Gamma: "rec709", Prim: "rec709", Found: true}, // GoPro / DJI
+		{Card: "Drone_Andu"}, // GoPro / DJI, no sidecar to read
 	}
 	got := fillMissingColour(clips)
 	if got[0].passthrough() {
@@ -266,6 +291,9 @@ func TestLookOnlyDisplacesALogConversion(t *testing.T) {
 	}
 	if !got[1].passthrough() {
 		t.Fatal("the Rec.709 clip should pass through before any look is applied")
+	}
+	if !got[2].passthrough() {
+		t.Fatal("a card with no sidecar on it has nothing to inherit and must pass through")
 	}
 	// planMission substitutes only where a conversion already existed; mirror
 	// that rule here so the invariant is pinned even if the caller moves.
@@ -280,5 +308,8 @@ func TestLookOnlyDisplacesALogConversion(t *testing.T) {
 	}
 	if !got[1].passthrough() {
 		t.Error("the Rec.709 clip was graded — it has no log to give the cube")
+	}
+	if !got[2].passthrough() {
+		t.Error("the sidecar-less drone card was graded — it has no log to give the cube")
 	}
 }

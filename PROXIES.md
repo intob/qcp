@@ -163,8 +163,13 @@ Using the `.Cine` LUT on S-Gamut3 footage costs a median of 0 and a mean of
 subjects, which here means the wings. Detection is free, so do it properly.
 
 2,523 of 2,530 MXF have a sidecar. The seven without need a fallback; inheriting
-from the rest of the mission is reasonable, since capture settings do not change
-mid-card.
+from the rest of the *card* is reasonable, since capture settings do not change
+mid-card. The card and not the mission: a mission routinely holds more than one
+camera, and 002_Portugal — 147 Sony MXF at the root beside 19 DJI clips under
+`Drone_Andu/` — inherited mission-wide handed the Sony conversion to the drone
+card, which once a look was configured baked an S-Log3 grade onto footage that
+never was S-Log3. A card with no sidecar anywhere on it has nothing to inherit
+and passes through, which is the right answer for a card of GoPro or DJI clips.
 
 ### Trap 1: the range convention
 
@@ -492,7 +497,7 @@ machinery reads it unchanged. It covers `proxies.json` too.
 `proxies.json` records per clip: source relative path, source BLAKE3 (from
 `checksums.b3`), size and mtime, duration, resolution, frame rate, codec, the
 detected `CaptureGammaEquation` and `CaptureColorPrimaries`, whether those came
-from a sidecar or were inherited from the mission, and which transform was
+from a sidecar or were inherited from the card, and which transform was
 applied. A re-run skips any clip whose recorded source hash still matches, and
 reuses the cached sidecar reading rather than re-parsing every XML.
 
@@ -534,7 +539,7 @@ tone-map and gamma encode — and nothing may be applied after it or the result 
 double-encoded.
 
 Only clips that already had a conversion take the look. Detection and the
-mission-wide sidecar inheritance still decide which clips are log; the look only
+per-card sidecar inheritance still decide which clips are log; the look only
 changes what those clips are taken through. GoPro and DJI material is already
 Rec.709, has no log to give the cube, and passes through untouched.
 
