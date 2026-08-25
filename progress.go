@@ -53,6 +53,21 @@ func (t *barTracker) flush() {
 	t.mu.Unlock()
 }
 
+// stop flushes, then releases the bar whether or not it filled. A byte-exact
+// bar that lands short means a file did not make it — a copy that failed, a
+// hash that could not be read — and mpb never fires the complete event for such
+// a bar, so Progress.Wait blocks on it forever and the caller never reaches the
+// line that reports the failure. Aborting also says so on screen: the bar stops
+// where it got to instead of being topped up to a total it never reached.
+//
+// A bar that did fill has already completed, and Abort is a no-op on one of
+// those, so this is the right call at the end of every phase rather than
+// something to reach for only on the error path.
+func (t *barTracker) stop() {
+	t.flush()
+	t.bar.Abort(false)
+}
+
 // finish flushes, then tops the bar up to its total. Byte-exact bars arrive
 // there on their own, but progress estimated from ffmpeg's reported time can
 // land short — and mpb waits forever on a bar that never fills.

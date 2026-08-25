@@ -130,7 +130,7 @@ func runVerify(cfg Config, missionNum int, year int) bool {
 		wp.wait()
 	}
 	for _, t := range trackers {
-		t.flush()
+		t.stop()
 	}
 	p.Wait()
 

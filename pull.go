@@ -283,7 +283,7 @@ func runTransfer(cfg Config, spec transferSpec, missions []int, year int, sub st
 		wp.wait()
 	}
 	for _, t := range copyBars {
-		t.flush()
+		t.stop()
 	}
 	p1.Wait()
 	if ctx.Err() != nil {
@@ -358,7 +358,7 @@ func runTransfer(cfg Config, spec transferSpec, missions []int, year int, sub st
 		wp.wait()
 	}
 	for _, t := range verifyBars {
-		t.flush()
+		t.stop()
 	}
 	p2.Wait()
 	if ctx.Err() != nil {

@@ -16,6 +16,52 @@ being written.
 
 ## Fixed
 
+### Every progress-bar phase hung instead of reporting a read or copy failure
+
+`barTracker.flush()` (`progress.go:47`) drains pending bytes into the bar; it
+does not make the bar complete. mpb fires the complete event only when `current`
+reaches `total` and releases `Progress.Wait` only on that event, so a bar left
+short blocks `Wait` forever — the same mechanism as the `total <= 0` hang below,
+in its partial-fill form, and not fixed by that fix.
+
+Every failure path leaves a bar short, because the failed file's bytes went into
+the total and never into the progress. And every one of these phases reports its
+failures on the line *after* the `Wait`, so the effect was that the ERROR line
+printed and the run then sat there behind a stalled bar with the summary,
+the exit code and — on `-ingest` — the `exit(10)`/`exit(11)` all unreachable.
+Twelve sites: `verify.go:133`, `checksum.go:268` and `394`, `main.go:727` and
+`802`, `sync.go:342` and `416`, `replicate.go:323` and `396`, `pull.go:286` and
+`361`, `evict.go:371`.
+
+Confirmed against `runVerify`, `runChecksum` and `runCopy` on real temporary
+drives with one `chmod 000` file standing in for a bad sector: each printed its
+error and had not returned five seconds later. `-verify` is the sharpest case,
+since an unreadable file is the thing it exists to find. A hash *mismatch* was
+never affected — that still reads the whole file, so the bar fills and the
+failure is reported correctly.
+
+Worse on `-ingest`, where the hang happens with `intr` still armed: the Ctrl-C
+needed to get out lands in the interrupt handler, which offers to delete the
+mission that was in flight.
+
+Fixed with `barTracker.stop()` (`progress.go:66`) — flush, then `Abort(false)`,
+which mpb treats as a no-op on a bar that already completed. All twelve sites
+call it instead of `flush()`. Abort rather than top-up because a byte-exact bar
+that lands short means a file did not make it, and the bar should say so: it
+stops where it got to rather than showing a total it never reached. `finish()`
+is unchanged and still tops up, because the two callers it has — `index.go:307`
+and `proxy.go:1223` — estimate progress from ffmpeg's reported time and land
+legitimately short.
+
+Regression tests in `progress_test.go` alongside the zero-total ones, asserting
+both directions: a bar left short releases `Wait` and comes out aborted, a bar
+that filled comes out complete rather than aborted, and one short bar does not
+strand the other bars on the same container.
+
+Left alone: `flush()` itself, which is still the right call mid-phase, and the
+fact that a failed phase now shows a partly-filled bar rather than a bar that
+disappears — which is the point.
+
 ### `-organise` took `000_*` missions apart
 
 `scanUnorganised` (`organise.go:224`) decided "already in a mission, leave it

@@ -265,7 +265,7 @@ func runChecksumYear(cfg Config, year int) bool {
 	}
 
 	for _, t := range bars {
-		t.flush()
+		t.stop()
 	}
 	p.Wait()
 
@@ -391,7 +391,7 @@ func runChecksum(cfg Config, missionNum int, year int) bool {
 		dp.wait()
 	}
 	for _, t := range trackers {
-		t.flush()
+		t.stop()
 	}
 	p.Wait()
 

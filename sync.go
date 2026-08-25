@@ -339,7 +339,7 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 		wp.wait()
 	}
 	for _, t := range copyBars {
-		t.flush()
+		t.stop()
 	}
 	p1.Wait()
 	if ctx.Err() != nil {
@@ -413,7 +413,7 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 		wp.wait()
 	}
 	for _, t := range verifyBars {
-		t.flush()
+		t.stop()
 	}
 	p2.Wait()
 	if ctx.Err() != nil {

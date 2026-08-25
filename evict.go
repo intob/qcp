@@ -429,7 +429,7 @@ func verifyBackups(plans []evictPlan) bool {
 		wp.wait()
 	}
 	for _, t := range bars {
-		t.flush()
+		t.stop()
 	}
 	p.Wait()
 
