@@ -1207,6 +1207,16 @@ func generatePlans(plans []missionPlan, tiers proxyTiers, lutDir string) bool {
 						}
 						fmt.Printf("\n%s %s: %v\n", red("ERROR"), w.job.rel, err)
 						failures.Add(1)
+						// Nothing is recorded for a clip that failed. generateClip
+						// stamps the new SrcHash and Transform onto the entry
+						// before it does any work, and those two fields are what
+						// planMission tests to decide a clip is stale — so writing
+						// this entry would clear the very trigger that says the
+						// rendition on disk is out of date, and the next run would
+						// call a proxy carrying the old look up to date. The loop
+						// below keeps the last entry a *successful* run wrote, so
+						// the clip stays stale and comes back round next time.
+						return
 					}
 					mu.Lock()
 					metas[w.plan] = append(metas[w.plan], meta)

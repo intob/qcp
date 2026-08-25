@@ -16,6 +16,41 @@ being written.
 
 ## Fixed
 
+### A failed proxy re-bake recorded itself as up to date
+
+`generateClip` stamps the new `SrcHash` (`proxy.go:819`) and `Transform`
+(`proxy.go:823`) onto the manifest entry before doing any work, and
+`generatePlans` appended the returned entry whether the clip had succeeded or
+not (`proxy.go:1211` before the fix). Those two fields are exactly what `planMission` tests to
+decide a clip is stale, so writing the entry for a failed clip cleared the very
+trigger that said the rendition on disk was out of date.
+
+The next run then read a proxy carrying the *old* look as up to date, and every
+run after it did too. `BrowseSpec` and `EditSpec` never had the problem, because
+they are the two fields assigned only after a successful encode — which is what
+identified the asymmetry as the bug rather than the design.
+
+Confirmed with a clip recorded under `look/old@deadbeef`, its browse rendition,
+poster and sprite on disk and its source unchanged: the first plan has
+`todo = 1`, the encode fails, and the second plan has `todo = 0` with
+`transform: "none"` recorded against the old rendition. The way in is ordinary —
+configure or edit a look, run `-proxy all`, have one clip fail for any reason.
+
+Fixed by recording nothing for a clip that failed. The loop that keeps entries
+from previous runs (`proxy.go:1244`) already re-appends the last *successful*
+entry for any cached clip that was not regenerated, so the old transform ID
+survives and the clip stays stale. A clip that had no previous entry drops out
+of `proxies.json` entirely, which is correct: nothing was generated for it.
+
+Regression test in `proxy_test.go`, using a file ffprobe refuses as the stand-in
+for any encode failure, asserting both the recorded transform and that the next
+plan still has work to do.
+
+Left alone: the conservative half of this. When the browse tier encodes and the
+poster then fails, the whole entry is dropped, so the next run re-encodes the
+browse rendition it already has. Redoing work is the right failure for an
+archival tool, and the alternative — recording part of an entry — is the bug.
+
 ### `-check` failed over a file `-sync` will never copy, and told you to run `-sync`
 
 `-check` listed a mission with `findFiles`, which includes `checksums.b3`, while

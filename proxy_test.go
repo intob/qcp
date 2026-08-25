@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -494,5 +495,92 @@ func TestProxyWorkersIgnoreTheCopyReadLimit(t *testing.T) {
 	// The CPU cap still applies, so neither runs away on a small machine.
 	if got := proxyWorkers(ssd); got > proxyWorkersSSD {
 		t.Errorf("SSD workers %d exceeded the ceiling", got)
+	}
+}
+
+// generateClip stamps the new SrcHash and Transform onto the manifest entry
+// before it does any work, and those two fields are exactly what planMission
+// tests to decide a clip is stale. Recording the entry for a clip whose encode
+// then failed therefore cleared the very trigger that said the rendition on
+// disk was out of date: the next run read the old proxy as up to date and the
+// clip kept the look it was baked with forever, with nothing but one line of
+// scrollback to say so. BrowseSpec and EditSpec never had the problem because
+// they are assigned only after a successful encode.
+//
+// Nothing is recorded for a failed clip now, so the entry a *successful* run
+// wrote survives and the clip comes back round next time.
+func TestFailedClipKeepsItsPreviousManifestEntry(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "2026", "042_Test")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Not a video, so ffprobe refuses it — standing in for any encode failure.
+	clip := filepath.Join(dir, "clip.mp4")
+	if err := os.WriteFile(clip, []byte("not a video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sum, err := hashFile(clip, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "checksums.b3"), []byte(sum+"  clip.mp4\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(clip)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A complete rendition set from a previous run, baked with an older look.
+	outDir := filepath.Join(base, proxyRootName, "2026", "042_Test")
+	for _, rel := range []string{"browse/clip.mp4", "stills/clip.poster.jpg", "stills/clip.sprite.jpg"} {
+		p := filepath.Join(outDir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("from the old look"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const oldLook = "look/old@deadbeef"
+	prev := proxyManifest{Version: proxyManifestVersion, Year: 2026, Mission: "042_Test", Clips: []clipMeta{{
+		Rel: "clip.mp4", Size: fi.Size(), SrcHash: sum, SrcMtime: fi.ModTime().Unix(),
+		Duration: 10, Width: 1920, Height: 1080, FPS: 25, Codec: "h264",
+		Transform: oldLook, BrowseSpec: browseSpec(),
+		Browse: "browse/clip.mp4",
+		Poster: "stills/clip.poster.jpg", Sprite: "stills/clip.sprite.jpg",
+	}}}
+	raw, err := json.MarshalIndent(prev, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outDir, proxyMetaName), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Config{Drives: []DriveConfig{{Volume: "T9", Path: base, Role: "hot"}}}
+	src, err := proxySourceForSlug(cfg, "2026", "042_Test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tiers := proxyTiers{browse: true}
+	lutDir := filepath.Join(base, proxyRootName, lutDirName)
+
+	// The recorded transform no longer matches, so the clip needs re-baking.
+	if plan := planMission(src, outDir, tiers, colourTransform{}); plan.todo != 1 {
+		t.Fatalf("first plan: todo = %d, want 1", plan.todo)
+	}
+	plan := planMission(src, outDir, tiers, colourTransform{})
+	if generatePlans([]missionPlan{plan}, tiers, lutDir) {
+		t.Fatal("generatePlans reported success on a clip ffprobe cannot read")
+	}
+
+	if got := readProxyManifest(outDir).byRel()["clip.mp4"].Transform; got != oldLook {
+		t.Errorf("manifest transform = %q after a failed re-bake, want the old %q — "+
+			"the rendition on disk is still the old one", got, oldLook)
+	}
+	if again := planMission(src, outDir, tiers, colourTransform{}); again.todo != 1 {
+		t.Errorf("second plan: todo = %d, want 1 — the failed clip is now read as up to date", again.todo)
 	}
 }
