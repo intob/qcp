@@ -115,25 +115,25 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 			srcDir := filepath.Join(p.yearDir, slug)
 			files, size, ghosts, err := missionFiles(srcDir)
 			if err != nil {
-				fmt.Printf("%s scanning %s on %s: %v\n", red("ERROR"), slug, bold(p.Volume), err)
+				fmt.Printf("%s scanning %s on %s: %v\n", red("ERROR"), slug, bold(p.name()), err)
 				continue
 			}
 			if ghosts > 0 {
 				fmt.Printf("%s %s on %s: %d file(s) in checksums.b3 missing from disk — cold drives will be incomplete\n",
-					red("ERROR"), slug, bold(p.Volume), ghosts)
+					red("ERROR"), slug, bold(p.name()), ghosts)
 				hasGhosts = true
 			}
 			if existing, ok := missionSources[slug]; ok {
 				if !missionManifestsMatch(existing.files, files) {
 					fmt.Printf("%s %s differs between %s and %s — skipping\n",
-						red("CONFLICT"), slug, bold(existing.srcVol), bold(p.Volume))
+						red("CONFLICT"), slug, bold(existing.srcVol), bold(p.name()))
 					delete(missionSources, slug)
 					conflicted[slug] = true
 				}
 				// identical on both primaries — keep existing source
 				continue
 			}
-			missionSources[slug] = missionSource{p.Volume, p.basePath(), srcDir, files, size}
+			missionSources[slug] = missionSource{p.name(), p.basePath(), srcDir, files, size}
 		}
 	}
 
@@ -211,7 +211,7 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 	}
 	primaryNames := make([]string, len(primaries))
 	for i, p := range primaries {
-		primaryNames[i] = bold(p.Volume)
+		primaryNames[i] = bold(p.name())
 	}
 	fmt.Printf("\n%d mission(s) to sync from %s\n", len(jobs), strings.Join(primaryNames, ", "))
 	if !skipConf && !confirm() {

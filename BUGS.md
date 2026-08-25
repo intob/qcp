@@ -5,40 +5,16 @@ Findings from a read of the whole tree on 2026-08-25. `go build`, `go vet` and
 suite. Line numbers are against commit `d7d6706` plus the progress-bar fix.
 
 Findings that have since been fixed are recorded at the bottom for context —
-they explain why `progress.go`, the `metadataFiles` set in `util.go` and the hot
-manifest read in `evict.go` look the way they do.
+they explain why `progress.go`, the `metadataFiles` set in `util.go`, the hot
+manifest read in `evict.go` and the `name()` calls in `sync.go` look the way they
+do.
 
 Ordered by severity. Each entry says what is wrong, how it was confirmed, and
 what a fix would have to do; none of them have been attempted.
 
 ---
 
-## 1. `-sync` uses `DriveConfig.Volume` instead of `name()`
-
-`sync.go:118, 123, 129, 136, 214`
-
-Every other command goes through `d.name()` (`config.go:62`), which falls back
-to the basename of `path` when `volume` is unset. `sync.go` is the only place
-that reads `.Volume` directly.
-
-A drive configured with `path` and no `volume` — documented in README.md for
-local directories — therefore gets an empty name throughout `-sync`: blank in
-the plan header, blank in the scan-error and ghost lines, and blank on both
-sides of a `CONFLICT` message.
-
-Worse, `missionSources` stores that empty string as `srcVol` (`sync.go:136`),
-which becomes the `sourceLimiter` key at `sync.go:270`. `sourceLimiter.add`
-returns early for a key it has already seen (`pool.go:55`), so two `path`-only
-source drives share one semaphore and the second silently inherits the first's
-probed worker count — an NVMe drive throttled to an HDD's single reader, or the
-reverse.
-
-**Fix direction.** Replace all five with `p.name()`. Consider whether
-`sourceLimiter` should also refuse an empty key rather than silently pooling.
-
----
-
-## 2. A look edited in place is never picked up
+## 1. A look edited in place is never picked up
 
 `colour.go:282` — `ensureLUT`, with `lookTransform` at `colour.go:244`
 
@@ -66,7 +42,7 @@ accumulate under their old hashes — decide whether that matters.
 
 ---
 
-## 3. Data race on the ingest interrupt state
+## 2. Data race on the ingest interrupt state
 
 `main.go:553-554`, written at `792`, `864-865`, `953-954`, read at `564`, `580`, `584`
 
@@ -89,7 +65,7 @@ Clearing the pair unconditionally at the end of `runDay` fixes the second half.
 
 ---
 
-## 4. Interrupt during the verify phase is not honoured in `-sync` / `-replicate`
+## 3. Interrupt during the verify phase is not honoured in `-sync` / `-replicate`
 
 `sync.go:336`, `replicate.go:317`
 
@@ -107,7 +83,7 @@ inconsistency between the three, not a design decision.
 
 ---
 
-## 5. `-list` and `-status` do not filter to numbered missions
+## 4. `-list` and `-status` do not filter to numbered missions
 
 `status.go:84` (`runStatus`), `status.go:406` (`runList`)
 
@@ -129,6 +105,32 @@ than reusing.
 ---
 
 ## Fixed
+
+### `-sync` named every hot drive by `volume`, so a `path`-only drive had none
+
+`runSync` read `DriveConfig.Volume` directly in five places while every other
+command went through `d.name()` (`config.go:62`), which falls back to the
+basename of `path`. A drive configured with `path` and no `volume` — documented
+in README.md for local directories — was therefore blank in the plan header, in
+the scan-error and ghost lines, and on both sides of a `CONFLICT` message.
+
+The empty string also became the `missionSource.srcVol`, and so the
+`sourceLimiter` key. `sourceLimiter.add` returns early for a key it has already
+seen (`pool.go:55`), so two `path`-only hot drives shared one semaphore and the
+second silently inherited the first's probed worker count — an NVMe drive
+throttled to an HDD's single reader, or the reverse.
+
+Fixed by using `p.name()` at all five sites, matching the cold side, which
+already called `dst.name()` at `sync.go:195`. The remaining direct `.Volume`
+reads in the tree are all `CardConfig`, which has no `path`. No regression test:
+`runSync` is one 390-line function that scans real drives, prints and prompts,
+so the naming is not reachable from a unit test without splitting it up first.
+
+Left alone: `sourceLimiter` still accepts an empty key. It cannot be handed one
+now — `name()` returns a basename, and `basePath()` bottoms out at `/Volumes` —
+and refusing the key would leave that drive *unlimited* rather than pooled,
+which is the worse of the two failures.
+
 
 ### `-evict` deleted a hot copy it had never compared against the cold one
 
