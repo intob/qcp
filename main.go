@@ -727,6 +727,9 @@ func main() {
 			t.flush()
 		}
 		p1.Wait()
+		if ctx.Err() != nil {
+			select {} // interrupt handler will os.Exit after user responds
+		}
 
 		var copyFailed int
 		for _, r := range results {
@@ -799,6 +802,9 @@ func main() {
 			t.flush()
 		}
 		p2.Wait()
+		if ctx.Err() != nil {
+			select {} // interrupt handler will os.Exit after user responds
+		}
 
 		if verifyFailed.Load() > 0 {
 			exit(11, "%d file(s) failed verification", verifyFailed.Load())

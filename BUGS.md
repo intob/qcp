@@ -8,8 +8,8 @@ Findings that have since been fixed are recorded at the bottom for context —
 they explain why `progress.go`, the `metadataFiles` set in `util.go`, the hot
 manifest read in `evict.go`, the `name()` calls in `sync.go`, the hashed look
 IDs in `colour.go`, the `interruptTarget` in `main.go`, the `.qcp-part-`
-temporaries in `copy.go`, the verify-phase gates in `sync.go` and
-`replicate.go` and the `isMissionDir` predicate in `organise.go` look the way
+temporaries in `copy.go`, the verify-phase gates in `sync.go`, `replicate.go`
+and `main.go` and the `isMissionDir` predicate in `organise.go` look the way
 they do.
 
 Ordered by severity. Each entry says what is wrong, how it was confirmed, and
@@ -17,32 +17,7 @@ what a fix would have to do; none of the open ones have been attempted.
 
 ---
 
-## 1. `-ingest` has no interrupt gate after either phase
-
-`main.go:729` (after `p1.Wait()`), `main.go:801` (after `p2.Wait()`)
-
-Found while fixing the entry below. `runDay` is the fourth copy-then-verify
-function in the tree and the only one with no `ctx.Err()` gate at all: the other
-three now stop after both phases. An interrupt during either phase therefore
-runs on to write `checksums.b3`, print `✓ Done … copied and verified`, call
-`intr.clear()` and start `runIngestProxies` — ffmpeg competing for the terminal
-while the handler is still waiting on stdin for the delete prompt. If the answer
-is `y` the mission is then removed, after the run has already claimed it
-verified.
-
-Worse than the sync case, because the workers' own `ctx.Err()` guards make it
-look clean: the copies and verifies that had not started return early, so
-`copyFailed` and `verifyFailed` are both zero and the manifest is written from
-whatever subset happened to finish.
-
-**Fix direction.** The same gate after both `p1.Wait()` and `p2.Wait()`. Note
-that `intr.get()` is called at the top of the handler, so the snapshot is
-already taken by the time `intr.clear()` runs — the wrong-mission-deleted
-failure is not reachable, but every other consequence is.
-
----
-
-## 2. `000_*` missions are never hashed, checked or verified
+## 1. `000_*` missions are never hashed, checked or verified
 
 `checksum.go:64`, `check.go:341`, `check.go:358`, `verify.go:180`,
 `index.go:180`, `flags.go:211`
@@ -69,6 +44,36 @@ the URL scheme may assume numbers are unique.
 
 ## Fixed
 
+### `-ingest` had no interrupt gate after either phase
+
+`runDay` was the fourth copy-then-verify function in the tree and the only one
+with no `ctx.Err()` gate at all, after the other three were fixed to stop on
+both phases. An interrupt during either phase therefore ran on to write
+`checksums.b3`, print `✓ Done … copied and verified`, call `intr.clear()` and
+start `runIngestProxies` — ffmpeg competing for the terminal while the handler
+was still waiting on stdin for the delete prompt. If the answer was `y` the
+mission was then removed, after the run had already claimed it verified.
+
+Worse than the sync case, because the workers' own `ctx.Err()` guards made it
+look clean: the copies and verifies that had not started returned early, so
+`copyFailed` and `verifyFailed` were both zero and the manifest was written from
+whatever subset happened to finish.
+
+Fixed by adding the same gate after both `p1.Wait()` and `p2.Wait()`, with the
+same comment as the three sites in `pull.go`, `sync.go` and `replicate.go` — all
+four copy-then-verify functions now stop identically.
+
+No regression test, for the same reason as the `sync.go`/`replicate.go` gates:
+`runIngest` closes over `runDay`, which scans real cards, prints and installs a
+signal handler that calls `os.Exit`, so the interrupt path is not reachable from
+a unit test without splitting it up first.
+
+Left alone: the wrong-mission-deleted failure was never reachable — `intr.get()`
+is called at the top of the handler, so the snapshot is taken before
+`intr.clear()` can run — but every other consequence was. Also left: the gate
+stops the goroutine, it does not undo the copies in flight; those are already
+safe by the `.qcp-part-` rename.
+
 ### `-list` and `-status` showed any directory under the year as a mission
 
 `runStatus` (`status.go:84`) and `runList` (`status.go:406`) accepted every
@@ -94,7 +99,7 @@ listings: `runStatus` and `runList` print straight to stdout from real drives,
 so the rows themselves are not assertable without splitting them up first.
 
 Left alone: the other `isNumberedMission` callers were not touched, and the gap
-that leaves is now finding 2 above — a separate change with its own blast
+that leaves is now finding 1 above — a separate change with its own blast
 radius, since it decides what `-checksum` writes and what `-check` compares.
 Also left: `slugNum` (`renumber.go:136`) and `missionNum` (`index.go:97`) are
 still two more copies of the same parse, differing only in what they return for
