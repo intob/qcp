@@ -45,6 +45,33 @@ Left alone: `-addr :8080` still serves the whole LAN without authentication.
 That is its documented purpose (browsing from a phone), and what it exposes is
 proxies and flags, never footage.
 
+### Every run left a `caffeinate` running for good
+
+`keepAwake` (`util.go`) started `caffeinate -mi` to keep the Mac and the drives
+awake during long copies. Its comment said the process "is killed automatically
+when the process exits", but nothing killed it, and on macOS a child is not
+killed with its parent. Every qcp run therefore left a `caffeinate` behind,
+reparented to launchd, holding the Mac out of idle sleep and its disks out of
+spin-down for good. Found on 2026-10-06 with 382 of them running, the oldest
+for 47 days. `pmset -g assertions` showed sleep and disk idle blocked for 1,126
+hours.
+
+Fixed by passing `-w <qcp's pid>`, so `caffeinate` exits when qcp does, however
+qcp ends: a normal return, `os.Exit`, a panic or `kill -9`. The process is
+also reaped if it ends first. The stray ones were cleared with
+`pkill -x caffeinate`.
+
+Regression test in `keepawake_test.go`: a child process starts `keepAwake` and
+exits, and its `caffeinate` must be gone within five seconds. It fails with
+`-w` pointed at a process that never exits, which is equivalent to leaving it
+out.
+
+Not a bug, but in the same read: `-ingest` copies to every mounted drive, cold
+ones included and regardless of `year_from`/`year_to`, where the README said hot
+drives only. That behaviour is intended, since a cold drive plugged in at
+ingest gets a copy verified straight from the card, so the README and `-help`
+now say so instead.
+
 ### Hours of finished proxies stayed invisible to `-index` until the run ended
 
 Found from the outside: `qcp -year 2025 -proxy 1,2,...,42` had been running two

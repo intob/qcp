@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -349,11 +350,21 @@ func fmtSize(size uint64) string {
 	return fmt.Sprintf("%.1f%cB", float64(size)/float64(div), "KMGTPE"[exp])
 }
 
-// keepAwake runs caffeinate -m in the background to prevent drive sleep.
-// It is killed automatically when the process exits.
-func keepAwake() {
-	cmd := exec.Command("caffeinate", "-mi")
-	_ = cmd.Start()
+// keepAwake runs caffeinate in the background to keep the Mac and its disks
+// awake for as long as this process runs, and returns it.
+//
+// -w ties caffeinate's life to this process: it exits when qcp does, however qcp
+// ends — a normal return, os.Exit, a panic or kill -9. Without it nothing ever
+// stopped it. A child is not killed with its parent on macOS, so every run left
+// a caffeinate behind, reparented to launchd, holding the Mac out of idle sleep
+// and the disks spinning; 382 of them had accumulated over 47 days.
+func keepAwake() *exec.Cmd {
+	cmd := exec.Command("caffeinate", "-mi", "-w", strconv.Itoa(os.Getpid()))
+	if err := cmd.Start(); err != nil {
+		return nil
+	}
+	go cmd.Wait() // reap it if it ends first, so it never lingers as a zombie
+	return cmd
 }
 
 func exit(code int, msg string, args ...any) {

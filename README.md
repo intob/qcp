@@ -109,7 +109,9 @@ qcp -ingest 42 -year 2025
 qcp -ingest "Altissimo" -proxy=false  # skip proxy generation
 ```
 
-Scans all mounted cards, copies to every mounted hot drive, verifies each file against its BLAKE3 hash, and writes `checksums.b3`. Files already present on a drive are skipped — safe to run with partially mounted drives or across multiple card batches.
+Scans all mounted cards, copies to every mounted drive — hot and cold alike — verifies each file against its BLAKE3 hash, and writes `checksums.b3`. Files already present on a drive are skipped — safe to run with partially mounted drives or across multiple card batches.
+
+The ingest goes to every configured drive that is mounted, whatever its role and whatever its `year_from`/`year_to`. That is deliberate: a cold drive plugged in at ingest time gets a copy verified straight from the card, which is the best provenance a copy can have, and `-sync` later finds it already there. Unplug a drive before ingesting if it should not receive the footage.
 
 Every copy — here, and in `-sync`, `-replicate` and `-pull` — is written under a hidden `.qcp-part-` name and takes its real one only once the bytes are on the disk. A run killed mid-copy therefore leaves either nothing or a whole file at the destination, so "already present" stays a safe answer to "does this still need copying". The leftovers are invisible to every listing and are cleared by the next run that copies into that mission.
 

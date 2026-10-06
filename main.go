@@ -38,7 +38,7 @@ func usage() {
 	}
 
 	section("INGEST")
-	row("-ingest", "", "ingest cards, prompting for mission name")
+	row("-ingest", "", "ingest cards to every mounted drive, prompting for mission name")
 	row("-ingest", "name", `create new mission (e.g. "Altissimo with Anton")`)
 	row("-ingest", "n", "append cards to existing mission number")
 	row("  -proxy=false", "", "skip browse-tier proxy generation after ingest")
