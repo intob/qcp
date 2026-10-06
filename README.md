@@ -460,6 +460,8 @@ qcp -clean -year all
 qcp -clean -y
 ```
 
+`-clean` only looks inside year directories, never elsewhere on the drive — which matters for a drive whose `root` is the whole volume.
+
 ### Flags
 
 ```sh

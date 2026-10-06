@@ -323,6 +323,28 @@ already counted. A match is refused with a note naming the drive it duplicates.
 Regression tests in `evict_test.go` for both shapes. Both fail with the check
 disabled.
 
+### `-clean` walked the whole of a drive whose `root` is empty
+
+With `-year all`, `runClean` walked the drive's footage root (`clean.go:28`).
+A bare `-clean` is scoped to the current year and was not affected. T9 is
+configured with `"root": ""`, so on T9 that was the whole volume:
+`.Spotlight-V100`, `.Trashes`, `.fseventsd`, the proxy tree and anything else
+kept on the drive. `-clean` deleted `._*` files from all of it, along with every
+empty directory two or more levels down. On a non-footage file a `._` file
+holds its Finder metadata and extended attributes. Confirmed with a
+`Personal/._notes.txt`, an empty `Personal/a/b` and an empty directory inside
+`.Spotlight-V100`: all three were removed.
+
+Fixed with `cleanRoots` (`clean.go`). `-clean` now walks only year directories,
+named 2000–2099 by the same rule `allYears` uses: the one asked for, or with
+`-year all` every one under the footage root. Since every scan root is now a year, the
+empty-directory depth is a constant: a directory inside a mission may go, a
+mission or the year may not, as before.
+
+Regression test in `clean_test.go`: junk and an empty directory inside a mission
+are removed, and the three outside the footage survive. Fails with the fix
+reverted.
+
 ### `-checksum` overwrote recorded hashes without comparing them
 
 Both `-checksum` paths (`checksum.go:261` for a year, `checksum.go:431` for one

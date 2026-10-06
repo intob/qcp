@@ -25,49 +25,43 @@ func runClean(cfg Config, skipConf bool, yearExplicit bool, year int) {
 			fmt.Printf("%s %s not mounted, %s\n", yellow("warning:"), bold(d.name()), dim("skipping"))
 			continue
 		}
-		root := filepath.Join(base, d.Root)
-		if yearExplicit {
-			root = filepath.Join(root, strconv.Itoa(year))
-			if !dirExists(root) {
-				continue
-			}
+		roots := cleanRoots(filepath.Join(base, d.Root), year, yearExplicit)
+		if len(roots) == 0 {
+			continue
 		}
-		scanRoots = append(scanRoots, root)
+		scanRoots = append(scanRoots, roots...)
 		fmt.Printf("scanning %s...\n", bold(d.name()))
 
-		if err := filepath.WalkDir(root, func(path string, de fs.DirEntry, err error) error {
-			if err != nil {
-				fmt.Printf("%s %v\n", yellow("warning:"), err)
-				return nil
-			}
-			name := de.Name()
-			if de.IsDir() {
-				if isJunk(name, true) {
-					items = append(items, junkItem{path, true, 0})
-					return filepath.SkipDir
+		for _, root := range roots {
+			if err := filepath.WalkDir(root, func(path string, de fs.DirEntry, err error) error {
+				if err != nil {
+					fmt.Printf("%s %v\n", yellow("warning:"), err)
+					return nil
+				}
+				name := de.Name()
+				if de.IsDir() {
+					if isJunk(name, true) {
+						items = append(items, junkItem{path, true, 0})
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				if isJunk(name, false) {
+					if info, err := de.Info(); err == nil {
+						items = append(items, junkItem{path, false, info.Size()})
+					}
 				}
 				return nil
+			}); err != nil {
+				fmt.Printf("%s walk error on %s: %v\n", yellow("warning:"), bold(d.name()), err)
 			}
-			if isJunk(name, false) {
-				if info, err := de.Info(); err == nil {
-					items = append(items, junkItem{path, false, info.Size()})
-				}
-			}
-			return nil
-		}); err != nil {
-			fmt.Printf("%s walk error on %s: %v\n", yellow("warning:"), bold(d.name()), err)
 		}
 	}
 
-	// minDepth: minimum path depth (separator count) from the scan root at which
-	// an empty directory is safe to remove. We only remove dirs inside a mission
-	// folder, never the mission or year dirs themselves.
-	//   root = driveRoot       → year/mission/subdir → minDepth 2
-	//   root = driveRoot/year  → mission/subdir      → minDepth 1
-	minDepth := 2
-	if yearExplicit {
-		minDepth = 1
-	}
+	// Every scan root is a year directory, so an empty directory one level
+	// below a mission (mission/subdir) is the shallowest that may go — never
+	// a mission or the year itself.
+	const minDepth = 1
 
 	postCleanup := func() {
 		var pruned int
@@ -224,4 +218,36 @@ func pruneChecksums(root string) int {
 		return nil
 	})
 	return total
+}
+
+// cleanRoots returns the year directories under a drive's footage root that
+// -clean may touch: the one asked for, or every one there is.
+//
+// It used to walk the footage root itself. For a drive configured with
+// "root": "" that is the whole volume — .Spotlight-V100, .Trashes, .fseventsd,
+// the proxy tree and anything else kept on the drive — and -clean deleted ._*
+// files and empty directories from all of it. Only footage is qcp's to tidy.
+// A year is a directory named 2000–2099, the same rule allYears uses.
+func cleanRoots(root string, year int, yearExplicit bool) []string {
+	if yearExplicit {
+		dir := filepath.Join(root, strconv.Itoa(year))
+		if dirExists(dir) {
+			return []string{dir}
+		}
+		return nil
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if y, err := strconv.Atoi(e.Name()); err == nil && y >= 2000 && y <= 2099 {
+			out = append(out, filepath.Join(root, e.Name()))
+		}
+	}
+	return out
 }
