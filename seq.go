@@ -96,8 +96,14 @@ func releaseMission(drives []DriveConfig, year, num int) (bool, error) {
 type counterState struct {
 	counter    int  // last number handed out, from ~/.qcp_seq
 	mounted    int  // highest mission number on any mounted drive
-	onDrives   int  // highest on any drive
+	onDrives   int  // highest on any drive: mounted, or as the catalog last saw it
 	allMounted bool // every drive that can hold the year is mounted
+	allKnown   bool // every such drive is mounted or catalogued for the year
+
+	// highestOn names where onDrives was found when that is an unmounted
+	// drive, and away describes every unmounted drive the catalog vouched for.
+	highestOn string
+	away      []string
 }
 
 func readCounterState(cfg Config, year int) (counterState, error) {
@@ -105,7 +111,7 @@ func readCounterState(cfg Config, year int) (counterState, error) {
 	if err != nil {
 		return counterState{}, err
 	}
-	st := counterState{counter: seq[year], allMounted: true}
+	st := counterState{counter: seq[year], allMounted: true, allKnown: true}
 	maxByYear := make(map[int]int)
 	for _, d := range cfg.Drives {
 		if !d.coversYear(year) {
@@ -117,9 +123,21 @@ func readCounterState(cfg Config, year int) (counterState, error) {
 			continue
 		}
 		st.allMounted = false
+		cy, ok := readCatalog(d.name()).Years[strconv.Itoa(year)]
+		if !ok {
+			st.allKnown = false
+			continue
+		}
+		n := cy.maxMission()
+		st.away = append(st.away, fmt.Sprintf("%s held up to %03d when last seen on %s", d.name(), n, lastSeen(cy.Scanned)))
+		if n > st.onDrives {
+			st.onDrives, st.highestOn = n, fmt.Sprintf("%s (not mounted, last seen %s)", d.name(), lastSeen(cy.Scanned))
+		}
 	}
 	st.mounted = maxByYear[year]
-	st.onDrives = st.mounted
+	if st.mounted >= st.onDrives {
+		st.onDrives, st.highestOn = st.mounted, ""
+	}
 	return st, nil
 }
 
@@ -127,12 +145,17 @@ func readCounterState(cfg Config, year int) (counterState, error) {
 // ingest mints a number, and offers to bring the counter into line.
 //
 // A counter behind the drives would hand out a number that already names a
-// mission, so raising it is offered every time and done unasked under -y.
+// mission, so raising it is offered every time and done unasked under -y. The
+// catalog counts here: a number the archive held when last seen is taken even
+// with the archive in a drawer, and raising is safe on any evidence.
 //
 // A counter ahead of the drives is only provably wrong when every drive that
 // can hold the year is mounted — otherwise the missing numbers may simply be
 // on the archive, or evicted off the hot drives — so only then is moving it
-// back offered, and only on a yes typed at the prompt.
+// back offered, and only on a yes typed at the prompt. When the drives that
+// are away are all catalogued, the gap is reported, but the catalog is a cache
+// and a rewind on its word could reuse a number added to a drive since: the
+// drives have to be mounted for that.
 func checkMissionCounter(cfg Config, year int, skipConf bool) {
 	st, err := readCounterState(cfg, year)
 	if err != nil {
@@ -153,7 +176,11 @@ func checkMissionCounter(cfg Config, year int, skipConf bool) {
 	}
 	switch {
 	case st.onDrives > st.counter:
-		fmt.Printf("\n  %s\n", yellow(fmt.Sprintf("⚠  Mission counter for %d is %03d, but the drives hold %03d", year, st.counter, st.onDrives)))
+		where := "the drives hold"
+		if st.highestOn != "" {
+			where = st.highestOn + " holds"
+		}
+		fmt.Printf("\n  %s\n", yellow(fmt.Sprintf("⚠  Mission counter for %d is %03d, but %s %03d", year, st.counter, where, st.onDrives)))
 		fmt.Printf("     %s\n\n", dim("a new mission would reuse a number that is already taken"))
 		if skipConf || ask(fmt.Sprintf("Raise the counter to %03d?", st.onDrives)) {
 			set(st.onDrives)
@@ -172,5 +199,11 @@ func checkMissionCounter(cfg Config, year int, skipConf bool) {
 		} else {
 			fmt.Println()
 		}
+	case st.onDrives < st.counter && st.allKnown:
+		fmt.Printf("\n  %s\n", yellow(fmt.Sprintf("⚠  Mission counter for %d is %03d, but the highest mission on any drive is %03d", year, st.counter, st.onDrives)))
+		for _, a := range st.away {
+			fmt.Printf("     %s\n", dim(a))
+		}
+		fmt.Printf("     %s\n\n", dim("mount every drive for the year to confirm — the next ingest will then offer to move it back"))
 	}
 }

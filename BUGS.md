@@ -45,6 +45,38 @@ Left alone: `-addr :8080` still serves the whole LAN without authentication.
 That is its documented purpose (browsing from a phone), and what it exposes is
 proxies and flags, never footage.
 
+### The catalog was not used by `-init` or by "mission not found"
+
+Two places still went by the mounted drives alone after the catalog went in.
+
+`-init -year 2026` moves the counter back to the highest mission on the mounted
+drives, warning that every drive holding the year must be mounted. It did not
+consult the catalog, so with the archive away it rewound below numbers the
+catalog knew were spent. That is the same reuse hazard the explicit-year rule
+exists to prevent, and the one case where the catalog had the answer.
+Confirmed with the counter at 050, `030_Recent` mounted and the archive last
+seen holding `042_Archived`: `-init -year 2026` set the counter to 030, and the
+next ingest would have minted 031 through 042 again.
+
+`findMissionSlug`'s "no mission 042_ found on any mounted drive" was all a
+command like `-pull 42`, `-verify 42` or `-ingest 42` could say, even when the
+catalog knew exactly which drive in the drawer held it.
+
+Fixed:
+
+- `runInit` (`init.go`) counts every unmounted drive as last seen. It raises the
+  counter to cover those numbers, and never moves it back below them, even
+  with `-year`. It prints which drive it is counting and when that drive was
+  seen.
+- `findMissionSlug` (`util.go`) now says "042_Archived is on ARCHIVE_01, which
+  is not mounted (last seen 3 Sep)" when the catalog knows. A mission nowhere
+  in the catalog still gets the plain message.
+
+Regression tests in `catalog_test.go`: with the archive away, `-init -year 2026`
+from 050 stops at 042, a bare `-init` from 7 rises to 042, and
+`findMissionSlug(42)` names the archive. All three fail with the catalog
+lookups disabled.
+
 ### `-pull` and `-copy` carried the source's `checksums.b3` as footage
 
 `resolveSource` (`pull.go`) listed the source mission with `findFiles`, which

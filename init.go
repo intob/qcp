@@ -54,13 +54,42 @@ func runInit(cfg Config, year int, scopeToYear, rewindOK bool) {
 		}
 	}
 
-	if len(maxByYear) == 0 {
+	// Drives that are not mounted count as the catalog last saw them. Their
+	// numbers are spent even with the drive in a drawer, so -init raises the
+	// counter to cover them and never moves it back below them — not even with
+	// -year, which only vouches for the drives that are plugged in.
+	catMax := make(map[int]int)
+	catWhere := make(map[int]string)
+	for _, d := range cfg.Drives {
+		if dirExists(d.basePath()) {
+			continue
+		}
+		for k, cy := range readCatalog(d.name()).Years {
+			y, err := strconv.Atoi(k)
+			if err != nil || (scopeToYear && y != year) {
+				continue
+			}
+			if n := cy.maxMission(); n > catMax[y] {
+				catMax[y] = n
+				catWhere[y] = fmt.Sprintf("%s, not mounted, held %03d when last seen %s", d.name(), n, lastSeen(cy.Scanned))
+			}
+		}
+	}
+
+	if len(maxByYear) == 0 && len(catMax) == 0 {
 		fmt.Println("no missions found on any mounted drive")
 		return
 	}
 
-	var years []int
+	yearSet := make(map[int]bool)
 	for y := range maxByYear {
+		yearSet[y] = true
+	}
+	for y := range catMax {
+		yearSet[y] = true
+	}
+	var years []int
+	for y := range yearSet {
 		years = append(years, y)
 	}
 	sort.Ints(years)
@@ -68,6 +97,10 @@ func runInit(cfg Config, year int, scopeToYear, rewindOK bool) {
 	changed := false
 	for _, y := range years {
 		max := maxByYear[y]
+		if catMax[y] > max {
+			max = catMax[y]
+			fmt.Printf("  %s\n", dim(fmt.Sprintf("%d: %s", y, catWhere[y])))
+		}
 		current := seq[y]
 		// Raising is always safe. Lowering is the repair for a counter that ran
 		// ahead of the drives, and needs the year to have been asked for by

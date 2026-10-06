@@ -212,6 +212,29 @@ func checkDuplicateIngest(drives []DriveConfig, yearStr string, scanned []scanne
 			})
 		}
 	}
+
+	// Drives that are not mounted, as the catalog last saw them: footage that
+	// has been evicted to the archive is the likeliest to be ingested twice,
+	// and the archive is the drive least likely to be plugged in.
+	for _, d := range drives {
+		if dirExists(d.basePath()) {
+			continue
+		}
+		cy, ok := readCatalog(d.name()).Years[yearStr]
+		if !ok {
+			continue
+		}
+		for slug, m := range cy.Missions {
+			for rel := range m.Files {
+				name := filepath.Base(rel)
+				key := slug + "/" + name
+				if cardFiles[name] && !seen[key] {
+					seen[key] = true
+					hits[slug]++
+				}
+			}
+		}
+	}
 	return hits
 }
 

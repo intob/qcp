@@ -32,7 +32,11 @@ func runStatus(cfg Config, year int) {
 			tags += "  no-pull"
 		}
 		if !dirExists(base) {
-			fmt.Printf("  %s  %-*s  %s\n", name, barWidth, "not mounted", tags)
+			state := "not mounted"
+			if cy, ok := readCatalog(d.name()).Years[yearStr]; ok {
+				state += " · seen " + lastSeen(cy.Scanned)
+			}
+			fmt.Printf("  %s  %-*s  %s\n", name, barWidth, state, tags)
 			continue
 		}
 		var stat syscall.Statfs_t
@@ -68,6 +72,7 @@ func runStatus(cfg Config, year int) {
 	var allSlugs []string
 	seen := make(map[string]bool)
 
+	away := catalogued(cfg, year)
 	for _, d := range cfg.Drives {
 		base := d.basePath()
 		if !dirExists(base) {
@@ -96,6 +101,14 @@ func runStatus(cfg Config, year int) {
 		}
 	}
 
+	addCatalogued(away, missionDrives, nil)
+	for slug := range missionDrives {
+		if !seen[slug] {
+			allSlugs = append(allSlugs, slug)
+			seen[slug] = true
+		}
+	}
+
 	if len(allSlugs) == 0 {
 		fmt.Printf("  no missions found\n")
 		return
@@ -120,13 +133,20 @@ func runStatus(cfg Config, year int) {
 		drives := missionDrives[slug]
 		fmt.Printf("  %s%-*s", bold(slug), maxSlug-len(slug), "")
 		for _, name := range driveNames {
-			if drives[name] {
+			_, isAway := away[name]
+			switch {
+			case drives[name] && isAway:
+				fmt.Printf("  %s", dim(name)) // as last seen
+			case drives[name]:
 				fmt.Printf("  %-*s", len(name), name)
-			} else {
+			default:
 				fmt.Printf("  %-*s", len(name), "--")
 			}
 		}
 		fmt.Println()
+	}
+	if note := catalogNote(away, driveNames); note != "" {
+		fmt.Printf("\n  %s\n", dim(note))
 	}
 }
 
@@ -237,9 +257,14 @@ func listCell(marker string, width int) string {
 }
 
 // listMarker renders one mission/drive cell: checksummed, present but not
-// checksummed, or absent.
+// checksummed, or absent. A drive that is not mounted is shown as the catalog
+// last saw it, dimmed, since that is a memory rather than a reading.
 func listMarker(sc missionScan, present, mounted bool) string {
 	switch {
+	case present && !mounted && sc.checksummed:
+		return dim("✓")
+	case present && !mounted:
+		return dim("·")
 	case present && sc.checksummed:
 		return green("✓")
 	case present:
@@ -253,6 +278,42 @@ func listMarker(sc missionScan, present, mounted bool) string {
 
 const listLegend = "✓ checksummed   · not checksummed   − absent"
 
+// catalogNote names the unmounted drives whose columns come from the catalog,
+// and when each was last seen with the year.
+func catalogNote(away map[string]catalogYear, order []string) string {
+	var parts []string
+	for _, name := range order {
+		if cy, ok := away[name]; ok {
+			parts = append(parts, fmt.Sprintf("%s as last seen %s", name, lastSeen(cy.Scanned)))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "not mounted, dimmed: " + strings.Join(parts, ", ")
+}
+
+// addCatalogued folds the catalogued drives for a year into a listing's
+// presence map and scans, and returns any missions only they hold.
+func addCatalogued(away map[string]catalogYear, missionDrives map[string]map[string]bool,
+	scans map[string]map[string]missionScan) {
+	for name, cy := range away {
+		for slug := range cy.Missions {
+			if missionDrives[slug] == nil {
+				missionDrives[slug] = make(map[string]bool)
+			}
+			missionDrives[slug][name] = true
+			if scans != nil {
+				sc, _ := cy.scan(slug)
+				if scans[slug] == nil {
+					scans[slug] = make(map[string]missionScan)
+				}
+				scans[slug][name] = sc
+			}
+		}
+	}
+}
+
 func runListAll(cfg Config) {
 	var driveNames []string
 	mountedDrives := make(map[string]bool)
@@ -263,11 +324,31 @@ func runListAll(cfg Config) {
 		}
 	}
 
-	years := allYears(cfg)
+	// Years only an unmounted drive holds still get listed, from the catalog.
+	yearSet := make(map[int]bool)
+	for _, y := range allYears(cfg) {
+		yearSet[y] = true
+	}
+	for _, d := range cfg.Drives {
+		if mountedDrives[d.name()] {
+			continue
+		}
+		for k, cy := range readCatalog(d.name()).Years {
+			if y, err := strconv.Atoi(k); err == nil && len(cy.Missions) > 0 {
+				yearSet[y] = true
+			}
+		}
+	}
+	var years []int
+	for y := range yearSet {
+		years = append(years, y)
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(years)))
 	if len(years) == 0 {
 		fmt.Println(dim("no missions found"))
 		return
 	}
+	var notes []string
 
 	// column width for drive names
 	maxName := 0
@@ -309,11 +390,21 @@ func runListAll(cfg Config) {
 				missionDrives[slug][d.name()] = true
 			}
 		}
-
+		away := catalogued(cfg, year)
+		addCatalogued(away, missionDrives, nil)
+		for slug := range missionDrives {
+			if !seen[slug] {
+				allSlugs = append(allSlugs, slug)
+				seen[slug] = true
+			}
+		}
 		if len(allSlugs) == 0 {
 			continue
 		}
 		sort.Strings(allSlugs)
+		if note := catalogNote(away, driveNames); note != "" {
+			notes = append(notes, yearStr+": "+note)
+		}
 
 		maxSlug := 0
 		for _, s := range allSlugs {
@@ -323,6 +414,7 @@ func runListAll(cfg Config) {
 		}
 
 		scans := scanMissions(cfg.Drives, yearStr, allSlugs)
+		addCatalogued(away, map[string]map[string]bool{}, scans)
 		sizes := make(map[string]string, len(allSlugs))
 		maxSize := 0
 		var yearTotal int64
@@ -352,7 +444,8 @@ func runListAll(cfg Config) {
 			drives := missionDrives[slug]
 			allPresent := true
 			for _, name := range driveNames {
-				if mountedDrives[name] && !drives[name] {
+				_, known := away[name]
+				if (mountedDrives[name] || known) && !drives[name] {
 					allPresent = false
 					break
 				}
@@ -370,6 +463,9 @@ func runListAll(cfg Config) {
 		}
 	}
 	fmt.Printf("\n%s\n", dim(listLegend))
+	for _, n := range notes {
+		fmt.Printf("%s\n", dim(n))
+	}
 }
 
 // missionSize returns the mission's size from the first drive that has it.
@@ -391,9 +487,13 @@ func runList(cfg Config, year int) {
 	var allSlugs []string
 	seen := make(map[string]bool)
 
+	away := catalogued(cfg, year)
 	for _, d := range cfg.Drives {
 		base := d.basePath()
 		if !dirExists(base) {
+			if _, ok := away[d.name()]; ok {
+				driveNames = append(driveNames, d.name())
+			}
 			continue
 		}
 		yearDir := filepath.Join(base, d.Root, yearStr)
@@ -418,6 +518,14 @@ func runList(cfg Config, year int) {
 		}
 	}
 
+	addCatalogued(away, missionDrives, nil)
+	for slug := range missionDrives {
+		if !seen[slug] {
+			allSlugs = append(allSlugs, slug)
+			seen[slug] = true
+		}
+	}
+
 	if len(allSlugs) == 0 {
 		fmt.Printf("no missions found for %d\n", year)
 		return
@@ -433,6 +541,7 @@ func runList(cfg Config, year int) {
 	}
 
 	scans := scanMissions(cfg.Drives, yearStr, allSlugs)
+	addCatalogued(away, map[string]map[string]bool{}, scans)
 	sizes := make(map[string]string, len(allSlugs))
 	maxSize := len("size")
 	var total int64
@@ -452,13 +561,17 @@ func runList(cfg Config, year int) {
 		drives := missionDrives[slug]
 		var cols []string
 		for _, name := range driveNames {
-			cols = append(cols, listCell(listMarker(scans[slug][name], drives[name], true), len(name)))
+			_, isAway := away[name]
+			cols = append(cols, listCell(listMarker(scans[slug][name], drives[name], !isAway), len(name)))
 		}
 		fmt.Printf("%-*s  %s  %s\n", maxSlug, slug,
 			dim(fmt.Sprintf("%*s", maxSize, sizes[slug])), strings.Join(cols, "  "))
 	}
 	fmt.Printf("\n%s\n", dim(fmt.Sprintf("%d missions · %s", len(allSlugs), fmtSize(uint64(total)))))
 	fmt.Printf("%s\n", dim(listLegend))
+	if note := catalogNote(away, driveNames); note != "" {
+		fmt.Printf("%s\n", dim(note))
+	}
 }
 
 // ── proxy coverage ──────────────────────────────────────────────────────────

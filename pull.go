@@ -170,7 +170,7 @@ func runTransfer(cfg Config, spec transferSpec, missions []int, year int, sub st
 	if len(jobs) == 0 {
 		fmt.Printf("%s\n", dim(fmt.Sprintf("all %s drives already up to date", spec.dstRole)))
 		if unresolved > 0 {
-			os.Exit(1)
+			quit(1)
 		}
 		return
 	}
@@ -399,7 +399,7 @@ func runTransfer(cfg Config, spec transferSpec, missions []int, year int, sub st
 		fmt.Printf("\n%s %d file(s) copied and verified across %d mission(s)\n", green("✓"), total, len(pulled))
 	}
 	if unresolved > 0 {
-		os.Exit(1)
+		quit(1)
 	}
 }
 
@@ -515,7 +515,7 @@ func watchInterrupt(ctx context.Context, cancel context.CancelFunc, newDirs []st
 		time.Sleep(150 * time.Millisecond)
 		if len(newDirs) == 0 {
 			fmt.Print("\r\033[2K\ninterrupted\n")
-			os.Exit(130)
+			quit(130)
 		}
 		if askYesNo("\r\033[2K\ninterrupted — delete partial mission dirs? (y/n): ") {
 			for _, d := range newDirs {
@@ -523,6 +523,6 @@ func watchInterrupt(ctx context.Context, cancel context.CancelFunc, newDirs []st
 				fmt.Printf("removed: %s\n", d)
 			}
 		}
-		os.Exit(130)
+		quit(130)
 	}()
 }

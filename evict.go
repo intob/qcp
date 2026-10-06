@@ -159,7 +159,7 @@ func runEvict(cfg Config, missions []int, year int, from []string, minCopies int
 	}
 	fmt.Printf("\n%s %s freed from %d location(s)\n", green("✓"), fmtSize(uint64(freed)), removed)
 	if failed > 0 || refused > 0 {
-		os.Exit(1)
+		quit(1)
 	}
 }
 

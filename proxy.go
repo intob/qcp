@@ -1336,7 +1336,7 @@ func generatePlans(plans []missionPlan, tiers proxyTiers, lutDir string) bool {
 
 	if ctx.Err() != nil {
 		fmt.Printf("\n  %s  interrupted — %d clip(s) finished and recorded\n", yellow("⚠"), done.Load())
-		os.Exit(130)
+		quit(130)
 	}
 	if ok {
 		fmt.Printf("\n  %s  %s  %s\n", green("✓"), bold("Done"),

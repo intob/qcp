@@ -257,6 +257,22 @@ func findMissionSlug(drives []DriveConfig, yearStr string, num int) (string, err
 			}
 		}
 	}
+	// Say where the catalog last saw it, if a drive that is away holds it: the
+	// fix is to plug that drive in, which "not found" alone does not suggest.
+	for _, d := range drives {
+		if dirExists(d.basePath()) {
+			continue
+		}
+		cy, ok := readCatalog(d.name()).Years[yearStr]
+		if !ok {
+			continue
+		}
+		for slug := range cy.Missions {
+			if strings.HasPrefix(slug, prefix) {
+				return "", fmt.Errorf("%s is on %s, which is not mounted (last seen %s)", slug, d.name(), lastSeen(cy.Scanned))
+			}
+		}
+	}
 	return "", fmt.Errorf("no mission %s found on any mounted drive", prefix)
 }
 
@@ -533,6 +549,32 @@ func keepAwake() *exec.Cmd {
 
 func exit(code int, msg string, args ...any) {
 	fmt.Printf(msg+"\n", args...)
+	quit(code)
+}
+
+// exitHooks run once as qcp finishes, however it finishes: a normal return
+// from main, exit, or quit. Everything ends the process through those, never
+// os.Exit directly, so a command that fails part-way still runs them — the
+// catalog is refreshed after a failed copy as well as after a good one, which
+// is exactly when what is on the drives has changed in a way nothing planned.
+var (
+	exitHooks    []func()
+	exitHooksRan sync.Once
+)
+
+func onExit(f func()) { exitHooks = append(exitHooks, f) }
+
+func runExitHooks() {
+	exitHooksRan.Do(func() {
+		for _, f := range exitHooks {
+			f()
+		}
+	})
+}
+
+// quit is os.Exit with the exit hooks run first.
+func quit(code int) {
+	runExitHooks()
 	os.Exit(code)
 }
 

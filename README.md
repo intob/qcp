@@ -4,7 +4,7 @@ qcp is a personal media archival tool for managing camera footage across a set o
 
 Derived media lives alongside but apart from the footage: `qcp -proxy` builds a 1080p browse tier and stills under a `proxies/` root, and `qcp -index` turns those into a static site you can browse with nothing plugged in. Proxies are never archived — they are regenerable, and cold space is the scarce resource.
 
-There is no database. State is the files and the `checksums.b3` manifests on the drives themselves — if you can read the drives, you can always recover. The tool is deliberately append-only and non-destructive: it never deletes footage, and every destructive action (organise, renumber, clean) requires confirmation.
+There is no database. State is the files and the `checksums.b3` manifests on the drives themselves — if you can read the drives, you can always recover. The one thing kept on the Mac besides the mission counter is a catalog of what each drive held when qcp last saw it (see `-catalog` below); it is a cache, holds no hashes, and is rebuilt from the drives whenever they are mounted. The tool is deliberately append-only and non-destructive: it never deletes footage, and every destructive action (organise, renumber, clean) requires confirmation.
 
 Designed for macOS. Drive type (HDD vs SSD) and connection (USB, NVMe, SATA) are auto-detected via `diskutil` to set per-drive I/O concurrency. Drives are kept awake during long operations via `caffeinate`.
 
@@ -197,6 +197,8 @@ qcp -check 42                         # check a specific mission across cold dri
 qcp -check 42 -year 2025
 qcp -check all                        # check every mission in current year
 qcp -check all -year all              # check the entire archive
+
+qcp -catalog                          # re-catalogue mounted drives; show every drive as last seen
 ```
 
 `-check` compares the mission's content — what a transfer would carry, so each drive's own `checksums.b3` is not one of the files compared — by name and by size, against every cold drive scoped for the year and every other hot drive that holds the mission (a hot drive without it is fine; hot drives are not expected to hold everything). It also compares the `checksums.b3` files between drives and reports any file whose recorded hash differs (`≠`). This is the one thing `-verify` cannot catch: it holds each drive to its own manifest, so two copies that differ but are each self-consistent both pass. Comparing the stored manifests costs nothing beyond reading them.
@@ -204,6 +206,14 @@ qcp -check all -year all              # check the entire archive
 `-list` shows each mission's size and a column per drive: `✓` where that drive's copy is fully covered by its `checksums.b3`, `·` where the mission is present but not (or only partly) checksummed, `−` where it is absent. Sizes come from the first drive holding the mission and exclude `checksums.b3` itself, so they match across drives. Getting them means walking each mission directory, so `-list` does real work now rather than only reading directory names. `-check` / `-check all` report missing, extra and different-sized files on each copy. Exits 1 if any mission is incomplete.
 
 Transfers (`-sync`, `-replicate`, `-pull`, `-copy`) treat a destination file as already there only if it is the same size as the source. One under the same name at a different size is reported as a conflict and left alone — it may be the copy that is right — and the run fails once everything else is copied, so `-check` and `-verify` can settle which copy is wrong.
+
+**The catalog.** Every command, as it finishes — on failure as well as success — records what each mounted drive holds for the year it worked on in `~/.qcp_catalog/<drive>.json`: the missions, their files and sizes, whether each was fully checksummed, and when the drive was seen. `-eject` catalogues every year on the drives just before ejecting them, and `-catalog` does the same on demand and prints what the catalog holds for every configured drive. That lets the drives that are not plugged in still count:
+
+- `-list` and `-status` show an unmounted drive's column as it was last seen, dimmed, with a note saying when.
+- Before an ingest hands out a number, a mission number the archive held when last seen counts as taken, so a counter behind it is raised even with the archive in a drawer. A counter *ahead* of every drive is reported when the drives that are away have all been catalogued, but is only ever moved back with those drives mounted: a rewind on a cache's word could reuse a number added since.
+- The "may already be ingested" warning also checks file names on unmounted drives, which is where evicted footage lives.
+
+The catalog never decides anything destructive and never holds a hash — `checksums.b3` on the drive stays the only record of those. A mounted drive is always read directly and overwrites its entry, and a damaged or deleted catalog is simply rebuilt the next time each drive is mounted.
 
 ### Proxies
 

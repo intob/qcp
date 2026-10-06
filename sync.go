@@ -243,7 +243,7 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 				fmt.Printf("removed: %s\n", d)
 			}
 		}
-		os.Exit(130)
+		quit(130)
 	}()
 
 	// total bytes per archive drive (for bar totals)

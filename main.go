@@ -67,6 +67,7 @@ func usage() {
 	section("INFO")
 	row("-list", "", "list missions across all mounted drives")
 	row("-status", "", "show drive space and mission status")
+	row("-catalog", "", "re-catalogue mounted drives; show every drive as last seen")
 	row("-check", "n|list|all", "check mission(s) for missing files across drives")
 
 	section("PROXY")
@@ -207,6 +208,7 @@ func main() {
 	doReplicate := flag.Bool("replicate", false, "replicate missions between cold drives")
 	doList := flag.Bool("list", false, "list missions across all mounted drives")
 	doStatus := flag.Bool("status", false, "show drive space and mission status")
+	doCatalog := flag.Bool("catalog", false, "re-catalogue mounted drives and show what every drive held when last seen")
 	doProxies := flag.Bool("proxies", false, "list which missions have proxies generated")
 	checkMissionStr := flag.String("check", "", `check mission(s) for missing files across drives (e.g. "42", "42,44", "42-48", "all")`)
 	doClean := flag.Bool("clean", false, "find and remove junk files (Synology metadata, Thumbs.db, etc.) from all mounted drives")
@@ -294,15 +296,24 @@ func main() {
 	cfg := loadConfig()
 	keepAwake()
 
+	// Whatever the command, and however it ends, the mounted drives are
+	// re-catalogued for the year it worked on as qcp finishes — see catalog.go.
+	catalogYears := []int{year}
+	if yearAll {
+		catalogYears = nil
+	}
+	onExit(func() { refreshCatalog(cfg, catalogYears) })
+	defer runExitHooks()
+
 	switch {
 	case *checkMissionStr == "all":
 		if yearAll {
 			if !runCheckAll(cfg) {
-				os.Exit(1)
+				quit(1)
 			}
 		} else {
 			if !runCheck(cfg, year) {
-				os.Exit(1)
+				quit(1)
 			}
 		}
 		return
@@ -318,12 +329,22 @@ func main() {
 			}
 		}
 		if !ok {
-			os.Exit(1)
+			quit(1)
 		}
 		return
 	}
 
+	if *doCatalog {
+		runCatalog(cfg)
+		catalogYears = []int{} // just done in full
+		return
+	}
+
 	if *doEject {
+		// The last moment the drives can be seen, so the catalog takes them in
+		// full on their way out; afterwards there is nothing mounted to refresh.
+		refreshCatalog(cfg, nil)
+		catalogYears = []int{}
 		runEject(cfg)
 		return
 	}
@@ -416,28 +437,28 @@ func main() {
 			}
 		}
 		if !ok {
-			os.Exit(1)
+			quit(1)
 		}
 		return
 	}
 
 	if *doIndex {
 		if !runIndex(cfg, *copyTo) {
-			os.Exit(1)
+			quit(1)
 		}
 		return
 	}
 
 	if *doServe {
 		if !runServe(cfg, *copyTo, *serveAddr) {
-			os.Exit(1)
+			quit(1)
 		}
 		return
 	}
 
 	if *doResolve {
 		if !runResolve(cfg, *resolveClear) {
-			os.Exit(1)
+			quit(1)
 		}
 		return
 	}
@@ -445,11 +466,11 @@ func main() {
 	if *doSync {
 		if yearAll {
 			if !runSyncAll(cfg, *skipConf) {
-				os.Exit(1)
+				quit(1)
 			}
 		} else {
 			if !runSync(cfg, year, *skipConf) {
-				os.Exit(1)
+				quit(1)
 			}
 		}
 		return
@@ -458,11 +479,11 @@ func main() {
 	if *doReplicate {
 		if yearAll {
 			if !runReplicateAll(cfg, *skipConf) {
-				os.Exit(1)
+				quit(1)
 			}
 		} else {
 			if !runReplicate(cfg, year, *skipConf) {
-				os.Exit(1)
+				quit(1)
 			}
 		}
 		return
@@ -477,7 +498,7 @@ func main() {
 			ok = runVerifyYear(cfg, year)
 		}
 		if !ok {
-			os.Exit(1)
+			quit(1)
 		}
 		return
 	case *verifyMissionStr != "":
@@ -492,7 +513,7 @@ func main() {
 			}
 		}
 		if !ok {
-			os.Exit(1)
+			quit(1)
 		}
 		return
 	}
@@ -506,7 +527,7 @@ func main() {
 			ok = runChecksumYear(cfg, year)
 		}
 		if !ok {
-			os.Exit(1)
+			quit(1)
 		}
 		return
 	case *checksumMissionStr != "":
@@ -521,7 +542,7 @@ func main() {
 			}
 		}
 		if !ok {
-			os.Exit(1)
+			quit(1)
 		}
 		return
 	}
@@ -642,7 +663,7 @@ func main() {
 		cancel()
 		time.Sleep(150 * time.Millisecond)
 		abandon("interrupted", true)
-		os.Exit(130)
+		quit(130)
 	}()
 
 	// failDay stops the run on a copy or verify failure, giving the counter
@@ -652,7 +673,7 @@ func main() {
 	failDay := func(code int, msg string, args ...any) {
 		fmt.Printf(msg+"\n", args...)
 		abandon("copy failed", !*skipConf)
-		os.Exit(code)
+		quit(code)
 	}
 
 	runDay := func(dayScanned []scannedCard, missionSlug string, dstRoots []string, dstNames, dstBase map[string]string) {
