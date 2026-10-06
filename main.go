@@ -661,16 +661,44 @@ func main() {
 		}
 
 		missingByDst := make(map[string][]fileJob)
+		var present []presentFile
 		for _, sc := range dayScanned {
 			for _, f := range sc.files {
 				dstRel := filepath.Join(sc.Volume, f.rel)
 				src := filepath.Join(sc.src, f.rel)
 				for _, dstRoot := range dstRoots {
 					dst := filepath.Join(dstRoot, dstRel)
-					if _, err := os.Stat(dst); err != nil {
+					if _, err := os.Lstat(dst); err != nil {
 						missingByDst[dstRoot] = append(missingByDst[dstRoot],
 							fileJob{src, dst, dstRel, dstRoot, sc.Volume, f.size})
+					} else {
+						present = append(present, presentFile{src, dst, dstRel, dstRoot, f.size})
 					}
+				}
+			}
+		}
+
+		// A taken destination name is not proof the card file is copied —
+		// see checkAlreadyCopied. Nothing is copied until every one of them
+		// is shown to hold this card's file.
+		if len(present) > 0 {
+			fmt.Printf("  %s checking %d file(s) already on the drives against the cards\n", dim("·"), len(present))
+			record, conflicts := checkAlreadyCopied(present)
+			if len(conflicts) > 0 {
+				fmt.Printf("\n  %s\n\n", red(fmt.Sprintf("%d card file(s) collide with different files already in %s:", len(conflicts), missionSlug)))
+				for _, c := range conflicts {
+					fmt.Printf("     %s\n", c)
+				}
+				fmt.Printf("\n  %s\n", dim("nothing was copied — ingest these cards into a new mission, or rename the card volume"))
+				if _, isNew := intr.get(); isNew {
+					revertMission(year)
+				}
+				intr.clear()
+				exit(12, "card files collide with existing files")
+			}
+			for dstRoot, lines := range record {
+				if err := addChecksums(filepath.Join(dstRoot, "checksums.b3"), lines); err != nil {
+					fmt.Printf("%s writing checksums: %v\n", red("ERROR"), err)
 				}
 			}
 		}
@@ -874,7 +902,11 @@ func main() {
 				missionSlug = slug
 			} else {
 				missionNum = nextNum
-				missionSlug = fmt.Sprintf("%03d_%s", nextNum, sanitizeMission(*missionFlag))
+				name := sanitizeMission(*missionFlag)
+				if name == "" {
+					exit(2, "%q is not usable as a mission name", *missionFlag)
+				}
+				missionSlug = fmt.Sprintf("%03d_%s", nextNum, name)
 			}
 		} else {
 			d := days[0]
@@ -961,7 +993,7 @@ func main() {
 			}
 			slug, isNew, num, skipped, err := promptMissionForDay(cfg, year, nextNum, d.date, hint)
 			if err != nil {
-				exit(4, "err reading mission counter: %v", err)
+				exit(4, "err prompting for mission: %v", err)
 			}
 			if skipped {
 				continue

@@ -109,7 +109,7 @@ qcp -ingest 42 -year 2025
 qcp -ingest "Altissimo" -proxy=false  # skip proxy generation
 ```
 
-Scans all mounted cards, copies to every mounted drive — hot and cold alike — verifies each file against its BLAKE3 hash, and writes `checksums.b3`. Files already present on a drive are skipped — safe to run with partially mounted drives or across multiple card batches.
+Scans all mounted cards, copies to every mounted drive — hot and cold alike — verifies each file against its BLAKE3 hash, and writes `checksums.b3`. Files already present on a drive are skipped — safe to run with partially mounted drives or across multiple card batches. "Already present" is proven, not assumed from the name: the file on the drive must be the same size and the card file must hash to its `checksums.b3` entry (or to the file itself if it has none). Card volume names repeat and clip counters reset, so a second card can carry a clip with the same name as one already in the mission; if any card file collides with a different file, the ingest stops before copying anything and lists the collisions.
 
 The ingest goes to every configured drive that is mounted, whatever its role and whatever its `year_from`/`year_to`. That is deliberate: a cold drive plugged in at ingest time gets a copy verified straight from the card, which is the best provenance a copy can have, and `-sync` later finds it already there. Unplug a drive before ingesting if it should not receive the footage.
 

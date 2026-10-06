@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"fmt"
 	"io/fs"
@@ -11,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -125,7 +125,6 @@ func groupAllByDate(scanned []scannedCard) []dayGroup {
 // suggestion is shown in brackets and accepted on empty input.
 // Returns slug, whether it's a new mission, the new mission number (0 if appending), and whether the day was skipped.
 func promptMissionForDay(cfg Config, year, nextNum int, date, suggestion string) (slug string, isNew bool, num int, skip bool, err error) {
-	reader := bufio.NewReader(os.Stdin)
 	yearStr := strconv.Itoa(year)
 	for {
 		if suggestion != "" {
@@ -133,8 +132,12 @@ func promptMissionForDay(cfg Config, year, nextNum int, date, suggestion string)
 		} else {
 			fmt.Printf("  %s: ", date)
 		}
-		line, _ := reader.ReadString('\n')
-		line = strings.TrimSpace(line)
+		// The read error used to be ignored, so with input closed or used up
+		// an empty answer was asked for again, forever.
+		line, readErr := readLine()
+		if readErr != nil && line == "" {
+			return "", false, 0, false, fmt.Errorf("no answer for %s: input ended", date)
+		}
 		if line == "" {
 			if suggestion != "" {
 				line = suggestion
@@ -156,7 +159,12 @@ func promptMissionForDay(cfg Config, year, nextNum int, date, suggestion string)
 			return s, false, 0, false, nil
 		}
 		// Name → new mission using the pre-computed nextNum
-		return fmt.Sprintf("%03d_%s", nextNum, sanitizeMission(line)), true, nextNum, false, nil
+		name := sanitizeMission(line)
+		if name == "" {
+			fmt.Printf("  %q is not usable as a mission name\n", line)
+			continue
+		}
+		return fmt.Sprintf("%03d_%s", nextNum, name), true, nextNum, false, nil
 	}
 }
 
@@ -205,4 +213,121 @@ func checkDuplicateIngest(drives []DriveConfig, yearStr string, scanned []scanne
 		}
 	}
 	return hits
+}
+
+// presentFile is a card file whose destination name already exists.
+type presentFile struct {
+	src, dst, rel, dstRoot string
+	size                   int64
+}
+
+// checkAlreadyCopied decides whether card files whose destination name is
+// already taken really are already copied, before the ingest skips them.
+//
+// The ingest used to skip any file whose destination existed, by name alone.
+// Cards land under <mission>/<volume name>/, and card volume names repeat —
+// "Untitled", "NO NAME" — while camera clip counters can reset, so appending a
+// second card into a mission could match a clip from the first card by name and
+// never copy it. The card is formatted once the ingest says it is done, so that
+// clip was lost. Now a taken name is only accepted when the sizes agree and the
+// card file hashes to what the drive holds: its checksums.b3 entry when there
+// is one, otherwise the file itself.
+//
+// It returns the manifest lines to add for files that matched but were not yet
+// recorded (a run killed between copying and writing the manifest leaves those),
+// and one message per file that does not match.
+func checkAlreadyCopied(files []presentFile) (record map[string][]string, conflicts []string) {
+	record = make(map[string][]string)
+	if len(files) == 0 {
+		return record, nil
+	}
+	manifests := make(map[string]map[string]string)
+	manifestErrs := make(map[string]error)
+	for _, f := range files {
+		if _, ok := manifests[f.dstRoot]; !ok {
+			manifests[f.dstRoot], manifestErrs[f.dstRoot] = readChecksums(filepath.Join(f.dstRoot, "checksums.b3"))
+		}
+	}
+
+	var mu sync.Mutex
+	srcHashes := make(map[string]string) // a card file shared by several drives is read once
+	srcErrs := make(map[string]error)
+	hashSrc := func(src string) (string, error) {
+		mu.Lock()
+		h, ok := srcHashes[src]
+		err := srcErrs[src]
+		mu.Unlock()
+		if ok || err != nil {
+			return h, err
+		}
+		h, err = hashFile(src, nil)
+		mu.Lock()
+		srcHashes[src], srcErrs[src] = h, err
+		mu.Unlock()
+		return h, err
+	}
+
+	conflict := func(f presentFile, why string) {
+		mu.Lock()
+		conflicts = append(conflicts, fmt.Sprintf("%s: %s", f.dst, why))
+		mu.Unlock()
+	}
+
+	// Group by card so each card is read by one worker at a time; card readers
+	// are the slow end and do not reward parallel reads.
+	bySrc := make(map[string][]presentFile)
+	var order []string
+	for _, f := range files {
+		if _, ok := bySrc[f.src]; !ok {
+			order = append(order, f.src)
+		}
+		bySrc[f.src] = append(bySrc[f.src], f)
+	}
+	wp := newPool(4)
+	for _, src := range order {
+		group := bySrc[src]
+		wp.run(func() {
+			for _, f := range group {
+				if err := manifestErrs[f.dstRoot]; err != nil {
+					conflict(f, "checksums.b3 could not be read: "+err.Error())
+					continue
+				}
+				info, err := os.Stat(f.dst)
+				if err != nil {
+					conflict(f, err.Error())
+					continue
+				}
+				if info.Size() != f.size {
+					conflict(f, fmt.Sprintf("already exists with a different size (%d bytes on the drive, %d on the card)", info.Size(), f.size))
+					continue
+				}
+				h, err := hashSrc(f.src)
+				if err != nil {
+					conflict(f, "card file could not be read: "+err.Error())
+					continue
+				}
+				if want := manifests[f.dstRoot][f.rel]; want != "" {
+					if want != h {
+						conflict(f, "already exists with different content (checksums.b3 disagrees with the card)")
+					}
+					continue
+				}
+				got, err := hashFile(f.dst, nil)
+				if err != nil {
+					conflict(f, "could not be read: "+err.Error())
+					continue
+				}
+				if got != h {
+					conflict(f, "already exists with different content")
+					continue
+				}
+				mu.Lock()
+				record[f.dstRoot] = append(record[f.dstRoot], fmt.Sprintf("%s  %s", h, f.rel))
+				mu.Unlock()
+			}
+		})
+	}
+	wp.wait()
+	sort.Strings(conflicts)
+	return record, conflicts
 }

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -518,17 +517,7 @@ func watchInterrupt(ctx context.Context, cancel context.CancelFunc, newDirs []st
 			fmt.Print("\r\033[2K\ninterrupted\n")
 			os.Exit(130)
 		}
-		fmt.Print("\r\033[2K\ninterrupted — delete partial mission dirs? (y/n): ")
-		reader := bufio.NewReader(os.Stdin)
-		var resp string
-		for resp != "y" && resp != "n" {
-			line, err := reader.ReadString('\n')
-			resp = strings.TrimSpace(line)
-			if err != nil {
-				break // stdin closed; don't delete
-			}
-		}
-		if resp == "y" {
+		if askYesNo("\r\033[2K\ninterrupted — delete partial mission dirs? (y/n): ") {
 			for _, d := range newDirs {
 				os.RemoveAll(d)
 				fmt.Printf("removed: %s\n", d)

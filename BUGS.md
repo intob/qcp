@@ -89,6 +89,34 @@ and `b.mp4`. A second mission held by T9 and the archive but not T7 must not be
 reported, and `-check 2` must pass. With hot drives left out of
 `checkTargets`, both paths pass mission 1.
 
+### The ingest prompt looped forever when input ran out
+
+`promptMissionForDay` (`ingest.go`) read each answer with
+`line, _ := reader.ReadString('\n')`. With no suggestion to fall back on, an
+empty answer meant ask again, and a closed or exhausted stdin returns an empty
+line and an error that was thrown away. So input piped from a script, or a
+terminal that went away, left the prompt reprinting itself as fast as it could,
+forever.
+
+The prompts also each read stdin their own way. `confirm` used `fmt.Scan`, which
+takes a word and leaves the rest of the line, newline included, to be read as
+an empty answer by the next prompt. Every other prompt made its own
+`bufio.Reader`, which can buffer input that was meant for the prompt after it.
+
+Fixed with one shared reader and `readLine` (`util.go`), which every prompt now
+goes through: `confirm`, `ask`, the mission prompt, and the delete-on-interrupt
+questions in ingest, `-sync`, `-replicate` and `-pull`/`-copy` (now
+`askYesNo`). At the end of input the mission prompt returns an error and the
+ingest stops ("input ended"). A yes/no question reads end of input as no, so
+nothing is deleted because input ran out. A last line without a newline still
+counts as an answer. The multi-day ingest's error message for a failed prompt
+said "err reading mission counter", and now says what failed.
+
+Regression test in `ingest_safety_test.go`. The prompt is given empty input,
+blank lines only, an unterminated answer and a skip, and must return within two
+seconds each time. `ask` and `askYesNo` must answer no at the end of input. With
+the read error ignored again, the prompt never returns on empty input.
+
 ### File sizes were never compared
 
 `-sync`, `-replicate`, `-pull` and `-copy` decided which files a destination
@@ -177,6 +205,25 @@ Regression test in `verify_test.go`, using a directory in place of
 unverifiable, and a transfer from such a source must be refused. A missing
 manifest must still read as empty without error.
 
+### Mission names were barely sanitised
+
+`sanitizeMission` (`util.go`) replaced spaces and nothing else, so a mission name
+went into a path as typed. A `/` made nested directories: `Alps/Day 1` became
+mission `045_Alps` with the footage one level down. `../` put the footage
+outside the year directory entirely. The characters exFAT will not store
+(`\ : * ? " < > |`) made the copy fail part-way on an exFAT drive.
+
+Fixed: path separators, control characters and those exFAT-illegal characters
+become `_`. Trailing dots and spaces are dropped, since exFAT and Windows drop
+them silently and the name on the drive would no longer match the one qcp
+recorded. A name with nothing left but separators and dots is refused: the
+ingest prompt asks again, and `-ingest "<name>"` exits with an error.
+Non-ASCII letters pass through unchanged.
+
+Regression test in `ingest_safety_test.go`. Every case must come out as a single
+path component free of those characters. Under the old function the `/` and
+`../` cases produced nested paths and failed.
+
 ### Every run left a `caffeinate` running for good
 
 `keepAwake` (`util.go`) started `caffeinate -mi` to keep the Mac and the drives
@@ -258,6 +305,33 @@ Regression tests in `checksum_test.go`: the rotted file through both paths, a
 cold copy that disagrees with a fully checksummed hot copy, and a recorded file
 gone missing. Each must fail and leave the record alone, and all fail with the
 fix reverted. A fourth test checks that a plain append still succeeds.
+
+### `-ingest` skipped a card file whose name was already in the mission
+
+`main.go:704` queued a card file for copying only if nothing existed at its
+destination, and judged that by the name alone. Cards land under
+`<mission>/<card volume name>/`. Card volume names repeat ("Untitled", "NO
+NAME"), and camera clip counters can reset. So a second card appended into a
+mission could match a clip from the first card by name, and that clip was
+reported as already up to date and never copied. The card is formatted once
+the ingest says it is done, which made that clip unrecoverable.
+
+Fixed by `checkAlreadyCopied` (`ingest.go`). Every card file whose destination
+already exists is checked before anything is copied. Its size must match, and
+the card file must hash to what the drive holds. That is the mission's
+`checksums.b3` entry when there is one, or the file on the drive when there is
+not. Anything that does not match stops the day with nothing copied and a list
+of the collisions; if the mission was new, its number is given back first. A
+file that matches but was missing from the manifest is added to it. That state
+is left by a run killed between copying and writing the manifest, and those
+files used to stay unrecorded for good. The cost is one read of each such file
+from the card, and only on a re-run or an append, which is where the danger is.
+
+Regression test in `ingest_safety_test.go`, covering five files with taken
+names: recorded and matching, matching but unrecorded, a different size, the
+same size with different content, and a manifest that disagrees with the card.
+Only the first two may pass, and only the second is recorded. The wiring into
+the ingest flow is not under test, for the same reason as the entry below.
 
 ### A file that failed verification stayed on the drive under its final name
 

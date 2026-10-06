@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 type fileEntry struct {
@@ -413,8 +414,31 @@ func normaliseVol(name string) string {
 	return strings.ToLower(strings.TrimSpace(name))
 }
 
+// sanitizeMission turns a typed mission name into what follows "NNN_" in the
+// mission's directory name, or "" if nothing usable is left.
+//
+// It used to replace spaces and nothing else, so the name went into a path as
+// typed: a "/" made nested directories, "../" put the footage outside the year
+// directory altogether, and the characters exFAT will not store (\ : * ? " < >
+// |) made the copy fail part-way on an exFAT drive. Those, and control
+// characters, become "_". Trailing dots go too: exFAT and Windows drop them
+// silently, which would make the name on the drive differ from the one qcp
+// recorded.
 func sanitizeMission(name string) string {
-	return strings.ReplaceAll(strings.TrimSpace(name), " ", "_")
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(name) {
+		switch {
+		case r == ' ', r < 0x20, r == 0x7f, strings.ContainsRune(`/\:*?"<>|`, r):
+			b.WriteRune('_')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	s := strings.TrimRight(b.String(), ". ")
+	if strings.Trim(s, "_.") == "" {
+		return "" // nothing but separators and dots: not a name
+	}
+	return s
 }
 
 func expandPath(p string) (string, error) {
@@ -428,11 +452,53 @@ func expandPath(p string) (string, error) {
 	return filepath.Abs(p)
 }
 
+// stdin is the one reader every prompt goes through. Each prompt used to make
+// its own bufio.Reader, or use fmt.Scan, which reads a word and leaves the rest
+// of the line behind; a buffered reader can swallow input meant for the next
+// prompt, and fmt.Scan's leftover newline reads as an empty answer to it.
+var (
+	stdin   = bufio.NewReader(os.Stdin)
+	stdinMu sync.Mutex
+)
+
+// readLine reads one line of input, trimmed. At the end of input it returns
+// what it has and io.EOF, so a prompt can stop rather than ask forever.
+func readLine() (string, error) {
+	stdinMu.Lock()
+	defer stdinMu.Unlock()
+	line, err := stdin.ReadString('\n')
+	line = strings.TrimSpace(line)
+	if err != nil && line != "" {
+		return line, nil // a last line without a newline still counts
+	}
+	return line, err
+}
+
 func confirm() bool {
-	fmt.Print("  Confirm? [y/n]  ")
-	var resp string
-	fmt.Scan(&resp)
+	return ask("Confirm?")
+}
+
+// ask puts a yes/no question and reports whether the answer was y. No answer —
+// the end of input — is a no.
+func ask(question string) bool {
+	fmt.Printf("  %s [y/n]  ", question)
+	resp, _ := readLine()
 	return resp == "y"
+}
+
+// askYesNo asks until it gets y or n. At the end of input it answers n, so
+// nothing is deleted because input ran out.
+func askYesNo(question string) bool {
+	for {
+		fmt.Print(question)
+		resp, err := readLine()
+		switch {
+		case resp == "y":
+			return true
+		case resp == "n", err != nil:
+			return false
+		}
+	}
 }
 
 func fmtSize(size uint64) string {

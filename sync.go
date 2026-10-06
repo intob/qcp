@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -238,17 +237,7 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 		signal.Stop(sigCh)
 		cancel()
 		time.Sleep(150 * time.Millisecond)
-		fmt.Print("\r\033[2K\ninterrupted — delete partial sync dirs? (y/n): ")
-		reader := bufio.NewReader(os.Stdin)
-		var resp string
-		for resp != "y" && resp != "n" {
-			line, err := reader.ReadString('\n')
-			resp = strings.TrimSpace(line)
-			if err != nil {
-				break // stdin closed; don't delete
-			}
-		}
-		if resp == "y" {
+		if askYesNo("\r\033[2K\ninterrupted — delete partial sync dirs? (y/n): ") {
 			for _, d := range dstDirs {
 				os.RemoveAll(d)
 				fmt.Printf("removed: %s\n", d)
