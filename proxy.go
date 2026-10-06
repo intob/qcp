@@ -941,6 +941,12 @@ func cardOf(rel string) string {
 // renditions into proxies.b3. The manifest is byte-identical in format to
 // checksums.b3 — sorted "hash  relative_path" — so -verify and -check read it
 // without changes.
+//
+// It is called repeatedly during a run, once per finished clip, and merges into
+// whatever is already on disk rather than assuming it is the only writer of the
+// b3. Both files go down atomically because -index reads them while a run is
+// still going: readProxyManifest treats a JSON parse error as an empty manifest,
+// so a torn read would drop the whole mission out of the index.
 func writeProxyManifests(outDir string, m proxyManifest, written []string) error {
 	sort.Slice(m.Clips, func(i, j int) bool { return m.Clips[i].Rel < m.Clips[j].Rel })
 	data, err := json.MarshalIndent(m, "", "  ")
@@ -950,7 +956,7 @@ func writeProxyManifests(outDir string, m proxyManifest, written []string) error
 	if err := os.MkdirAll(outDir, 0777); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(outDir, proxyMetaName), append(data, '\n'), 0644); err != nil {
+	if err := writeFileAtomic(filepath.Join(outDir, proxyMetaName), append(data, '\n'), 0644); err != nil {
 		return err
 	}
 
@@ -972,7 +978,7 @@ func writeProxyManifests(outDir string, m proxyManifest, written []string) error
 		lines = append(lines, fmt.Sprintf("%s  %s", h, rel))
 	}
 	sort.Strings(lines)
-	return os.WriteFile(manifestPath, []byte(strings.Join(lines, "\n")+"\n"), 0644)
+	return writeFileAtomic(manifestPath, []byte(strings.Join(lines, "\n")+"\n"), 0644)
 }
 
 // ── the command ─────────────────────────────────────────────────────────────
@@ -1112,6 +1118,84 @@ func runProxy(cfg Config, missions []int, year int, all bool, tiers proxyTiers, 
 	return failed == 0
 }
 
+// planState accumulates one mission's manifest while its clips encode. The
+// manifest is rewritten after every clip that lands rather than once when the
+// whole run finishes, for two reasons. -index builds purely from proxies.json,
+// so until the manifest names a clip it is not browsable however long ago it
+// was encoded — on a batch of a few hundred clips that is hours of finished
+// work sitting invisible. And a run killed outright — rather than interrupted,
+// which is handled — otherwise loses the bookkeeping for everything it had
+// already paid for, and the next run re-encodes all of it.
+//
+// The map is seeded with the entries carried forward from a previous run, so
+// every write is the mission's complete picture rather than a delta, and a
+// partial run never drops what an earlier one recorded.
+type planState struct {
+	outDir  string
+	mission string
+	year    int
+
+	mu      sync.Mutex
+	clips   map[string]clipMeta
+	flushed bool
+}
+
+func newPlanState(p *missionPlan) *planState {
+	s := &planState{
+		outDir:  p.outDir,
+		mission: p.src.slug,
+		year:    yearOfPath(p.outDir),
+		clips:   make(map[string]clipMeta, len(p.jobs)),
+	}
+	for _, j := range p.jobs {
+		if j.cached {
+			s.clips[j.rel] = j.meta
+		}
+	}
+	return s
+}
+
+// record adds one finished clip to the mission and rewrites its manifests.
+// written is only that clip's renditions: writeProxyManifests merges them into
+// the proxies.b3 already on disk, so the file grows across the run.
+func (s *planState) record(meta clipMeta, written []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clips[meta.Rel] = meta
+	return s.flushLocked(written)
+}
+
+// flush writes a manifest for a mission that never recorded a clip, which means
+// every clip of it was cached and there was no work to do. Such a mission still
+// needs the manifest if an earlier run never got as far as writing one. Where a
+// clip did land, the last record left the manifest current and this is a no-op.
+func (s *planState) flush() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.flushed || len(s.clips) == 0 {
+		return nil
+	}
+	return s.flushLocked(nil)
+}
+
+func (s *planState) flushLocked(written []string) error {
+	clips := make([]clipMeta, 0, len(s.clips))
+	for _, c := range s.clips {
+		clips = append(clips, c)
+	}
+	m := proxyManifest{
+		Version: proxyManifestVersion,
+		Year:    s.year,
+		Mission: s.mission,
+		Clips:   clips,
+	}
+	if err := writeProxyManifests(s.outDir, m, written); err != nil {
+		return err
+	}
+	s.flushed = true
+	return nil
+}
+
 // generatePlans runs the encode for a set of planned missions and writes their
 // manifests. Concurrency is bounded per source drive, so a batch spanning the
 // archive HDD and a hot SSD does not thrash the platter.
@@ -1142,6 +1226,7 @@ func generatePlans(plans []missionPlan, tiers proxyTiers, lutDir string) bool {
 
 	var done atomic.Int64
 	var failures atomic.Int64
+	var manifestFail atomic.Int64
 	total := 0
 	for _, ws := range byVol {
 		total += len(ws)
@@ -1173,9 +1258,11 @@ func generatePlans(plans []missionPlan, tiers proxyTiers, lutDir string) bool {
 		return fmt.Sprintf("%d/%d", done.Load(), total)
 	})
 
-	metas := make(map[*missionPlan][]clipMeta)
-	writes := make(map[*missionPlan][]string)
-	var mu sync.Mutex
+	states := make(map[*missionPlan]*planState, len(plans))
+	for i := range plans {
+		p := &plans[i]
+		states[p] = newPlanState(p)
+	}
 
 	var pools []*pool
 	var submitters []func()
@@ -1213,15 +1300,18 @@ func generatePlans(plans []missionPlan, tiers proxyTiers, lutDir string) bool {
 						// planMission tests to decide a clip is stale — so writing
 						// this entry would clear the very trigger that says the
 						// rendition on disk is out of date, and the next run would
-						// call a proxy carrying the old look up to date. The loop
-						// below keeps the last entry a *successful* run wrote, so
-						// the clip stays stale and comes back round next time.
+						// call a proxy carrying the old look up to date. Leaving it
+						// unrecorded keeps whatever the mission's planState was
+						// seeded with — the entry the last *successful* run wrote —
+						// so the clip stays stale and comes back round next time.
 						return
 					}
-					mu.Lock()
-					metas[w.plan] = append(metas[w.plan], meta)
-					writes[w.plan] = append(writes[w.plan], written...)
-					mu.Unlock()
+					// states is only read here, never written, so the map
+					// itself needs no lock; planState serialises the mission.
+					if err := states[w.plan].record(meta, written); err != nil {
+						fmt.Printf("\n%s writing %s: %v\n", red("ERROR"), proxyManifestName, err)
+						manifestFail.Add(1)
+					}
 				})
 			}
 		})
@@ -1233,35 +1323,16 @@ func generatePlans(plans []missionPlan, tiers proxyTiers, lutDir string) bool {
 	bar.finish()
 	pr.Wait()
 
-	ok := failures.Load() == 0
+	// Every mission that encoded anything wrote its manifest as it went. This
+	// catches the ones that encoded nothing because all of their clips were
+	// cached, which never reach a worker at all.
 	for i := range plans {
-		p := &plans[i]
-		generated := make(map[string]bool)
-		for _, m := range metas[p] {
-			generated[m.Rel] = true
-		}
-		clips := append([]clipMeta(nil), metas[p]...)
-		// Clips that needed no work keep the entry they already had, so a
-		// partial run never drops what a previous one recorded.
-		for _, j := range p.jobs {
-			if !generated[j.rel] && j.cached {
-				clips = append(clips, j.meta)
-			}
-		}
-		if len(clips) == 0 {
-			continue
-		}
-		m := proxyManifest{
-			Version: proxyManifestVersion,
-			Year:    yearOfPath(p.outDir),
-			Mission: p.src.slug,
-			Clips:   clips,
-		}
-		if err := writeProxyManifests(p.outDir, m, writes[p]); err != nil {
+		if err := states[&plans[i]].flush(); err != nil {
 			fmt.Printf("%s writing %s: %v\n", red("ERROR"), proxyManifestName, err)
-			ok = false
+			manifestFail.Add(1)
 		}
 	}
+	ok := failures.Load() == 0 && manifestFail.Load() == 0
 
 	if ctx.Err() != nil {
 		fmt.Printf("\n  %s  interrupted — %d clip(s) finished and recorded\n", yellow("⚠"), done.Load())

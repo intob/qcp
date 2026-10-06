@@ -2,8 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -582,5 +585,172 @@ func TestFailedClipKeepsItsPreviousManifestEntry(t *testing.T) {
 	}
 	if again := planMission(src, outDir, tiers, colourTransform{}); again.todo != 1 {
 		t.Errorf("second plan: todo = %d, want 1 — the failed clip is now read as up to date", again.todo)
+	}
+}
+
+// A -proxy run over a few hundred clips takes hours, and -index builds purely
+// from proxies.json. So the manifest has to name a clip as soon as that clip is
+// encoded, not when the whole run finishes — otherwise everything the run has
+// done so far is invisible to the index, and a run killed outright loses it.
+func TestPlanStateRecordsEachClipImmediately(t *testing.T) {
+	dir := t.TempDir()
+
+	// One clip carried forward from a previous run, two still to encode.
+	cached := clipMeta{
+		Rel: "A_0001.MXF", Card: "", Size: 100, SrcHash: strings.Repeat("aa", 32),
+		Duration: 10, Codec: "h264", Transform: transformNone.ID,
+		Browse: "browse/A_0001.mp4",
+	}
+	p := &missionPlan{
+		src:    proxySource{slug: "040_Sardinia"},
+		outDir: filepath.Join(dir, "proxies", "2025", "040_Sardinia"),
+		jobs: []clipJob{
+			{rel: "A_0001.MXF", meta: cached, cached: true},
+			{rel: "A_0002.MXF"},
+			{rel: "A_0003.MXF"},
+		},
+	}
+	st := newPlanState(p)
+
+	// Nothing has landed yet, but the mission already has a manifest's worth of
+	// carried-forward entries — those must not be lost by the first write.
+	rels := func() []string {
+		m := readProxyManifest(p.outDir)
+		var out []string
+		for _, c := range m.Clips {
+			out = append(out, c.Rel)
+		}
+		sort.Strings(out)
+		return out
+	}
+
+	for i, rel := range []string{"A_0002.MXF", "A_0003.MXF"} {
+		browse := proxyRel("browse", rel, ".mp4")
+		full := filepath.Join(p.outDir, browse)
+		if err := os.MkdirAll(filepath.Dir(full), 0777); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("rendition "+rel), 0644); err != nil {
+			t.Fatal(err)
+		}
+		meta := clipMeta{Rel: rel, Size: 200, Duration: 20, Codec: "h264",
+			Transform: transformNone.ID, Browse: browse}
+		if err := st.record(meta, []string{browse}); err != nil {
+			t.Fatal(err)
+		}
+
+		// The manifest on disk must already name every clip finished so far,
+		// mid-run, with the run still going.
+		want := []string{"A_0001.MXF", "A_0002.MXF", "A_0003.MXF"}[:i+2]
+		if got := rels(); !slices.Equal(got, want) {
+			t.Errorf("after %d clip(s): manifest has %v, want %v", i+1, got, want)
+		}
+
+		// And proxies.b3 has to cover each rendition as it lands, not just the
+		// last one — writeProxyManifests merges rather than replacing.
+		b3 := readChecksumFile(filepath.Join(p.outDir, proxyManifestName))
+		if _, ok := b3[browse]; !ok {
+			t.Errorf("%s missing from %s after it was recorded", browse, proxyManifestName)
+		}
+	}
+
+	// The end-of-run reconcile must not undo any of that.
+	if err := st.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if got := rels(); len(got) != 3 {
+		t.Errorf("after flush: manifest has %v, want all three clips", got)
+	}
+
+	m := readProxyManifest(p.outDir)
+	if m.Mission != "040_Sardinia" || m.Year != 2025 || m.Version != proxyManifestVersion {
+		t.Errorf("manifest header = %d/%s/v%d, want 2025/040_Sardinia/v%d",
+			m.Year, m.Mission, m.Version, proxyManifestVersion)
+	}
+	for _, c := range m.Clips {
+		if c.Rel == "A_0001.MXF" && c.Browse != cached.Browse {
+			t.Errorf("carried-forward entry was overwritten: %+v", c)
+		}
+	}
+}
+
+// A mission whose clips are all cached never reaches a worker, so nothing
+// records a clip for it. It still needs a manifest if an earlier run never
+// wrote one — and a mission with no clips at all must not get an empty one.
+func TestPlanStateFlushesCachedOnlyMission(t *testing.T) {
+	dir := t.TempDir()
+
+	allCached := &missionPlan{
+		src:    proxySource{slug: "005_First_Groundspiral"},
+		outDir: filepath.Join(dir, "proxies", "2025", "005_First_Groundspiral"),
+		jobs: []clipJob{{
+			rel:    "A_0009.MXF",
+			meta:   clipMeta{Rel: "A_0009.MXF", Size: 5, Duration: 3, Codec: "h264"},
+			cached: true,
+		}},
+	}
+	if err := newPlanState(allCached).flush(); err != nil {
+		t.Fatal(err)
+	}
+	if got := readProxyManifest(allCached.outDir); len(got.Clips) != 1 {
+		t.Errorf("cached-only mission: manifest has %d clip(s), want 1", len(got.Clips))
+	}
+
+	empty := &missionPlan{
+		src:    proxySource{slug: "006_Nothing"},
+		outDir: filepath.Join(dir, "proxies", "2025", "006_Nothing"),
+		jobs:   []clipJob{{rel: "A_0010.MXF"}}, // planned, never encoded
+	}
+	if err := newPlanState(empty).flush(); err != nil {
+		t.Fatal(err)
+	}
+	if fileExists(filepath.Join(empty.outDir, proxyMetaName)) {
+		t.Errorf("a mission with nothing recorded should not get a manifest")
+	}
+}
+
+// -index reads proxies.json while a run is still writing it. readProxyManifest
+// treats a parse error as an empty manifest, so a torn read would silently drop
+// the whole mission out of the index — the exact bug per-clip writes fix.
+func TestProxyManifestWritesAreAtomic(t *testing.T) {
+	dir := t.TempDir()
+	m := proxyManifest{Version: proxyManifestVersion, Year: 2025, Mission: "034_Kronplatz"}
+	for i := 0; i < 200; i++ {
+		m.Clips = append(m.Clips, clipMeta{
+			Rel: fmt.Sprintf("A_%04d.MXF", i), Size: 1 << 30, Duration: 42,
+			Codec: "h264", Transform: transformNone.ID,
+		})
+	}
+	if err := writeProxyManifests(dir, m, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	stop := make(chan struct{})
+	done := make(chan int)
+	go func() {
+		reads := 0
+		for {
+			select {
+			case <-stop:
+				done <- reads
+				return
+			default:
+			}
+			if got := readProxyManifest(dir); len(got.Clips) != len(m.Clips) {
+				t.Errorf("torn read: manifest had %d clip(s), want %d", len(got.Clips), len(m.Clips))
+				done <- reads
+				return
+			}
+			reads++
+		}
+	}()
+	for i := 0; i < 50; i++ {
+		if err := writeProxyManifests(dir, m, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	close(stop)
+	if reads := <-done; reads == 0 {
+		t.Skip("reader never got a read in alongside the writes")
 	}
 }

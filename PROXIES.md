@@ -501,6 +501,20 @@ from a sidecar or were inherited from the card, and which transform was
 applied. A re-run skips any clip whose recorded source hash still matches, and
 reuses the cached sidecar reading rather than re-parsing every XML.
 
+It is rewritten after every clip that finishes, not once when the run ends.
+`-index` builds purely from `proxies.json`, so until the manifest names a clip
+that clip is not browsable however long ago it was encoded — on a batch of a few
+hundred, that is hours of finished work sitting invisible to the index while the
+run is still going. Writing per clip also means a run killed outright keeps the
+bookkeeping for everything it had already paid for, rather than re-encoding all
+of it next time; an interrupt was already handled, a `kill -9` was not. The cost
+is nil: each rendition is hashed exactly once either way, and the extra work is
+rewriting two small files per clip against a clip that took tens of seconds to
+encode. Both files go down through a temporary and a rename, because `-index`
+reads them mid-run and `readProxyManifest` treats a parse error as an empty
+manifest — a torn read would drop the whole mission out of the index rather than
+fail loudly.
+
 Renditions are written through a `.qcp-part` temporary and renamed on success,
 so an interrupted run never leaves a truncated file that looks finished. That
 covers a failed encode, which cleans up after itself, but not a process killed
@@ -511,11 +525,13 @@ run's work in progress.
 **One run per proxy tree.** `-proxy` takes an exclusive lock on the drive's
 proxy root and a second run is turned away rather than queued. Two concurrent
 runs over one mission do not merely duplicate work, they corrupt each other's
-bookkeeping: `proxies.json` is written once at the end of a run, assembled from
-that run's own view of what it generated and what it judged cached, so the
-second run plans against a manifest the first has not written yet and whichever
-finishes last overwrites with a partial picture. Clips that were built then read
-as missing and get built again. The loser has nothing useful to contribute and
+bookkeeping: each rewrites `proxies.json` from its own view of what it generated
+and what it judged cached, a view fixed when it planned the mission, so both
+plan against a manifest neither has finished adding to and whichever writes last
+overwrites with a picture missing everything the other did. Clips that were
+built then read as missing and get built again. Writing the manifest per clip
+narrows that window but does not close it — the stale half of the picture is the
+plan, not the write. The loser has nothing useful to contribute and
 should come back when the winner has finished and plan against the truth. During
 `-ingest` a busy tree is a warning rather than a failure — the footage is
 already copied and verified, and proxies can be generated later.

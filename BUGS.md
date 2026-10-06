@@ -12,9 +12,74 @@ entry from the second read has a regression test that fails with the fix
 reverted and passes with it in place; each was confirmed the same way before
 being written.
 
+The newest entry did not come from either read. It was found on 2026-09-01 by
+running `-index` against a `-proxy` run that was still going; its line numbers
+are against commit `111977c`.
 ---
 
 ## Fixed
+
+### Hours of finished proxies stayed invisible to `-index` until the run ended
+
+Found from the outside: `qcp -year 2025 -proxy 1,2,...,42` had been running two
+and a half hours on T9 with ~600 renditions on disk, and `qcp -index` reported
+almost all of those missions as unproxied. Only the two missions whose manifests
+came from *earlier, completed* runs had any clips in the index.
+
+`-index` never walks the proxy tree. Per mission it reads `proxies.json` and
+nothing else (`index.go:218`), so a mission with no manifest indexes as having
+no clips however many renditions, posters and sprites sit beside it. And
+`generatePlans` wrote every manifest in one loop after `wp.wait()` for every
+pool across every mission in the batch — the accumulated `metas`/`writes` maps
+lived in memory for the whole run. So the manifests were correct, just written
+hours after the work they describe, and a 243-clip mission would have been
+invisible for hours even under a per-mission write.
+
+The same deferral was a durability hole. The interrupt path was already handled
+— the manifest loop ran before `os.Exit(130)`, so Ctrl-C recorded everything
+finished — but a `kill -9`, a panic or a power cut lost the bookkeeping for the
+entire run, and the next run re-encoded all of it.
+
+Fixed by writing each mission's manifest as every clip lands. `planState`
+(`proxy.go:1133`) holds one mission's entries by `rel`, seeded at construction
+with the entries carried forward from a previous run, and `record`
+(`proxy.go:1161`) adds the finished clip and rewrites both manifests. Because
+every write is the mission's complete picture rather than a delta, a partial run
+still never drops what an earlier one recorded — the property the old
+end-of-run loop got from re-appending cached entries. `writeProxyManifests`
+already merged into the `proxies.b3` on disk rather than replacing it, so it
+took no change to be called repeatedly.
+
+The cost is nil. Each rendition is hashed exactly once either way; the only
+addition is rewriting two small files per clip, against a clip that took tens of
+seconds to encode.
+
+Both files now go down through a temporary and a rename (`writeFileAtomic`,
+`util.go:287`). This is required, not tidiness: `-index` reads `proxies.json`
+while a run is writing it, and `readProxyManifest` (`proxy.go:134`) treats a
+parse error as an empty manifest — so a torn read would drop the whole mission
+out of the index silently, which is the bug being fixed here reappearing as a
+rare non-deterministic one. Confirmed: with the atomic write reverted, a reader
+racing 50 writes of a 200-clip manifest sees `0 clip(s)`.
+
+The end-of-run loop survives as a reconcile pass for missions that encoded
+nothing because every clip was cached — those never reach a worker, so nothing
+records a clip for them, and they still need a manifest if an earlier run never
+wrote one.
+
+Three regression tests in `proxy_test.go`: that the manifest and `proxies.b3`
+name each clip as it is recorded rather than at the end, that a cached-only
+mission still gets a manifest while a mission with nothing recorded does not,
+and that a concurrent reader never sees a torn manifest. The first two fail with
+`record` reduced to accumulating, the third with the atomic write reverted.
+
+Left alone: the tree lock. Per-clip writes narrow the window between two
+concurrent runs but do not close it, because the stale half of the picture is
+each run's *plan*, fixed when it planned the mission, not its write. The
+rationale comment in `lock.go` and the section in `PROXIES.md` are reworded to
+say so — both previously rested on "written once at the end of a run". The entry
+below on a failed re-bake also refers to that loop by its old line; the
+invariant it describes is now carried by the `planState` seeding.
 
 ### Every progress-bar phase hung instead of reporting a read or copy failure
 

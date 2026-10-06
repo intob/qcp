@@ -16,12 +16,14 @@ const proxyLockName = ".qcp-proxy.lock"
 // lifetime of a run, and returns the release.
 //
 // Two concurrent -proxy runs over the same mission corrupt each other's
-// bookkeeping rather than merely duplicating work: proxies.json is written once
-// at the end of a run, assembled from that run's own view of what it generated
-// and what it judged cached. The second run's plan is computed against a
-// manifest the first has not written yet, and whichever finishes last
-// overwrites with its own partial picture — so clips that were built read as
-// missing and get built again. It is a lock rather than a merge because two
+// bookkeeping rather than merely duplicating work: each rewrites proxies.json
+// from its own view of what it generated and what it judged cached, a view
+// fixed when it planned the mission. Both runs plan against a manifest neither
+// has finished adding to, and whichever writes last overwrites with a picture
+// missing everything the other did — so clips that were built read as missing
+// and get built again. Writing the manifest per clip rather than per run
+// narrows the window but does not close it, since the stale half of the picture
+// is the plan, not the write. It is a lock rather than a merge because two
 // simultaneous runs have nothing useful to say to each other: the loser should
 // come back when the winner has finished and plan against the truth.
 func lockProxyTree(root string) (func(), error) {

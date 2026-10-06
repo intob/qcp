@@ -300,6 +300,11 @@ which transform was applied. A re-run skips any clip whose recorded source hash
 still matches, and reuses the cached sidecar reading rather than re-parsing
 every XML.
 
+`proxies.json` is rewritten after every clip a run finishes, so a `-proxy` run
+that will take hours is browsable through `-index` as it goes rather than only
+once it is done, and a run killed outright keeps the record of everything it had
+already encoded instead of re-doing it.
+
 Proxy filenames keep the source stem and change only the extension, because
 Resolve pairs a folder of proxies to a selection of clips by filename excluding
 extension. Relinking a mission is one action: select its clips in the Media

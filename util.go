@@ -279,6 +279,30 @@ func isFullyChecksummed(dir string) bool {
 	return true
 }
 
+// writeFileAtomic writes a file by way of a temporary in the same directory
+// and a rename, so a reader either sees the previous contents or the new ones
+// and never a half-written file. Used for manifests that are rewritten while
+// another qcp command may be reading them — proxies.json is rewritten after
+// every clip a -proxy run finishes, and -index reads it as it goes.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp := partPath(path)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(data)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
+		os.Remove(tmp)
+	}
+	return err
+}
+
 func dirExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
