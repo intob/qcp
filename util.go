@@ -285,6 +285,10 @@ func isFullyChecksummed(dir string) bool {
 // and never a half-written file. Used for manifests that are rewritten while
 // another qcp command may be reading them — proxies.json is rewritten after
 // every clip a -proxy run finishes, and -index reads it as it goes.
+//
+// The temporary is synced before the rename, so a power cut or a drive pulled
+// mid-write cannot leave the new name pointing at contents that never reached
+// the disk.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	tmp := partPath(path)
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
@@ -292,6 +296,9 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	_, err = f.Write(data)
+	if serr := f.Sync(); err == nil {
+		err = serr
+	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
@@ -302,6 +309,20 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		os.Remove(tmp)
 	}
 	return err
+}
+
+// writeChecksums replaces a checksums.b3 with lines, sorted. It goes through
+// writeFileAtomic because the manifest is the only record of what the footage
+// hashed to when it was known good: written in place, a crash or an unplugged
+// drive mid-write left it truncated, and every hash past the cut was gone.
+func writeChecksums(path string, lines []string) error {
+	sort.Strings(lines)
+	return writeFileAtomic(path, []byte(strings.Join(lines, "\n")+"\n"), 0644)
+}
+
+// addChecksums merges lines into the checksums.b3 at path — see mergeChecksums.
+func addChecksums(path string, lines []string) error {
+	return writeChecksums(path, mergeChecksums(path, lines))
 }
 
 func dirExists(path string) bool {

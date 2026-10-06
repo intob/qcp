@@ -72,6 +72,30 @@ drives only. That behaviour is intended, since a cold drive plugged in at
 ingest gets a copy verified straight from the card, so the README and `-help`
 now say so instead.
 
+### `checksums.b3` was written in place
+
+Six sites wrote the manifest with `os.WriteFile`: the ingest, `-sync`,
+`-replicate` and `-pull` merges, both `-checksum` paths, and the junk pruning
+in `-clean`. `os.WriteFile` truncates the file before writing it, so a crash or
+a drive unplugged mid-write left the manifest cut short. The manifest is the
+only record of what the footage hashed to when it was known good, so every hash
+past the cut was lost. `readChecksumFile` also skips a line it cannot parse, so
+the damage was silent. The next `-checksum` would then re-record the missing
+files from whatever was on disk by then.
+
+Confirmed with a reader racing fifty rewrites of a 2,000-entry manifest: with
+the in-place write it saw a short manifest almost at once.
+
+Fixed with `writeChecksums` and `addChecksums` (`util.go`). Every manifest
+write now goes through `writeFileAtomic`, which writes a temporary and renames
+it over the manifest. `writeFileAtomic` now also syncs the temporary before the
+rename, so after a power cut the new name cannot point at contents that never
+reached the disk. The mission counter (`seq.go`) is written the same way, since
+it is the one record of which numbers are spent.
+
+Regression test in `manifest_test.go`: the racing reader must always see the
+full manifest. It fails with the in-place write restored.
+
 ### Hours of finished proxies stayed invisible to `-index` until the run ended
 
 Found from the outside: `qcp -year 2025 -proxy 1,2,...,42` had been running two

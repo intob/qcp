@@ -49,7 +49,9 @@ func writeSeq(seq map[int]int) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, data, 0644)
+	// The counter is the one record of which numbers are spent, so it is
+	// never left half-written either.
+	return writeFileAtomic(p, data, 0644)
 }
 
 func peekMission(year int) (int, error) {

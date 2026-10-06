@@ -2,11 +2,9 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -256,9 +254,8 @@ func runChecksumYear(cfg Config, year int) bool {
 				}
 				lines = append(lines, fmt.Sprintf("%s  %s", md.hashes[f.rel], f.rel))
 			}
-			sort.Strings(lines)
 			cPath := filepath.Join(md.dir, "checksums.b3")
-			if err := os.WriteFile(cPath, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
+			if err := writeChecksums(cPath, lines); err != nil {
 				fmt.Printf("\n%s writing %s: %v\n", red("ERROR"), cPath, err)
 			}
 		}
@@ -426,9 +423,8 @@ func runChecksum(cfg Config, missionNum int, year int) bool {
 			}
 			lines = append(lines, fmt.Sprintf("%s  %s", d.hashes[f.rel], f.rel))
 		}
-		sort.Strings(lines)
 		cPath := filepath.Join(d.dir, "checksums.b3")
-		if err := os.WriteFile(cPath, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
+		if err := writeChecksums(cPath, lines); err != nil {
 			fmt.Printf("%s writing %s: %v\n", red("ERROR"), cPath, err)
 		} else {
 			fmt.Printf("%s wrote %s (%d files)\n", green("✓"), cPath, len(lines))

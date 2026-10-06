@@ -426,9 +426,7 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 
 	for dstRoot, lines := range checksums {
 		cPath := filepath.Join(dstRoot, "checksums.b3")
-		lines = mergeChecksums(cPath, lines)
-		sort.Strings(lines)
-		if err := os.WriteFile(cPath, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
+		if err := addChecksums(cPath, lines); err != nil {
 			fmt.Printf("%s writing checksums: %v\n", red("ERROR"), err)
 		}
 	}

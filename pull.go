@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -372,9 +371,7 @@ func runTransfer(cfg Config, spec transferSpec, missions []int, year int, sub st
 	// merge into each mission's checksums.b3
 	for dstRoot, lines := range newHashes {
 		cPath := filepath.Join(dstRoot, "checksums.b3")
-		lines = mergeChecksums(cPath, lines)
-		sort.Strings(lines)
-		if err := os.WriteFile(cPath, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
+		if err := addChecksums(cPath, lines); err != nil {
 			fmt.Printf("%s writing checksums: %v\n", red("ERROR"), err)
 		}
 	}
