@@ -3,8 +3,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -75,6 +77,10 @@ func runServe(cfg Config, out, addr string) bool {
 	mux.HandleFunc("/api/flag", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		if !sameOriginJSON(r) {
+			http.Error(w, "flags can only be changed from the index page", http.StatusForbidden)
 			return
 		}
 		var req struct {
@@ -180,4 +186,32 @@ func writeJSON(w http.ResponseWriter, v any) {
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		http.Error(w, "encode failed", http.StatusInternalServerError)
 	}
+}
+
+// sameOriginJSON reports whether a request to change a flag came from the
+// index page itself.
+//
+// The endpoint decoded any body as JSON whatever its content type and never
+// looked at where the request came from. A browser sends a cross-site POST
+// with a text/plain body without asking first, so any web page open in the same
+// browser while -serve ran could flag or unflag clips — and -resolve pushes
+// flags into the Resolve project. Requiring application/json forces a browser
+// to ask the server first (a CORS preflight), which qcp never approves, and an
+// Origin or Sec-Fetch-Site naming another site is refused outright. Requests
+// from other tools, which send neither header, still work.
+func sameOriginJSON(r *http.Request) bool {
+	mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mt != "application/json" {
+		return false
+	}
+	if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+		return false
+	}
+	if origin := r.Header.Get("Origin"); origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil || u.Host != r.Host {
+			return false
+		}
+	}
+	return true
 }

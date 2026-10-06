@@ -19,6 +19,32 @@ are against commit `111977c`.
 
 ## Fixed
 
+### `-serve` accepted flag changes from other origins
+
+`/api/flag` (`serve.go`) decoded any POST body as JSON whatever its content type,
+and never looked at where the request came from. A browser sends a cross-site
+POST with a `text/plain` body without asking the server first, so any web page
+open in the same browser while `-serve` ran could flag or unflag clips, given
+the year, mission and clip path. `-resolve` pushes flags into the open Resolve
+project. Paths were never at risk, since only clips the index published can be
+flagged, but the flags themselves were.
+
+Fixed with `sameOriginJSON`, checked before the body is read. The request must
+be `application/json`. A browser cannot send that cross-site without a CORS
+preflight, which qcp never approves. An `Origin` that is not the server's own
+host (including `null`), or `Sec-Fetch-Site: cross-site`, is refused with 403.
+The index page already sends `application/json` from its own origin, so it is
+unaffected. A script on the same machine that sends neither header still
+works.
+
+Regression test in `serve_test.go`: the page's own request and a header-less
+JSON client are accepted. `text/plain`, a foreign origin, a `null` origin, a
+cross-site fetch and a missing content type are refused.
+
+Left alone: `-addr :8080` still serves the whole LAN without authentication.
+That is its documented purpose (browsing from a phone), and what it exposes is
+proxies and flags, never footage.
+
 ### Hours of finished proxies stayed invisible to `-index` until the run ended
 
 Found from the outside: `qcp -year 2025 -proxy 1,2,...,42` had been running two

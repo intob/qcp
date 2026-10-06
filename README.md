@@ -416,6 +416,9 @@ one. Two further consequences worth knowing: only clips that have been proxied
 can be flagged, because only those appear in the index; and flagging needs
 somewhere to write, so it is offered under `-serve` and not when the index is
 opened from `file://`, and only for a mission that is on a mounted hot drive.
+A flag can only be changed by a JSON request from the index page's own origin,
+so another web page open in the same browser cannot flag clips behind your
+back.
 
 Resolve's scripting API is a Python module inside the application bundle, so
 `-resolve` shells out to `python3`. It needs Resolve running with a project
