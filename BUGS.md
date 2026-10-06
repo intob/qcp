@@ -15,6 +15,19 @@ being written.
 The newest entry did not come from either read. It was found on 2026-09-01 by
 running `-index` against a `-proxy` run that was still going; its line numbers
 are against commit `111977c`.
+
+A third read on 2026-10-06 looked only at the paths that copy, delete, rename or
+record the hashes of footage. It started from a mission counter that had run two
+ahead of the drives. Its line numbers are against commit `111977c` plus the
+uncommitted proxy work that was in the tree at the time. All ten of its
+findings are fixed below, along with the counter problem it started from.
+
+A fourth read the same day covered everything the third did not: verify, check,
+the transfer planning, drive detection, the ingest prompts, eject, serve and
+flags, and the code added by the third read. All of its findings
+are fixed below. One, that `-ingest` copies to cold drives as well as hot, was
+confirmed as intended and is documented instead.
+
 ---
 
 ## Fixed
@@ -499,6 +512,39 @@ Regression tests in `checksum_test.go`: the rotted file through both paths, a
 cold copy that disagrees with a fully checksummed hot copy, and a recorded file
 gone missing. Each must fail and leave the record alone, and all fail with the
 fix reverted. A fourth test checks that a plain append still succeeds.
+
+### `-renumber` renamed only the drives that were mounted, and deleted their manifests
+
+`runRenumber` skipped any drive that was not mounted (`renumber.go:25`). A
+mission number names one mission across every drive, so renumbering with the
+archive in a drawer left it under the old numbers. That gave the same mission
+two numbers, and a number on the hot drive named a different mission than the
+same number on the archive. Missions that were only on the unmounted drive
+could not be seen, so they could be handed numbers that were already taken.
+The counter was then set to the number of missions it could see
+(`renumber.go:130`), which moved it back below numbers already spent. That is
+the same hazard as the bare `-init` entry below, by a different route.
+Confirmed with missions `003_C` and `007_G` on a hot drive, the counter at 7
+and the archive unmounted: both were renamed and the counter dropped to 2.
+
+It also deleted each renamed mission's `checksums.b3` as stale
+(`renumber.go:117`). The manifest's paths are relative to the mission
+directory, so renaming the directory changes none of them. Deleting it threw
+away the hashes recorded when the footage was known good, and the next
+`-checksum` re-recorded whatever was on disk by then.
+
+Fixed by refusing to run unless every drive that can hold the year (by
+`year_from`/`year_to`) is mounted, naming the ones that are not, and by leaving
+`checksums.b3` in place.
+
+Regression tests in `renumber_test.go`: with the archive away nothing is renamed
+and the counter stays at 7; with everything mounted the manifest survives the
+rename. Both fail with the fix reverted.
+
+Left alone: the proxy tree (`proxies/<year>/<slug>`) is not renamed with the
+mission, so a renumbered mission's proxies are orphaned and regenerated on the
+next `-proxy`. Proxies are derived, so this costs time and disk space, not
+footage.
 
 ### `-ingest` skipped a card file whose name was already in the mission
 

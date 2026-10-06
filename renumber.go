@@ -9,6 +9,17 @@ import (
 	"strings"
 )
 
+// runRenumber closes gaps and duplicates in a year's mission numbers, on every
+// drive at once.
+//
+// It refuses unless every drive that can hold the year is mounted. A number
+// names one mission across every drive, so renaming only the drives that are
+// plugged in left the archive under the old numbers — the same mission under
+// two numbers, and a number on the hot drive naming a different mission than
+// the same number on the archive. The missions on an unmounted drive were also
+// invisible to the numbering, so they could be handed numbers that were taken,
+// and the counter was then set to the count of missions it could see, moving
+// it back below numbers that were already spent.
 func runRenumber(cfg Config, year int, skipConf bool) {
 	yearStr := strconv.Itoa(year)
 
@@ -19,10 +30,21 @@ func runRenumber(cfg Config, year int, skipConf bool) {
 	var drives []driveYear
 	slugSet := make(map[string]bool)
 
+	var absent []string
+	for _, d := range cfg.Drives {
+		if d.coversYear(year) && !dirExists(d.basePath()) {
+			absent = append(absent, d.name())
+		}
+	}
+	if len(absent) > 0 {
+		fmt.Printf("%s every drive that can hold %d must be mounted to renumber it — not mounted: %s\n",
+			red("ERROR"), year, bold(strings.Join(absent, ", ")))
+		quit(1)
+	}
+
 	for _, d := range cfg.Drives {
 		base := d.basePath()
 		if !dirExists(base) {
-			fmt.Printf("%s %s %s\n", yellow("warning:"), bold(d.name()), dim("not mounted, skipping"))
 			continue
 		}
 		yearDir := filepath.Join(base, d.Root, yearStr)
@@ -113,10 +135,8 @@ func runRenumber(cfg Config, year int, skipConf bool) {
 				}
 				continue
 			}
-			// remove stale checksums.b3 — path has changed
-			if err := os.Remove(filepath.Join(dst, "checksums.b3")); err == nil {
-				fmt.Printf("removed stale checksums: %s\n", filepath.Join(dst, "checksums.b3"))
-			}
+			// checksums.b3 stays: its paths are relative to the mission
+			// directory, so renaming the directory changes none of them.
 			done++
 		}
 		fmt.Printf("%s %s: renumbered %d mission(s)\n", green("✓"), bold(dy.d.name()), done)
