@@ -251,6 +251,57 @@ drives only. That behaviour is intended, since a cold drive plugged in at
 ingest gets a copy verified straight from the card, so the README and `-help`
 now say so instead.
 
+### A failed or abandoned ingest left the mission counter ahead of the drives
+
+Found 2026-10-06 from the outside: `~/.qcp_seq` held 046 for 2026 while the
+highest mission on T9 was 044. The counter was given back in only one case:
+Ctrl-C followed by agreeing to delete the partial mission. Everything else left
+a number spent on a mission that never existed:
+
+- A copy or verify failure exited (`exit(10)`, `exit(11)`) with the number
+  committed and no way to give it back.
+- A multi-day ingest committed every day's number before the first day
+  started. Abandoning day one left the numbers for the later days spent.
+- Giving a number back decremented the counter whatever it held, so it could
+  not tell the number that failed from a later one, or a kept partial copy
+  from one that was deleted.
+- The number was committed before the interrupt state recorded it, so a Ctrl-C
+  in between kept it.
+
+One more thing in the same handler could destroy footage. Ctrl-C during an
+*append* offered to "delete partial mission" and, on yes, ran `os.RemoveAll` on
+the existing mission's directories, including everything ingested into them
+before.
+
+Fixed:
+
+- Numbers are committed one day at a time, as each day starts.
+- Copy and verify failures go through the same cleanup as Ctrl-C (`abandon` in
+  `main.go`). Only a new mission is offered for deletion. An append keeps what
+  it copied for a re-run to finish.
+- `releaseMission` (`seq.go`) replaces the decrement. It gives back exactly the
+  number that failed, only while that number is still the last one handed out,
+  and only if no mounted drive holds a mission with that number. A kept partial
+  copy keeps its number, and a failure before anything landed gives it back
+  without asking.
+- A new mission refuses to copy into a directory that already exists
+  (`refuseExistingRoots`). That can only happen when the counter is behind the
+  drives and the name matches too.
+
+Every ingest now also runs `checkMissionCounter` (`seq.go`) before it hands out
+a number:
+
+- A counter behind the drives would reuse a number, so qcp warns and offers to
+  raise it. Under `-y` it raises it without asking.
+- A counter ahead of the drives is reported only when every drive that can hold
+  the year is mounted, since otherwise the missing numbers may be on the
+  archive. Moving it back needs a typed yes, so `-y` only warns.
+
+Regression tests in `seq_test.go`: `releaseMission` gives back an unused number,
+leaves a later one alone, and keeps the number of a kept partial copy.
+`checkMissionCounter` raises a counter behind the drives, does not rewind under
+`-y`, stays quiet with a drive away, and leaves a counter in step untouched.
+
 ### `-evict` did not check that a hot and a cold copy were different directories
 
 `qualifyBackups` (`evict.go:209`) accepted any cold drive entry whose mission

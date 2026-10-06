@@ -31,7 +31,7 @@ func TestInterruptTargetIsRaceFree(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < 2000; i++ {
 			m := missions[i%len(missions)]
-			intr.set(m.roots, m.isNew)
+			intr.set(m.roots, m.isNew, i)
 			intr.clear()
 		}
 	}()
@@ -39,7 +39,7 @@ func TestInterruptTargetIsRaceFree(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 2000; i++ {
-			roots, isNew := intr.get()
+			roots, isNew, _ := intr.get()
 			if len(roots) == 0 {
 				continue
 			}
@@ -52,7 +52,7 @@ func TestInterruptTargetIsRaceFree(t *testing.T) {
 
 	wg.Wait()
 
-	if roots, isNew := intr.get(); roots != nil || isNew {
+	if roots, isNew, _ := intr.get(); roots != nil || isNew {
 		t.Errorf("after clear: got %v, %v; want nil, false", roots, isNew)
 	}
 }

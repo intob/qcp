@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -158,32 +157,34 @@ func parseMissionList(s string) ([]int, bool) {
 	return nums, true
 }
 
-// interruptTarget is the mission the SIGINT handler would offer to delete: the
-// destination roots written so far, and whether the mission number was minted
-// for it and so has to be given back. The main goroutine sets it before each
-// day's copy and clears it once that footage is copied and verified; the
-// handler runs on its own goroutine, so both sides go through the mutex.
+// interruptTarget is the mission an interrupted or failed copy has to clean up
+// after: the destination roots written so far, whether the mission number was
+// minted for it and so has to be given back, and that number. The main
+// goroutine sets it before each day's copy and clears it once that footage is
+// copied and verified; the SIGINT handler runs on its own goroutine, so both
+// sides go through the mutex.
 type interruptTarget struct {
 	mu       sync.Mutex
 	dstRoots []string
 	isNew    bool
+	num      int
 }
 
-func (t *interruptTarget) set(dstRoots []string, isNew bool) {
+func (t *interruptTarget) set(dstRoots []string, isNew bool, num int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.dstRoots, t.isNew = dstRoots, isNew
+	t.dstRoots, t.isNew, t.num = dstRoots, isNew, num
 }
 
 // clear marks that there is nothing an interrupt should offer to delete.
-func (t *interruptTarget) clear() { t.set(nil, false) }
+func (t *interruptTarget) clear() { t.set(nil, false, 0) }
 
-// get returns the pair as one snapshot, so the handler cannot act on the roots
-// of one mission with the isNew of another.
-func (t *interruptTarget) get() (dstRoots []string, isNew bool) {
+// get returns the fields as one snapshot, so the handler cannot act on the
+// roots of one mission with the isNew or number of another.
+func (t *interruptTarget) get() (dstRoots []string, isNew bool, num int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.dstRoots, t.isNew
+	return t.dstRoots, t.isNew, t.num
 }
 
 func main() {
@@ -556,6 +557,9 @@ func main() {
 		fmt.Println()
 	}
 
+	// Catch a counter that has drifted from the drives before it mints a number.
+	checkMissionCounter(cfg, year, *skipConf)
+
 	// Group files by recording date.
 	days := groupAllByDate(scanned)
 
@@ -592,6 +596,43 @@ func main() {
 	// Shared interrupt state — updated before each day's copy begins.
 	var intr interruptTarget
 
+	// abandon cleans up after a day whose copy did not finish, whether it was
+	// interrupted or failed. Only a new mission is offered for deletion: an
+	// append's roots hold the footage already in the mission, and the files it
+	// did copy are kept for a re-run to finish. The counter is then given back
+	// unless a copy of the mission was kept — releaseMission checks the drives,
+	// so a failure before anything landed reverts it even without asking.
+	abandon := func(reason string, mayAsk bool) {
+		dstRoots, isNew, num := intr.get()
+		if len(dstRoots) == 0 {
+			fmt.Println()
+			return
+		}
+		if !isNew {
+			fmt.Printf("\r\033[2K\n%s — files copied so far are kept; re-run to finish the append\n", reason)
+			return
+		}
+		resp := "n"
+		if mayAsk && askYesNo(fmt.Sprintf("\r\033[2K\n%s — delete partial mission and revert counter? (y/n): ", reason)) {
+			resp = "y"
+		}
+		if resp == "y" {
+			for _, d := range dstRoots {
+				os.RemoveAll(d)
+				fmt.Printf("removed: %s\n", d)
+			}
+		}
+		released, err := releaseMission(cfg.Drives, year, num)
+		switch {
+		case err != nil:
+			fmt.Printf("err reverting counter: %v\n", err)
+		case released:
+			fmt.Println("mission counter reverted")
+		default:
+			fmt.Printf("partial mission kept — re-run with -ingest %d to finish it\n", num)
+		}
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt)
@@ -599,37 +640,20 @@ func main() {
 		<-sigCh
 		signal.Stop(sigCh)
 		cancel()
-		dstRoots, isNew := intr.get()
-		if len(dstRoots) == 0 {
-			fmt.Println()
-			os.Exit(130)
-		}
 		time.Sleep(150 * time.Millisecond)
-		reader := bufio.NewReader(os.Stdin)
-		var resp string
-		for resp != "y" && resp != "n" {
-			fmt.Print("\r\033[2K\ninterrupted — delete partial mission and revert counter? (y/n): ")
-			line, err := reader.ReadString('\n')
-			resp = strings.TrimSpace(line)
-			if err != nil {
-				break
-			}
-		}
-		if resp == "y" {
-			for _, d := range dstRoots {
-				os.RemoveAll(d)
-				fmt.Printf("removed: %s\n", d)
-			}
-			if isNew {
-				if err := revertMission(year); err != nil {
-					fmt.Printf("err reverting counter: %v\n", err)
-				} else {
-					fmt.Println("mission counter reverted")
-				}
-			}
-		}
+		abandon("interrupted", true)
 		os.Exit(130)
 	}()
+
+	// failDay stops the run on a copy or verify failure, giving the counter
+	// back first. Exiting straight out of the run used to leave a number
+	// minted for a mission that never landed. Under -y nothing is deleted
+	// without asking, so the partial copy stays and keeps its number.
+	failDay := func(code int, msg string, args ...any) {
+		fmt.Printf(msg+"\n", args...)
+		abandon("copy failed", !*skipConf)
+		os.Exit(code)
+	}
 
 	runDay := func(dayScanned []scannedCard, missionSlug string, dstRoots []string, dstNames, dstBase map[string]string) {
 		type fileJob struct {
@@ -690,8 +714,8 @@ func main() {
 					fmt.Printf("     %s\n", c)
 				}
 				fmt.Printf("\n  %s\n", dim("nothing was copied — ingest these cards into a new mission, or rename the card volume"))
-				if _, isNew := intr.get(); isNew {
-					revertMission(year)
+				if _, isNew, num := intr.get(); isNew {
+					releaseMission(cfg.Drives, year, num)
 				}
 				intr.clear()
 				exit(12, "card files collide with existing files")
@@ -859,10 +883,10 @@ func main() {
 		}
 
 		if copyFailed > 0 {
-			exit(10, "%d file(s) failed to copy", copyFailed)
+			failDay(10, "%d file(s) failed to copy", copyFailed)
 		}
 		if verifyFailed.Load() > 0 {
-			exit(11, "%d file(s) failed verification", verifyFailed.Load())
+			failDay(11, "%d file(s) failed verification", verifyFailed.Load())
 		}
 
 		copied := fmtSize(uint64(total.Load()) / uint64(len(dstRoots)))
@@ -946,12 +970,18 @@ func main() {
 		}
 
 		if !isAppend {
+			refuseExistingRoots(dstRoots)
+		}
+
+		// Set before committing, so an interrupt in between has the number
+		// to give back; releaseMission leaves the counter alone if it never
+		// got there.
+		intr.set(dstRoots, !isAppend, missionNum)
+		if !isAppend {
 			if err := commitMission(year, missionNum); err != nil {
 				exit(9, "err updating mission counter: %v", err)
 			}
 		}
-
-		intr.set(dstRoots, !isAppend)
 
 		runDay(scanned, missionSlug, dstRoots, dstNames, dstBase)
 
@@ -1028,19 +1058,36 @@ func main() {
 			exit(8, "aborted by user")
 		}
 
-		// Commit new mission numbers in ascending order so the counter stays consistent.
 		for _, p := range plan {
+			if p.isNew {
+				refuseExistingRoots(p.dstRoots)
+			}
+		}
+
+		// Each new number is committed as its day starts, not all up front:
+		// a failure or interrupt on one day ends the run, and numbers already
+		// committed for the days after it would be left with no mission.
+		for _, p := range plan {
+			fmt.Printf("\n  %s  %s\n", blue("▶"), bold(p.slug))
+			intr.set(p.dstRoots, p.isNew, p.num)
 			if p.isNew {
 				if err := commitMission(year, p.num); err != nil {
 					exit(9, "err updating mission counter: %v", err)
 				}
 			}
-		}
-
-		for _, p := range plan {
-			fmt.Printf("\n  %s  %s\n", blue("▶"), bold(p.slug))
-			intr.set(p.dstRoots, p.isNew)
 			runDay(p.day.cards, p.slug, p.dstRoots, p.dstNames, p.dstBase)
+		}
+	}
+}
+
+// refuseExistingRoots stops a new mission from being copied into a directory
+// that already exists. That only happens when the counter is behind the drives
+// and the name matches too; copying in would mix two missions, and abandoning
+// the copy would offer to delete one that was already there.
+func refuseExistingRoots(dstRoots []string) {
+	for _, r := range dstRoots {
+		if dirExists(r) {
+			exit(9, "%s already exists — the mission counter is behind the drives; run qcp -init", r)
 		}
 	}
 }
