@@ -41,6 +41,8 @@ Builds with the current git version stamped in and installs to `$(go env GOPATH)
 }
 ```
 
+The config is checked every time qcp loads it, and every problem is listed before it stops: each drive needs a `volume` or a `path` and a `role` of `hot` or `cold`; drive names must be unique and no two drives may share a footage folder; `year_from`/`year_to` must be years from 2000 to 2099, in order; `root` must stay inside the drive; and every card needs a `sub` folder, since a card without one would match any external volume.
+
 **look**
 - Optional path to a creative `.cube` baked into the browse tier in place of the
   generated technical conversion. It must take **S-Log3 in and deliver finished

@@ -121,6 +121,38 @@ and `b.mp4`. A second mission held by T9 and the archive but not T7 must not be
 reported, and `-check 2` must pass. With hot drives left out of
 `checkTargets`, both paths pass mission 1.
 
+### The config was never validated
+
+`loadConfig` (`config.go`) parsed `~/.qcp` and checked nothing else, so:
+
+- A role typo such as `"Cold"` left a drive out of every hot and cold path. It
+  was never synced to, replicated, checked or counted by `-evict`, yet it still
+  took a copy of every ingest, which goes to every mounted drive.
+- Two drives with the same name collided in every map keyed by drive name (the
+  per-drive bars, pools and drive probes) and shared one catalog file.
+- Two entries resolving to one footage folder made one copy look like two.
+  `-evict` now refuses that itself (see the entry below), but nothing reported
+  it in the first place.
+- A `year_from` after `year_to` silently excluded the drive from every year.
+- A card with an empty `sub` matched the root of any external volume, so a stray
+  USB stick would have been offered for ingest whole.
+
+Fixed with `validateConfig`, which runs on every load and lists every problem
+at once before qcp stops. It checks:
+
+- every drive has a volume or a path and a role of `hot` or `cold`;
+- names are unique (compared the way `-to`/`-from` compare them) and no two
+  drives share a footage folder;
+- `year_from`/`year_to` are years from 2000 to 2099, in order;
+- `root` stays inside the drive;
+- every card has a `sub` folder inside the card.
+
+The config on this machine passes.
+
+Regression tests in `config_test.go`: one config with each of those problems
+must report every one, a valid three-drive config must pass, and the installed
+`~/.qcp`, when there is one, must pass.
+
 ### The ingest prompt looped forever when input ran out
 
 `promptMissionForDay` (`ingest.go`) read each answer with
