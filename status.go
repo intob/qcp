@@ -460,3 +460,367 @@ func runList(cfg Config, year int) {
 	fmt.Printf("\n%s\n", dim(fmt.Sprintf("%d missions · %s", len(allSlugs), fmtSize(uint64(total)))))
 	fmt.Printf("%s\n", dim(listLegend))
 }
+
+// ── proxy coverage ──────────────────────────────────────────────────────────
+
+// -proxies is the derived tier's counterpart to -list: it answers "what is
+// browsable?". Footage wants a copy on every drive and -list marks a gap as a
+// problem; proxies are regenerable and never archived, so a mission holding no
+// tree is a fact, not a fault. What matters instead is how much of the mission
+// a tree covers and whether the footage has moved on since it was built.
+
+// proxyScan is one mission's proxy state, measured against the tree that covers
+// the most clips — copies of a tree are not expected to agree, and the fullest
+// one is what -index and Resolve would actually use.
+type proxyScan struct {
+	clips       int      // source clips, counted on the drive -proxy would read
+	browse      int      // of those, the ones with a browse rendition on disk
+	edit        int      // likewise for the edit tier
+	staleBrowse int      // on disk, but -proxy would rebuild them
+	staleEdit   int      // likewise
+	drives      []string // every mounted drive holding a tree for this mission
+	unchecked   bool     // footage not mounted, so counts come from the manifest
+}
+
+// scanProxyMission measures one mission. The verdict on what is out of date
+// comes from planMission — the same function -proxy plans with — so the report
+// cannot drift from what a run would actually do. Reproducing its rules here
+// with a cheaper approximation was tried and was wrong on real trees: it missed
+// every rendition whose transform had been reselected, which on a library with
+// a `look` configured is the single largest cause of a rebuild.
+//
+// It stays cheap because planMission only reads a sidecar for a clip it cannot
+// take from the manifest, and a clip that is merely out of date is still taken
+// from the manifest. Missions with no tree at all skip planning entirely, which
+// is where reading every sidecar would otherwise cost something.
+func scanProxyMission(cfg Config, year int, yearStr, slug string, look colourTransform) proxyScan {
+	var sc proxyScan
+
+	// Find every tree, and keep the fullest to measure. A tree left behind by
+	// an interrupted run has no manifest at all, so seed the best-so-far below
+	// zero to make sure the first one still counts as found.
+	bestClips, bestDir := -1, ""
+	var bestMan proxyManifest
+	for _, d := range cfg.Drives {
+		if !dirExists(d.basePath()) {
+			continue
+		}
+		dir := proxyMissionDir(d.basePath(), year, slug)
+		if !dirExists(dir) {
+			continue
+		}
+		sc.drives = append(sc.drives, d.name())
+		if m := readProxyManifest(dir); len(m.Clips) > bestClips {
+			bestClips, bestDir, bestMan = len(m.Clips), dir, m
+		}
+	}
+
+	src, err := proxySourceForSlug(cfg, yearStr, slug)
+	if err != nil {
+		// Proxies outlive the footage they came from: the browse tier lives on
+		// a hot drive precisely so a mission can be evicted to cold and stay
+		// browsable. With nothing to count against, report what the manifest
+		// claims and mark the row as unchecked rather than guessing.
+		if bestDir == "" {
+			return sc
+		}
+		sc.unchecked = true
+		sc.clips = len(bestMan.Clips)
+		for _, c := range bestMan.Clips {
+			if c.Browse != "" && fileExists(filepath.Join(bestDir, c.Browse)) {
+				sc.browse++
+			}
+			if c.Edit != "" && fileExists(filepath.Join(bestDir, c.Edit)) {
+				sc.edit++
+			}
+		}
+		return sc
+	}
+
+	sc.clips = len(src.clips)
+	if bestDir == "" {
+		return sc
+	}
+	// Both tiers, so the edit column reports on its own terms rather than
+	// inheriting the browse tier's verdict. planMission keeps them independent.
+	plan := planMission(src, bestDir, proxyTiers{browse: true, edit: true}, look)
+	for _, j := range plan.jobs {
+		// A rendition that is planned for work but is not on disk is missing,
+		// not stale — it is already counted by the shortfall against clips.
+		//
+		// The poster and sprite count as part of the browse tier rather than as
+		// a column of their own: they are generated with it, and the index
+		// needs them to show the clip at all, so a video with no stills beside
+		// it is not a browse tier anyone can use.
+		if fileExists(filepath.Join(bestDir, proxyRel("browse", j.rel, ".mp4"))) {
+			sc.browse++
+			if j.needBrow || j.needStil {
+				sc.staleBrowse++
+			}
+		}
+		if fileExists(filepath.Join(bestDir, proxyRel("edit", j.rel, ".mov"))) {
+			sc.edit++
+			if j.needEdit {
+				sc.staleEdit++
+			}
+		}
+	}
+	return sc
+}
+
+// proxyScanWorkers bounds how many missions are measured at once. Each mission
+// walks the footage on every mounted drive, so this caps concurrent walks of
+// the same platter rather than concurrent drives — a few is enough to hide the
+// latency of the small reads without turning an archive HDD into a seek storm.
+const proxyScanWorkers = 4
+
+func scanProxies(cfg Config, year int, slugs []string, look colourTransform) map[string]proxyScan {
+	yearStr := strconv.Itoa(year)
+	out := make(map[string]proxyScan, len(slugs))
+	var mu sync.Mutex
+	wp := newPool(proxyScanWorkers)
+	for _, slug := range slugs {
+		wp.run(func() {
+			sc := scanProxyMission(cfg, year, yearStr, slug, look)
+			mu.Lock()
+			out[slug] = sc
+			mu.Unlock()
+		})
+	}
+	wp.wait()
+	return out
+}
+
+// reportLook resolves the configured look once for a whole report, the way a
+// -proxy run does. A look that cannot be read is worth saying out loud rather
+// than passing over: it is what -proxy would fail on, and every clip it should
+// have applied to would otherwise be reported as needing a rebuild.
+func reportLook(cfg Config) colourTransform {
+	if cfg.Look == "" {
+		return colourTransform{}
+	}
+	look, err := lookTransform(cfg.Look)
+	if err != nil {
+		fmt.Printf("  %s  %s\n", yellow("⚠"), dim(err.Error()))
+		return colourTransform{}
+	}
+	return look
+}
+
+// proxyMissionSlugs lists every mission in the year that has footage or a proxy
+// tree on a mounted drive. Both halves are needed: a mission evicted to an
+// unmounted cold drive still has a browsable tree, and a mission just ingested
+// has no tree yet — and each is something -proxies exists to show.
+func proxyMissionSlugs(cfg Config, year int) []string {
+	yearStr := strconv.Itoa(year)
+	var slugs []string
+	seen := make(map[string]bool)
+	for _, d := range cfg.Drives {
+		base := d.basePath()
+		if !dirExists(base) {
+			continue
+		}
+		for _, dir := range []string{
+			filepath.Join(base, d.Root, yearStr),
+			filepath.Join(proxyRoot(base), yearStr),
+		} {
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				continue
+			}
+			for _, e := range entries {
+				if !e.IsDir() || !isMissionDir(e.Name()) || seen[e.Name()] {
+					continue
+				}
+				seen[e.Name()] = true
+				slugs = append(slugs, e.Name())
+			}
+		}
+	}
+	sort.Strings(slugs)
+	return slugs
+}
+
+// proxyYears is allYears widened to the years that exist only under proxies/,
+// for the same reason proxyMissionSlugs looks there.
+func proxyYears(cfg Config) []int {
+	seen := make(map[int]bool)
+	var years []int
+	for _, y := range allYears(cfg) {
+		seen[y] = true
+		years = append(years, y)
+	}
+	for _, d := range cfg.Drives {
+		base := d.basePath()
+		if !dirExists(base) {
+			continue
+		}
+		entries, err := os.ReadDir(proxyRoot(base))
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			if y, err := strconv.Atoi(e.Name()); err == nil && y >= 2000 && y <= 2099 && !seen[y] {
+				seen[y] = true
+				years = append(years, y)
+			}
+		}
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(years)))
+	return years
+}
+
+// proxyTierCell renders one tier's coverage as a count and a marker. The marker
+// answers only "does every clip have one", because the count that matters for
+// currency has a column of its own: a mission where one clip of 166 needs
+// rebuilding and one where all 166 do are not the same state, and no single
+// marker tells them apart. Stale work still tints the cell, so a fully covered
+// tier that is entirely out of date cannot read as green and finished.
+func proxyTierCell(have, total, stale int, unchecked bool) (plain, coloured string) {
+	if have == 0 {
+		return "−", dim("−")
+	}
+	marker, paint := "✓", green
+	switch {
+	case unchecked:
+		marker, paint = "?", dim
+	case have < total:
+		marker, paint = "·", yellow
+	case stale > 0:
+		paint = yellow
+	}
+	plain = fmt.Sprintf("%d %s", have, marker)
+	return plain, paint(plain)
+}
+
+// proxyStaleCell renders the rebuild count across both tiers.
+func proxyStaleCell(n int) (plain, coloured string) {
+	if n == 0 {
+		return "−", dim("−")
+	}
+	plain = strconv.Itoa(n)
+	return plain, yellow(plain)
+}
+
+// padLeft right-aligns a cell in width columns, measuring the uncoloured text
+// so the escape codes do not count towards the field.
+func padLeft(plain, coloured string, width int) string {
+	if n := width - len([]rune(plain)); n > 0 {
+		return strings.Repeat(" ", n) + coloured
+	}
+	return coloured
+}
+
+const proxyLegend = "✓ every clip has one   · some do   − none   " +
+	"? footage not mounted   stale = how many -proxy would rebuild"
+
+// printProxyYear prints one year's block, reporting whether it found anything.
+func printProxyYear(cfg Config, year int, look colourTransform) bool {
+	slugs := proxyMissionSlugs(cfg, year)
+	if len(slugs) == 0 {
+		return false
+	}
+	scans := scanProxies(cfg, year, slugs, look)
+
+	type row struct {
+		slug                       string
+		clips, browse, edit, stale string
+		browseCol, editCol         string
+		staleCol, drives           string
+	}
+	var rows []row
+	var withTree, totalClips, totalBrowse, totalEdit, totalStale int
+
+	for _, slug := range slugs {
+		sc := scans[slug]
+		if len(sc.drives) > 0 {
+			withTree++
+		}
+		totalClips += sc.clips
+		totalBrowse += sc.browse
+		totalEdit += sc.edit
+		totalStale += sc.staleBrowse + sc.staleEdit
+
+		bp, bc := proxyTierCell(sc.browse, sc.clips, sc.staleBrowse, sc.unchecked)
+		ep, ec := proxyTierCell(sc.edit, sc.clips, sc.staleEdit, sc.unchecked)
+		sp, scol := proxyStaleCell(sc.staleBrowse + sc.staleEdit)
+		drives := "−"
+		if len(sc.drives) > 0 {
+			drives = strings.Join(sc.drives, " ")
+		}
+		clips := "−"
+		if sc.clips > 0 {
+			clips = strconv.Itoa(sc.clips)
+		}
+		rows = append(rows, row{
+			slug: slug, clips: clips,
+			browse: bp, browseCol: bc, edit: ep, editCol: ec,
+			stale: sp, staleCol: scol, drives: drives,
+		})
+	}
+
+	maxSlug, maxClips := len("mission"), len("clips")
+	maxBrowse, maxEdit, maxStale := len("browse"), len("edit"), len("stale")
+	for _, r := range rows {
+		maxSlug = max(maxSlug, len(r.slug))
+		maxClips = max(maxClips, len(r.clips))
+		maxBrowse = max(maxBrowse, len([]rune(r.browse)))
+		maxEdit = max(maxEdit, len([]rune(r.edit)))
+		maxStale = max(maxStale, len([]rune(r.stale)))
+	}
+
+	summary := fmt.Sprintf("%d of %d missions proxied · %d of %d clips browsable",
+		withTree, len(slugs), totalBrowse, totalClips)
+	// The edit tier is an on-demand tool rather than a standing commitment, so
+	// it is usually zero everywhere; say nothing about it until it exists.
+	if totalEdit > 0 {
+		summary += fmt.Sprintf(" · %d editable", totalEdit)
+	}
+	if totalStale > 0 {
+		summary += fmt.Sprintf(" · %d to rebuild", totalStale)
+	}
+	fmt.Printf("%s  %s\n", bold(strconv.Itoa(year)), dim(summary))
+	fmt.Printf("  %s\n", dim(fmt.Sprintf("%-*s  %*s  %*s  %*s  %*s  %s",
+		maxSlug, "mission", maxClips, "clips", maxBrowse, "browse",
+		maxEdit, "edit", maxStale, "stale", "proxies on")))
+	for _, r := range rows {
+		fmt.Printf("  %s%-*s  %s  %s  %s  %s  %s\n",
+			bold(r.slug), maxSlug-len(r.slug), "",
+			dim(fmt.Sprintf("%*s", maxClips, r.clips)),
+			padLeft(r.browse, r.browseCol, maxBrowse),
+			padLeft(r.edit, r.editCol, maxEdit),
+			padLeft(r.stale, r.staleCol, maxStale),
+			dim(r.drives))
+	}
+	return true
+}
+
+func runProxies(cfg Config, year int) {
+	if !printProxyYear(cfg, year, reportLook(cfg)) {
+		fmt.Printf("no missions found for %d\n", year)
+		return
+	}
+	fmt.Printf("\n%s\n", dim(proxyLegend))
+}
+
+func runProxiesAll(cfg Config) {
+	years := proxyYears(cfg)
+	look := reportLook(cfg)
+	printed := false
+	for _, y := range years {
+		if printed {
+			fmt.Println()
+		}
+		if printProxyYear(cfg, y, look) {
+			printed = true
+		}
+	}
+	if !printed {
+		fmt.Println(dim("no missions found"))
+		return
+	}
+	fmt.Printf("\n%s\n", dim(proxyLegend))
+}

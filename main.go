@@ -74,6 +74,7 @@ func usage() {
 	row("-proxy", "n|list|all", "generate proxies for mission(s), or all in the year")
 	row("  -tier", "tier", "browse (default), edit, or both")
 	row("  -to", "drive", "drive the proxy tree lands on (default: first hot drive)")
+	row("-proxies", "", "list which missions have proxies, and how much they cover")
 	row("-index", "", "build a static browsable index from the proxy manifests")
 	row("  -to", "dir", "output directory (default: ~/qcp-index)")
 	row("-serve", "", "serve a built index over HTTP, with the proxies playable")
@@ -205,6 +206,7 @@ func main() {
 	doReplicate := flag.Bool("replicate", false, "replicate missions between cold drives")
 	doList := flag.Bool("list", false, "list missions across all mounted drives")
 	doStatus := flag.Bool("status", false, "show drive space and mission status")
+	doProxies := flag.Bool("proxies", false, "list which missions have proxies generated")
 	checkMissionStr := flag.String("check", "", `check mission(s) for missing files across drives (e.g. "42", "42,44", "42-48", "all")`)
 	doClean := flag.Bool("clean", false, "find and remove junk files (Synology metadata, Thumbs.db, etc.) from all mounted drives")
 	doInit := flag.Bool("init", false, "scan drives and initialise missing sequence numbers")
@@ -363,6 +365,15 @@ func main() {
 
 	if *doStatus {
 		runStatus(cfg, year)
+		return
+	}
+
+	if *doProxies {
+		if yearAll {
+			runProxiesAll(cfg)
+		} else {
+			runProxies(cfg, year)
+		}
 		return
 	}
 

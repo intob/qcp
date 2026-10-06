@@ -210,6 +210,9 @@ qcp -proxy all -year 2025
 qcp -proxy 42 -tier both              # browse + ProRes edit tier
 qcp -proxy 42 -tier edit -to T7       # edit tier only, onto a named drive
 
+qcp -proxies                          # which missions have proxies, current year
+qcp -proxies -year all                # ...across every year
+
 qcp -index                            # build the static index in ~/qcp-index
 qcp -index -to ~/Desktop/qcp-index    # ...or somewhere else
 
@@ -280,6 +283,44 @@ A clip with no sidecar inherits the most common transform on its own card,
 since capture settings do not change mid-card. A card with no sidecar anywhere
 on it — a GoPro or drone card sitting in a mission alongside Sony ones — has
 nothing to inherit and passes through.
+
+`-proxies` is the reporting counterpart: one row per mission, with the source
+clip count, how many of those have a browse and an edit rendition on disk, how
+many renditions `-proxy` would rebuild, and which drives hold a tree.
+
+```
+2026  14 of 43 missions proxied · 269 of 797 clips browsable · 246 to rebuild
+  mission                    clips  browse  edit  stale  proxies on
+  001_Hopper_Shock_Test         33    31 ·     −     31  T9
+  002_Portugal                 166   166 ✓     −    166  T9
+  003_BlueMonkey_Party           4     4 ✓     −      −  T9
+  005_MoreSchiltgrat            20       −     −      −  −
+```
+
+The marker answers only *does every clip have one* — `✓` all of them, `·` some,
+`−` none — and the `stale` column answers separately *how many are out of
+date*, because a mission with one clip of 166 to rebuild and one with all 166
+are not the same state and no single marker tells them apart. A covered tier
+with stale work in it is tinted rather than green, so `166 ✓` alongside `166`
+cannot read as finished. `−` for a whole mission is a fact rather than a fault:
+proxies are regenerable and never archived, so unlike `-list` there is no
+expectation that every drive holds a copy. Stills count as part of the browse
+tier rather than getting a column, since the index needs a poster and a sprite
+to show the clip at all.
+
+What counts as stale is decided by the same planner `-proxy` runs, so the report
+cannot drift from what a run would actually do — a source that has changed, a
+rendition built to a superseded tier spec, and a transform that has since been
+reselected all show up, the last of which is what a changed `look` does to a
+whole library at once. It stays cheap because the planner only reads a sidecar
+for a clip it cannot take from the manifest, and missions with no tree skip
+planning entirely: a full year of 43 missions across three drives reports in
+about a quarter of a second.
+
+Missions whose footage is not mounted still appear, marked `?`: the browse tier
+lives on a hot drive precisely so a mission can be evicted to cold and stay
+browsable, and there is nothing to count its manifest against, so the counts are
+what the manifest claims.
 
 Proxies mirror the mission layout on the target drive:
 
