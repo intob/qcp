@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // checksums.b3 describes the directory it sits in, so -reorganise must leave it
@@ -180,6 +181,85 @@ func TestSkipOrganise(t *testing.T) {
 		}
 		if got := skipOrganise(c.name, true); got != c.reorg {
 			t.Errorf("skipOrganise(%q, regroup=true) = %v, want %v", c.name, got, c.reorg)
+		}
+	}
+}
+
+// -organise deleted the checksums.b3 of every directory a file moved into or
+// out of. A rename does not change a file's content, so the hashes recorded
+// when the footage was known good were thrown away for nothing — and the next
+// -checksum recorded whatever was on disk by then.
+func TestOrganiseCarriesRecordedHashesWithTheFiles(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	drive := t.TempDir()
+	year := filepath.Join(drive, "2026")
+	cfg := Config{Drives: []DriveConfig{{Volume: "HOT", Path: drive, Role: "hot"}}}
+	writeFile(t, filepath.Join(year, "003_X", "card", "clip_20260715.mp4"), "summer")
+	writeFile(t, filepath.Join(year, "003_X", "card", "clip_20260110.mp4"), "winter")
+	writeFile(t, filepath.Join(year, "003_X", "checksums.b3"),
+		b3("summer")+"  card/clip_20260715.mp4\n"+b3("winter")+"  card/clip_20260110.mp4\n")
+
+	runOrganise(cfg, 2026, true, true)
+
+	summer := readChecksumFile(filepath.Join(year, "004_Summer", "checksums.b3"))
+	winter := readChecksumFile(filepath.Join(year, "005_Winter", "checksums.b3"))
+	if summer["clip_20260715.mp4"] != b3("summer") {
+		t.Errorf("summer manifest = %v", summer)
+	}
+	if winter["clip_20260110.mp4"] != b3("winter") {
+		t.Errorf("winter manifest = %v", winter)
+	}
+	if dirExists(filepath.Join(year, "003_X")) {
+		t.Error("the emptied mission was left behind, held open by its manifest")
+	}
+}
+
+// os.Rename replaces an existing file without a word; -organise must not.
+func TestOrganiseMoveNeverReplacesAFile(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "a"), "moving")
+	writeFile(t, filepath.Join(dir, "b"), "already here")
+	if err := moveNoReplace(filepath.Join(dir, "a"), filepath.Join(dir, "b")); err == nil {
+		t.Error("moved over an existing file")
+	}
+	if data, _ := os.ReadFile(filepath.Join(dir, "b")); string(data) != "already here" {
+		t.Errorf("existing file was replaced: %q", data)
+	}
+}
+
+// Each drive was dated on its own, falling back to the copy's mtime — and a
+// cold copy's mtime was when it was synced. The hot and cold copies of one clip
+// then landed in different seasons, and the drives disagreed from then on.
+func TestOrganiseFilesEveryCopyIntoTheSameMission(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	hot, cold := t.TempDir(), t.TempDir()
+	cfg := Config{Drives: []DriveConfig{
+		{Volume: "HOT", Path: hot, Role: "hot"},
+		{Volume: "COLD", Path: cold, Role: "cold"},
+	}}
+	july := time.Date(2026, 7, 10, 12, 0, 0, 0, time.Local)
+	november := time.Date(2026, 11, 2, 12, 0, 0, 0, time.Local)
+	for _, c := range []struct {
+		drive string
+		mtime time.Time
+	}{{hot, july}, {cold, november}} {
+		p := filepath.Join(c.drive, "2026", "card", "clip.mp4")
+		writeFile(t, p, "no date in here")
+		if err := os.Chtimes(p, c.mtime, c.mtime); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	runOrganise(cfg, 2026, true, false)
+
+	for _, d := range []string{hot, cold} {
+		if !exists(filepath.Join(d, "2026", "001_Summer", "clip.mp4")) {
+			entries, _ := os.ReadDir(filepath.Join(d, "2026"))
+			var names []string
+			for _, e := range entries {
+				names = append(names, e.Name())
+			}
+			t.Errorf("%s: clip not filed under 001_Summer; year holds %v", d, names)
 		}
 	}
 }

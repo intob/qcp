@@ -121,7 +121,14 @@ func runOrganise(cfg Config, year int, skipConf bool, regroup bool) {
 			continue
 		}
 		allDriveFiles = append(allDriveFiles, driveFiles{dy, files})
-		for _, f := range files {
+	}
+	sets := make([][]fileWithDate, len(allDriveFiles))
+	for i := range allDriveFiles {
+		sets[i] = allDriveFiles[i].files
+	}
+	agreeOnDates(sets)
+	for _, df := range allDriveFiles {
+		for _, f := range df.files {
 			if f.src != "" {
 				allSeasons[seasonKey(f.date.Local())] = true
 			}
@@ -358,19 +365,99 @@ func printOrganisePlan(p organisePlan) {
 	}
 }
 
-func executeOrganisePlan(p organisePlan) bool {
-	// track dirs that have files moved in or out — their checksums.b3 becomes stale
-	affected := make(map[string]bool)
-	var moveFailed int
+// manifestMoves carries checksums.b3 entries along with the files -organise
+// moves. It used to delete the manifest of every directory a file moved into or
+// out of, which threw away the hashes recorded when the footage was known good —
+// for the files that moved and for every file that stayed — and the next
+// -checksum recorded whatever was on disk by then. A rename does not change a
+// file's content, so its recorded hash is still its hash under the new name.
+//
+// A manifest that cannot be read is never rewritten — that would keep only the
+// part before the failed read — so its entries are not carried and it is left
+// exactly as it was, and the run reports it.
+type manifestMoves struct {
+	yearDir   string
+	manifests map[string]map[string]string // directory → its checksums.b3
+	changed   map[string]bool
+	broken    map[string]error // directory → why its checksums.b3 could not be read
+}
 
-	markAffected := func(rel, destDir string) {
-		// source: the top-level mission dir the file came from (if any)
-		if parts := strings.SplitN(rel, string(os.PathSeparator), 2); len(parts) > 1 {
-			affected[filepath.Join(p.yearDir, parts[0])] = true
+func newManifestMoves(yearDir string) *manifestMoves {
+	return &manifestMoves{yearDir, map[string]map[string]string{}, map[string]bool{}, map[string]error{}}
+}
+
+func (mm *manifestMoves) load(dir string) map[string]string {
+	m, ok := mm.manifests[dir]
+	if !ok {
+		var err error
+		m, err = readChecksums(filepath.Join(dir, "checksums.b3"))
+		if err != nil {
+			mm.broken[dir] = err
 		}
-		// destination mission dir
-		affected[destDir] = true
+		delete(m, "checksums.b3")
+		mm.manifests[dir] = m
 	}
+	return m
+}
+
+// moved records that the file at rel (relative to the year directory) is now
+// destDir/destName. A manifest describes the top-level directory it sits in,
+// so the entry is looked up there, under the rest of the path.
+func (mm *manifestMoves) moved(rel, destDir, destName string) {
+	parts := strings.SplitN(rel, string(os.PathSeparator), 2)
+	if len(parts) < 2 {
+		return // loose at the top of the year: no manifest describes it
+	}
+	srcDir := filepath.Join(mm.yearDir, parts[0])
+	src := mm.load(srcDir)
+	mm.load(destDir)
+	if mm.broken[srcDir] != nil || mm.broken[destDir] != nil {
+		return
+	}
+	h, ok := src[parts[1]]
+	if !ok {
+		return
+	}
+	delete(src, parts[1])
+	mm.load(destDir)[destName] = h
+	mm.changed[srcDir] = true
+	mm.changed[destDir] = true
+}
+
+// flush writes every manifest that changed. One left empty is removed, so the
+// directory it was in can be collapsed if nothing else is left there.
+func (mm *manifestMoves) flush() bool {
+	ok := true
+	for _, err := range mm.broken {
+		fmt.Printf("%s %v — left as it was; its entries were not carried\n", red("ERROR"), err)
+		ok = false
+	}
+	for dir := range mm.changed {
+		path := filepath.Join(dir, "checksums.b3")
+		m := mm.manifests[dir]
+		var err error
+		if len(m) == 0 {
+			if err = os.Remove(path); os.IsNotExist(err) {
+				err = nil
+			}
+		} else {
+			lines := make([]string, 0, len(m))
+			for rel, h := range m {
+				lines = append(lines, fmt.Sprintf("%s  %s", h, rel))
+			}
+			err = writeChecksums(path, lines)
+		}
+		if err != nil {
+			fmt.Printf("%s updating %s: %v\n", red("ERROR"), path, err)
+			ok = false
+		}
+	}
+	return ok
+}
+
+func executeOrganisePlan(p organisePlan) bool {
+	manifests := newManifestMoves(p.yearDir)
+	var moveFailed int
 
 	for _, m := range p.missions {
 		destDir := filepath.Join(p.yearDir, m.slug)
@@ -384,12 +471,12 @@ func executeOrganisePlan(p organisePlan) bool {
 				fmt.Printf("%s mkdir: %v\n", red("ERROR"), err)
 				continue
 			}
-			if err := os.Rename(src, dst); err != nil {
+			if err := moveNoReplace(src, dst); err != nil {
 				fmt.Printf("%s move %s: %v\n", red("ERROR"), mf.f.rel, err)
 				moveFailed++
 				continue
 			}
-			markAffected(mf.f.rel, destDir)
+			manifests.moved(mf.f.rel, destDir, mf.dest)
 		}
 	}
 	unsortedUsed := make(map[string]bool)
@@ -425,20 +512,16 @@ func executeOrganisePlan(p organisePlan) bool {
 			fmt.Printf("%s mkdir: %v\n", red("ERROR"), err)
 			continue
 		}
-		if err := os.Rename(src, dst); err != nil {
+		if err := moveNoReplace(src, dst); err != nil {
 			fmt.Printf("%s move %s: %v\n", red("ERROR"), f.rel, err)
 			moveFailed++
 			continue
 		}
-		markAffected(f.rel, filepath.Join(p.yearDir, "_unsorted"))
+		manifests.moved(f.rel, filepath.Join(p.yearDir, "_unsorted"), safeName)
 	}
 
-	// remove stale checksums.b3 from any dir that had files moved in or out
-	for dir := range affected {
-		cPath := filepath.Join(dir, "checksums.b3")
-		if err := os.Remove(cPath); err == nil {
-			fmt.Printf("removed stale checksums: %s\n", cPath)
-		}
+	if !manifests.flush() {
+		moveFailed++
 	}
 
 	removeEmptyDirs(p.yearDir)
@@ -597,6 +680,51 @@ func removeEmptyDirs(root string) {
 		entries, err := os.ReadDir(d)
 		if err == nil && len(entries) == 0 {
 			os.Remove(d)
+		}
+	}
+}
+
+// moveNoReplace renames src to dst, refusing if dst already exists. os.Rename
+// silently replaces an existing file, and the plan only guards against
+// collisions among the files it is moving, not with what is already on disk.
+func moveNoReplace(src, dst string) error {
+	if _, err := os.Lstat(dst); err == nil {
+		return fmt.Errorf("%s already exists", dst)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return os.Rename(src, dst)
+}
+
+// agreeOnDates gives every copy of a file — the same path under the year on
+// several drives — the same date, so that each drive files it into the same
+// mission.
+//
+// Each drive was dated on its own, and the last fallback is the file's mtime,
+// which belongs to the copy rather than the footage: copies did not keep the
+// source's mtime, so a cold copy was dated by when it was synced. The hot and
+// cold copies of one clip could then land in different seasons, and the drives
+// disagreed about which mission held it from then on. The best-sourced date
+// wins — ffprobe, then the filename, then the mtime — and among mtimes the
+// earliest, which is the one nearest the recording.
+func agreeOnDates(sets [][]fileWithDate) {
+	rank := map[string]int{"ffprobe": 3, "filename": 2, "mtime": 1}
+	best := make(map[string]fileWithDate)
+	for _, files := range sets {
+		for _, f := range files {
+			b, ok := best[f.rel]
+			switch {
+			case !ok, rank[f.src] > rank[b.src]:
+				best[f.rel] = f
+			case rank[f.src] == rank[b.src] && f.src == "mtime" && f.date.Before(b.date):
+				best[f.rel] = f
+			}
+		}
+	}
+	for _, files := range sets {
+		for i, f := range files {
+			b := best[f.rel]
+			files[i].date, files[i].src = b.date, b.src
 		}
 	}
 }

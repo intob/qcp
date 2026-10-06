@@ -387,6 +387,36 @@ already counted. A match is refused with a note naming the drive it duplicates.
 Regression tests in `evict_test.go` for both shapes. Both fail with the check
 disabled.
 
+### `-organise` could file the same clip into different missions on different drives
+
+`runOrganise` dated each drive's loose files independently. The last fallback,
+after ffprobe and the filename, is the file's mtime (`organise.go:462`). That
+belongs to the copy, not the footage. `job` did not carry the source's mtime
+across, so a cold copy was dated by when it was synced. The hot and cold copies
+of one clip could then be filed into different season missions, and the drives
+disagreed about which mission held the clip from then on. Confirmed with
+`card/clip.mp4` on two drives, mtime July on one and November on the other:
+one drive filed it under `001_Summer`, the other under `002_Autumn`.
+
+Fixed in two places:
+
+- `agreeOnDates` (`organise.go`) runs after every drive is scanned and gives
+  every copy of a path the same date. The best-sourced date wins (ffprobe, then
+  the filename, then the mtime), and among mtimes the earliest, which is
+  nearest the recording.
+- `job` (`copy.go`) now stamps every copy with its source's mtime, so new copies
+  carry the recording time instead of the time they were made. The proxy cache
+  checks the source hash first and size plus mtime only as a fallback, so
+  nothing relied on a copy's mtime being the time it was copied.
+
+Regression tests: `organise_test.go` checks that the July/November pair lands in
+`001_Summer` on both drives, and `copy_test.go` checks that a copy keeps its
+source's mtime. Both fail with the fix reverted.
+
+Left alone: copies made before this keep the mtime of when they were made. Only
+a drive's oldest copy of a file is likely to carry the real date, which is why
+the earliest mtime wins.
+
 ### `-clean` walked the whole of a drive whose `root` is empty
 
 With `-year all`, `runClean` walked the drive's footage root (`clean.go:28`).
@@ -408,6 +438,33 @@ mission or the year may not, as before.
 Regression test in `clean_test.go`: junk and an empty directory inside a mission
 are removed, and the three outside the footage survive. Fails with the fix
 reverted.
+
+### `-organise` deleted `checksums.b3`
+
+`executeOrganisePlan` (`organise.go:439`) deleted the manifest of every
+directory a file was moved into or out of. A rename does not change a file's
+content, so the hashes recorded when the footage was known good were thrown away
+for nothing. That included the files that stayed behind in a directory one file
+had left. The next `-checksum` then recorded whatever was on disk. Confirmed
+with a `-reorganise` that splits one recorded mission into a Summer and a Winter
+mission: both new missions came out with no manifest at all.
+
+Fixed with `manifestMoves` (`organise.go`). Each successful move takes its entry
+out of the manifest of the top-level directory it came from and records it under
+the file's new name in the destination. Every manifest that changed is rewritten
+through `writeChecksums`. One left empty is removed so that `removeEmptyDirs`
+can still collapse the directory it was in. A file the source manifest did not
+mention is moved without an entry, as before.
+
+While there, moves go through `moveNoReplace`. `os.Rename` silently replaces an
+existing file, and the plan's collision handling only considers the files it is
+moving, not what is already on disk. Every destination is a freshly numbered
+mission or `_unsorted`, so I could not construct a case where that bites today,
+but a rename that can destroy a file on a slip should not be left that way.
+
+Regression tests in `organise_test.go`: the Summer/Winter split must carry both
+hashes and remove the emptied mission (fails with the fix reverted), and a move
+onto an existing file must be refused.
 
 ### `-checksum` overwrote recorded hashes without comparing them
 

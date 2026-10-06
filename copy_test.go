@@ -330,3 +330,28 @@ func TestPartFilesAreUnseenAndThenSwept(t *testing.T) {
 		t.Error("the sweep took a finished file with it")
 	}
 }
+
+// A copy is stamped with the source's mtime, not the time it was made: -organise
+// dates a file by its mtime when nothing better is available.
+func TestJobKeepsTheSourceMtime(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.mp4")
+	if err := os.WriteFile(src, []byte("clip"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recorded := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(src, recorded, recorded); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "out", "dst.mp4")
+	if r := job(src, dst, nil); r.err != nil {
+		t.Fatal(r.err)
+	}
+	info, err := os.Stat(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(recorded) {
+		t.Errorf("copy mtime = %v, want %v", info.ModTime(), recorded)
+	}
+}

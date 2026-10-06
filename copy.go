@@ -90,6 +90,14 @@ func job(src, dst string, bar *barTracker) *result {
 		os.Remove(tmp)
 		return &result{err: err}
 	}
+	// The copy keeps the source's mtime. A card file's mtime is when it was
+	// recorded, and -organise dates a file by it when nothing better is
+	// available; a copy stamped with the time it was made dated a cold copy by
+	// its sync and could file it into a different season than the hot one.
+	if err := os.Chtimes(tmp, info.ModTime(), info.ModTime()); err != nil {
+		os.Remove(tmp)
+		return &result{err: err}
+	}
 	if err := os.Rename(tmp, dst); err != nil {
 		os.Remove(tmp)
 		return &result{err: err}
