@@ -251,6 +251,11 @@ func qualifyBackups(cfg Config, yearStr, slug string, num int, targets []evictTa
 		if !dirExists(dir) {
 			continue
 		}
+		if same := sameDirAs(dir, targets, backups); same != "" {
+			notes = append(notes, fmt.Sprintf("%s is the same directory as %s — not a separate copy",
+				bold(d.name()), bold(same)))
+			continue
+		}
 		manifest, err := readChecksums(filepath.Join(dir, "checksums.b3"))
 		if err != nil {
 			notes = append(notes, fmt.Sprintf("%s: %v", bold(d.name()), err))
@@ -447,4 +452,31 @@ func verifyBackups(plans []evictPlan) bool {
 	}
 	fmt.Printf("\n%s cold copies verified\n", green("✓"))
 	return true
+}
+
+// sameDirAs names the hot copy about to be deleted, or the cold copy already
+// counted, that dir is the same directory as — or "" if it is neither.
+//
+// Two configured drives can resolve to one folder: a path entry and a volume
+// entry for the same disk, a symlink, a copy-pasted config line. A cold copy
+// that is the hot copy would then be verified and kept as the backup while the
+// directory itself was deleted, and two entries for one cold folder would
+// count as two copies toward -copies. Compared by the filesystem's identity
+// for the directory, not by path, since the paths are what differ.
+func sameDirAs(dir string, targets []evictTarget, backups []evictBackup) string {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return ""
+	}
+	for _, t := range targets {
+		if ti, err := os.Stat(t.dir); err == nil && os.SameFile(info, ti) {
+			return t.vol
+		}
+	}
+	for _, b := range backups {
+		if bi, err := os.Stat(b.dir); err == nil && os.SameFile(info, bi) {
+			return b.vol
+		}
+	}
+	return ""
 }

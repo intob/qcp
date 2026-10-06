@@ -151,3 +151,64 @@ func TestEvictCarriesFlagsToTheColdCopy(t *testing.T) {
 		t.Errorf("flagStore.read after eviction = %v, want both flags", merged.Flags)
 	}
 }
+
+// Two configured drives can resolve to one folder — here the cold entry is a
+// symlink to the hot drive. The "cold copy" was then the hot copy itself: it
+// had every file, its manifest agreed with itself, it verified, and -evict
+// deleted the only copy it had just declared safe.
+func TestQualifyBackupsRefusesTheHotCopyItself(t *testing.T) {
+	root := t.TempDir()
+	hot := filepath.Join(root, "hot")
+	cold := filepath.Join(root, "cold")
+	writeMissionFile(t, hot, "2026", "001_A", "a.mp4", "only copy")
+	writeMissionFile(t, hot, "2026", "001_A", "checksums.b3", b3("only copy")+"  a.mp4\n")
+	if err := os.Symlink(hot, cold); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Drives: []DriveConfig{
+		{Volume: "HOT", Path: hot, Role: "hot"},
+		{Volume: "COLD", Path: cold, Role: "cold"},
+	}}
+	dir := filepath.Join(hot, "2026", "001_A")
+	files, _, _, err := missionFiles(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := []evictTarget{{"HOT", dir, files, 9}}
+
+	backups, problems := qualifyBackups(cfg, "2026", "001_A", 1, targets, 1)
+
+	if len(backups) != 0 {
+		t.Fatalf("the hot copy qualified as its own backup")
+	}
+	if !strings.Contains(strings.Join(problems, "\n"), "same directory") {
+		t.Errorf("problems = %v", problems)
+	}
+}
+
+// Two entries for one cold folder must not count as two copies.
+func TestQualifyBackupsCountsOneFolderOnce(t *testing.T) {
+	root := t.TempDir()
+	hot := filepath.Join(root, "hot")
+	cold := filepath.Join(root, "cold")
+	writeMissionFile(t, hot, "2026", "001_A", "a.mp4", "x")
+	writeMissionFile(t, hot, "2026", "001_A", "checksums.b3", b3("x")+"  a.mp4\n")
+	writeMissionFile(t, cold, "2026", "001_A", "a.mp4", "x")
+	writeMissionFile(t, cold, "2026", "001_A", "checksums.b3", b3("x")+"  a.mp4\n")
+	if err := os.Symlink(cold, filepath.Join(root, "cold2")); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Drives: []DriveConfig{
+		{Volume: "HOT", Path: hot, Role: "hot"},
+		{Volume: "COLD", Path: cold, Role: "cold"},
+		{Volume: "COLD2", Path: filepath.Join(root, "cold2"), Role: "cold"},
+	}}
+	dir := filepath.Join(hot, "2026", "001_A")
+	files, _, _, _ := missionFiles(dir)
+
+	backups, _ := qualifyBackups(cfg, "2026", "001_A", 1, []evictTarget{{"HOT", dir, files, 1}}, 2)
+
+	if len(backups) != 0 {
+		t.Errorf("one cold folder counted as %d copies", len(backups))
+	}
+}

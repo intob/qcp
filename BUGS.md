@@ -204,6 +204,27 @@ drives only. That behaviour is intended, since a cold drive plugged in at
 ingest gets a copy verified straight from the card, so the README and `-help`
 now say so instead.
 
+### `-evict` did not check that a hot and a cold copy were different directories
+
+`qualifyBackups` (`evict.go:209`) accepted any cold drive entry whose mission
+directory held every hot file in an agreeing manifest. Two configured drives can
+resolve to one folder: a `path` entry and a `volume` entry for the same disk, a
+symlink, or a copy-pasted config line. If they did, the "cold copy" was the hot
+copy itself. It had every file, its manifest agreed with itself, and it passed
+verification, so `-evict` deleted the only copy it had just declared safe. In
+the same way, two entries for one cold folder counted as two copies toward
+`-copies`. Confirmed with the cold drive's path a symlink to the hot drive: the
+hot copy qualified as its own backup. With a second symlinked cold entry, one
+folder satisfied `-copies 2`.
+
+Fixed with `sameDirAs` (`evict.go`). Before a cold copy is considered, it is
+compared by filesystem identity (`os.SameFile`, not by path, since the paths
+are what differ) with every hot copy about to be deleted and every cold copy
+already counted. A match is refused with a note naming the drive it duplicates.
+
+Regression tests in `evict_test.go` for both shapes. Both fail with the check
+disabled.
+
 ### A file that failed verification stayed on the drive under its final name
 
 `-ingest` (`main.go:832`), `-sync` (`sync.go:398`), `-replicate`
