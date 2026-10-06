@@ -347,7 +347,7 @@ func printEvictPlan(plans []evictPlan, minCopies int, quick bool) {
 		}
 		fmt.Printf("  %-*s  %s %s  %s %s", width, p.slug,
 			red("−"), strings.Join(from, ", "), dim("keeping"), green(strings.Join(keep, ", ")))
-		if n := len(p.flags.Flags); n > 0 {
+		if n := len(p.flags.flagged()); n > 0 {
 			fmt.Printf("  %s", dim(fmt.Sprintf("· %d flag(s) carried across", n)))
 		}
 		fmt.Println()

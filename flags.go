@@ -26,7 +26,8 @@ const flagColour = "Blue"
 
 type clipFlag struct {
 	Colour string `json:"colour"`
-	At     string `json:"at"` // RFC3339, so the newest wins when drives disagree
+	At     string `json:"at"`            // RFC3339, so the newest wins when drives disagree
+	Off    bool   `json:"off,omitempty"` // an unflag, kept so it outranks an older flag
 }
 
 type missionFlags struct {
@@ -57,8 +58,9 @@ func readMissionFlags(dir string) (missionFlags, error) {
 	return f, nil
 }
 
-// writeMissionFlags replaces the file, or removes it once nothing is flagged so
-// unflagging everything leaves no trace behind.
+// writeMissionFlags replaces the file, or removes it once it records nothing.
+// An unflagged clip is still a record — see set — so the file only goes away
+// when it is written empty.
 func writeMissionFlags(dir string, f missionFlags) error {
 	path := filepath.Join(dir, flagsFileName)
 	if len(f.Flags) == 0 {
@@ -82,13 +84,27 @@ func writeMissionFlags(dir string, f missionFlags) error {
 
 // mergeMissionFlags unions what several drives hold, newest timestamp winning a
 // disagreement. Drives go out of sync whenever one was unmounted during an edit.
+// Timestamps are to the second, so an unflag wins a tie: flagging and then
+// unflagging within one second must not come out flagged.
 func mergeMissionFlags(all []missionFlags) missionFlags {
 	out := missionFlags{Version: 1, Flags: map[string]clipFlag{}}
 	for _, f := range all {
 		for rel, c := range f.Flags {
-			if prev, ok := out.Flags[rel]; !ok || c.At > prev.At {
+			prev, ok := out.Flags[rel]
+			if !ok || c.At > prev.At || (c.At == prev.At && c.Off && !prev.Off) {
 				out.Flags[rel] = c
 			}
+		}
+	}
+	return out
+}
+
+// flagged is the clips that are flagged now, leaving out the unflags.
+func (f missionFlags) flagged() map[string]clipFlag {
+	out := make(map[string]clipFlag, len(f.Flags))
+	for rel, c := range f.Flags {
+		if !c.Off {
+			out[rel] = c
 		}
 	}
 	return out
@@ -132,27 +148,35 @@ func (s *flagStore) read(year int, slug string) (missionFlags, error) {
 	return mergeMissionFlags(all), nil
 }
 
-// get is the lenient read, for display only. Nothing writes back from it.
+// get is the lenient read, for display only, and holds only the clips that are
+// flagged now. Nothing writes back from it.
 func (s *flagStore) get(year int, slug string) missionFlags {
 	f, err := s.read(year, slug)
 	if err != nil {
 		fmt.Printf("%s %s\n", yellow("warning:"), dim(err.Error()))
 		return missionFlags{Version: 1, Flags: map[string]clipFlag{}}
 	}
-	return f
+	return missionFlags{Version: f.Version, Flags: f.flagged()}
 }
 
 // set toggles one clip and persists the result. It returns the merged state so
 // a caller can report what is now true rather than what it asked for.
+//
+// An unflag is recorded rather than deleted. Writes reach only the hot drives
+// that are mounted, and reads merge every drive with the newest entry winning,
+// so a deleted entry left nothing to outrank the flag still held by a drive
+// that was away, or by the cold copy -evict carried it to: the clip came back
+// flagged as soon as that drive was mounted again.
 func (s *flagStore) set(year int, slug, rel string, on bool) (missionFlags, error) {
 	cur, err := s.read(year, slug)
 	if err != nil {
 		return missionFlags{}, fmt.Errorf("refusing to write over flags that could not be read: %w", err)
 	}
+	now := time.Now().UTC().Format(time.RFC3339)
 	if on {
-		cur.Flags[rel] = clipFlag{Colour: flagColour, At: time.Now().UTC().Format(time.RFC3339)}
+		cur.Flags[rel] = clipFlag{Colour: flagColour, At: now}
 	} else {
-		delete(cur.Flags, rel)
+		cur.Flags[rel] = clipFlag{At: now, Off: true}
 	}
 	var wrote int
 	var firstErr error
@@ -187,11 +211,22 @@ type flaggedClip struct {
 }
 
 // all walks every mounted drive and returns one entry per flagged clip, keyed
-// by the absolute source path. A mission on two drives yields the path on
-// whichever drive is listed first, matching how Resolve would have imported it.
+// by the absolute source path. Each mission is merged across the drives that
+// hold it, as read does, so an unflag on one drive outranks an older flag on
+// another. A clip's path is on the first listed drive whose own file flags it,
+// matching how Resolve would have imported it.
 func (s *flagStore) all() []flaggedClip {
-	seen := map[string]bool{}
-	var out []flaggedClip
+	type copyFlags struct {
+		dir   string
+		flags missionFlags
+	}
+	type mission struct {
+		year   int
+		slug   string
+		copies []copyFlags
+	}
+	missions := map[string]*mission{}
+	var order []string
 	for _, d := range s.drives {
 		root := filepath.Join(d.basePath(), d.Root)
 		years, err := os.ReadDir(root)
@@ -209,22 +244,41 @@ func (s *flagStore) all() []flaggedClip {
 				if err != nil || len(f.Flags) == 0 {
 					continue
 				}
-				for rel, c := range f.Flags {
-					key := strconv.Itoa(year) + "/" + slug + "/" + rel
-					if seen[key] {
-						continue
-					}
-					seen[key] = true
-					colour := c.Colour
-					if colour == "" {
-						colour = flagColour
-					}
-					out = append(out, flaggedClip{
-						Year: year, Slug: slug, Rel: rel,
-						Path: filepath.Join(dir, rel), Colour: colour,
-					})
+				key := strconv.Itoa(year) + "/" + slug
+				m := missions[key]
+				if m == nil {
+					m = &mission{year: year, slug: slug}
+					missions[key] = m
+					order = append(order, key)
+				}
+				m.copies = append(m.copies, copyFlags{dir, f})
+			}
+		}
+	}
+
+	var out []flaggedClip
+	for _, key := range order {
+		m := missions[key]
+		all := make([]missionFlags, len(m.copies))
+		for i, c := range m.copies {
+			all[i] = c.flags
+		}
+		for rel, c := range mergeMissionFlags(all).flagged() {
+			dir := m.copies[0].dir
+			for _, cp := range m.copies {
+				if own, ok := cp.flags.Flags[rel]; ok && !own.Off {
+					dir = cp.dir
+					break
 				}
 			}
+			colour := c.Colour
+			if colour == "" {
+				colour = flagColour
+			}
+			out = append(out, flaggedClip{
+				Year: m.year, Slug: m.slug, Rel: rel,
+				Path: filepath.Join(dir, rel), Colour: colour,
+			})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {

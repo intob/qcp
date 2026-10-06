@@ -32,6 +32,35 @@ confirmed as intended and is documented instead.
 
 ## Fixed
 
+### An unflagged clip came back flagged when another drive was mounted
+
+Found on 2026-10-06, after the fourth read, while looking for what to improve.
+`flagStore.set` (`flags.go`) unflagged a clip by deleting its entry, and writes
+reach only the hot drives that are mounted. Reads merge every mounted drive,
+newest timestamp winning, so the drive that had been away still held the flag
+and nothing outranked it: the clip came back flagged as soon as that drive was
+plugged in again. The cold copy `-evict` carries flags to did the same with the
+archive mounted, since `set` never writes to a cold drive. Confirmed with a
+clip flagged on two hot drives, one unplugged, the clip unflagged, and the
+drive plugged back in: the flag was back.
+
+`flagStore.all`, which `-serve` and `-resolve` use, did not merge at all. It
+took each clip from the first drive whose file named it, so it could disagree
+with `read`.
+
+Fixed: an unflag is recorded as an entry with `off` set and its own timestamp,
+so it outranks any older flag, and an unflag wins a tie, since timestamps are
+to the second. `get` and `all` leave the unflags out. `all` now merges each
+mission across the drives that hold it, as `read` does. `-evict` carries the
+unflags to the cold copy along with the flags, and its "flag(s) carried
+across" count leaves them out. The flags file therefore no longer disappears
+when the last clip is unflagged.
+
+Regression tests in `flags_test.go`: a clip unflagged with one hot drive away
+stays unflagged through `get` and `all` once it is back, and can be flagged
+again; and an unflag on the hot copy outranks the cold copy's older flag. Both
+fail against the old `set` and `all`.
+
 ### `-serve` accepted flag changes from other origins
 
 `/api/flag` (`serve.go`) decoded any POST body as JSON whatever its content type,

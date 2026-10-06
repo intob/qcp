@@ -124,3 +124,75 @@ func TestUnreadableFlagsAreNeverOverwritten(t *testing.T) {
 		t.Errorf("the unreadable file was modified: %q", raw)
 	}
 }
+
+// Writes reach only the hot drives that are mounted and reads merge every
+// drive, newest entry winning. An unflag used to delete the entry, which left
+// nothing to outrank the flag on a drive that was away during the unflag, so
+// the clip came back flagged as soon as that drive was plugged in again.
+func TestUnflagSurvivesADriveThatWasAway(t *testing.T) {
+	root := t.TempDir()
+	const year, slug, rel = 2026, "001_X", "CARD/clip.MXF"
+	a := DriveConfig{Volume: "A", Path: filepath.Join(root, "A"), Role: "hot"}
+	b := DriveConfig{Volume: "B", Path: filepath.Join(root, "B"), Role: "hot"}
+	for _, d := range []DriveConfig{a, b} {
+		if err := os.MkdirAll(missionDir(d, year, slug), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// B is listed first, so a tie could not be settled by drive order.
+	both := &flagStore{drives: []DriveConfig{b, a}}
+	if _, err := both.set(year, slug, rel, true); err != nil {
+		t.Fatal(err)
+	}
+	onlyA := &flagStore{drives: []DriveConfig{a}} // B unplugged
+	if _, err := onlyA.set(year, slug, rel, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// B is back, still holding the flag.
+	if got := both.get(year, slug); len(got.Flags) != 0 {
+		t.Errorf("get after the unflag = %v, want nothing flagged", got.Flags)
+	}
+	if got := both.all(); len(got) != 0 {
+		t.Errorf("all after the unflag = %v, want nothing flagged", got)
+	}
+
+	// And flagging it again still works.
+	if _, err := both.set(year, slug, rel, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := both.all(); len(got) != 1 || got[0].Rel != rel {
+		t.Errorf("all after flagging again = %v, want %s", got, rel)
+	}
+}
+
+// -evict carries flags to the cold copy, and set never writes to a cold drive,
+// so the same thing happened with the archive mounted: unflag on the hot copy
+// and the cold copy's older flag won the merge.
+func TestUnflagOutranksTheColdCopysFlag(t *testing.T) {
+	root := t.TempDir()
+	const year, slug, rel = 2026, "002_Y", "CARD/clip.MXF"
+	hot := DriveConfig{Volume: "HOT", Path: filepath.Join(root, "hot"), Role: "hot"}
+	cold := DriveConfig{Volume: "COLD", Path: filepath.Join(root, "cold"), Role: "cold"}
+	for _, d := range []DriveConfig{hot, cold} {
+		if err := os.MkdirAll(missionDir(d, year, slug), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writeMissionFlags(missionDir(cold, year, slug), missionFlags{Flags: map[string]clipFlag{
+		rel: {Colour: flagColour, At: "2026-08-24T12:00:00Z"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	s := &flagStore{drives: []DriveConfig{hot, cold}}
+	if got := s.all(); len(got) != 1 {
+		t.Fatalf("the cold copy's flag was not read: %v", got)
+	}
+
+	if _, err := s.set(year, slug, rel, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.all(); len(got) != 0 {
+		t.Errorf("all after the unflag = %v, want nothing flagged", got)
+	}
+}

@@ -430,7 +430,9 @@ hot mission it merges its flags into the cold copies that justified the
 deletion, newest timestamp winning, and refuses to delete anything it could not
 carry them off. The flag store reads every mounted drive holding a mission, so
 `-serve` and `-resolve` pick them up from a cold drive exactly as from a hot
-one. Two further consequences worth knowing: only clips that have been proxied
+one. Unflagging a clip records the unflag rather than deleting the entry, so it
+outranks the older flag still held by a drive that was unplugged at the time,
+or by the cold copy. Two further consequences worth knowing: only clips that have been proxied
 can be flagged, because only those appear in the index; and flagging needs
 somewhere to write, so it is offered under `-serve` and not when the index is
 opened from `file://`, and only for a mission that is on a mounted hot drive.
