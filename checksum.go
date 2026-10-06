@@ -72,12 +72,14 @@ func runChecksumYear(cfg Config, year int) bool {
 		hashes map[string]string
 	}
 	type missionJob struct {
-		slug   string
-		drives []missionDrive
-		files  []fileEntry
-		size   int64
+		slug     string
+		drives   []missionDrive
+		files    []fileEntry
+		size     int64
+		recorded map[string]map[string]string
 	}
 	var jobs []missionJob
+	var ghostedMissions int
 	for _, slug := range slugs {
 		var mDrives []missionDrive
 		for _, dy := range drives {
@@ -102,11 +104,15 @@ func runChecksumYear(cfg Config, year int) bool {
 		// under md.dir, so files that only exist on already-checksummed drives
 		// cannot be hashed and must not be included in the job
 		fileSet := make(map[string]fileEntry)
+		var ghosted bool
 		for _, md := range mDrives {
-			fs, _, _, err := missionFiles(md.dir)
+			fs, _, ghosts, err := missionFiles(md.dir)
 			if err != nil {
 				fmt.Printf("%s error scanning %s on %s: %v\n", yellow("warning:"), slug, md.vol, err)
 				continue
+			}
+			if ghosts > 0 {
+				ghosted = true
 			}
 			for _, f := range fs {
 				if _, exists := fileSet[f.rel]; !exists {
@@ -128,6 +134,13 @@ func runChecksumYear(cfg Config, year int) bool {
 				}
 			}
 		}
+		// Rewriting the manifest would drop the entries for the missing files,
+		// and with them the only sign that anything went missing.
+		if ghosted {
+			fmt.Printf("%s %s: files in checksums.b3 are missing from disk — skipped; restore them first\n", red("ERROR"), slug)
+			ghostedMissions++
+			continue
+		}
 		if len(fileSet) == 0 {
 			fmt.Printf("%s no files found for %s\n", yellow("warning:"), slug)
 			continue
@@ -139,11 +152,20 @@ func runChecksumYear(cfg Config, year int) bool {
 			size += f.size
 		}
 		sort.Slice(files, func(a, b int) bool { return files[a].rel < files[b].rel })
-		jobs = append(jobs, missionJob{slug, mDrives, files, size})
+		recorded, err := recordedHashes(cfg, yearStr, slug)
+		if err != nil {
+			fmt.Printf("%s %s: %v — skipped\n", red("ERROR"), slug, err)
+			ghostedMissions++
+			continue
+		}
+		jobs = append(jobs, missionJob{slug, mDrives, files, size, recorded})
 	}
 
-	already := len(slugs) - len(jobs)
+	already := len(slugs) - len(jobs) - ghostedMissions
 	if len(jobs) == 0 {
+		if ghostedMissions > 0 {
+			return false
+		}
 		fmt.Printf("%s\n", dim(fmt.Sprintf("all %d mission(s) already checksummed", already)))
 		return true
 	}
@@ -228,8 +250,16 @@ func runChecksumYear(cfg Config, year int) bool {
 			continue
 		}
 
-		// cross-check
+		// every hash already recorded for the mission, on any mounted drive, stands
 		var conflicts int
+		for _, md := range j.drives {
+			for _, c := range recordedConflicts(md.vol, md.hashes, j.recorded) {
+				fmt.Printf("\n%s %s\n", red("CONFLICT"), c)
+				conflicts++
+			}
+		}
+
+		// cross-check
 		for _, f := range j.files {
 			ref := j.drives[0].hashes[f.rel]
 			for _, md := range j.drives[1:] {
@@ -266,8 +296,9 @@ func runChecksumYear(cfg Config, year int) bool {
 	}
 	p.Wait()
 
-	if n := totalFailed.Load(); n > 0 {
-		fmt.Printf("\n%s %d error(s) — some missions may be incomplete\n", red("ERROR:"), n)
+	if n := totalFailed.Load(); n > 0 || ghostedMissions > 0 {
+		fmt.Printf("\n%s %d error(s), %d mission(s) with missing files — some missions may be incomplete\n",
+			red("ERROR:"), n, ghostedMissions)
 		return false
 	}
 	fmt.Printf("\n%s %d mission(s) checksummed\n", green("✓"), len(jobs))
@@ -320,10 +351,17 @@ func runChecksum(cfg Config, missionNum int, year int) bool {
 	// union file lists from all drives so files absent from drives[0] are not silently omitted
 	fileSet := make(map[string]fileEntry)
 	for _, d := range drives {
-		fs, _, _, err := missionFiles(d.dir)
+		fs, _, ghosts, err := missionFiles(d.dir)
 		if err != nil {
 			fmt.Printf("%s error scanning %s: %v\n", yellow("warning:"), d.vol, err)
 			continue
+		}
+		// Rewriting the manifest would drop the entries for the missing files,
+		// and with them the only sign that anything went missing.
+		if ghosts > 0 {
+			fmt.Printf("%s %s: %d file(s) in checksums.b3 are missing from disk — checksums.b3 not written; restore them first\n",
+				red("ERROR"), d.vol, ghosts)
+			return false
 		}
 		for _, f := range fs {
 			if _, exists := fileSet[f.rel]; !exists {
@@ -397,8 +435,21 @@ func runChecksum(cfg Config, missionNum int, year int) bool {
 		return false
 	}
 
-	// cross-check: every drive must agree on every file
+	// every hash already recorded for the mission, on any mounted drive, stands
 	var conflicts int
+	recorded, err := recordedHashes(cfg, yearStr, slug)
+	if err != nil {
+		fmt.Printf("%s %v — checksums.b3 not written\n", red("ERROR"), err)
+		return false
+	}
+	for _, d := range drives {
+		for _, c := range recordedConflicts(d.vol, d.hashes, recorded) {
+			fmt.Printf("%s %s\n", red("CONFLICT:"), c)
+			conflicts++
+		}
+	}
+
+	// cross-check: every drive must agree on every file
 	for _, f := range files {
 		ref := drives[0].hashes[f.rel]
 		for _, d := range drives[1:] {
@@ -410,7 +461,7 @@ func runChecksum(cfg Config, missionNum int, year int) bool {
 		}
 	}
 	if conflicts > 0 {
-		fmt.Printf("%s %d conflict(s) found — checksums.b3 not written\n", red("ERROR"), conflicts)
+		fmt.Printf("%s %d conflict(s) found — checksums.b3 not written; run -verify %03d\n", red("ERROR"), conflicts, missionNum)
 		return false
 	}
 
@@ -431,4 +482,64 @@ func runChecksum(cfg Config, missionNum int, year int) bool {
 		}
 	}
 	return true
+}
+
+// recordedConflicts compares hashes just computed on one drive with every hash
+// already recorded for the mission — that drive's own checksums.b3 and those of
+// every other mounted copy — and describes each disagreement.
+//
+// -checksum used to replace checksums.b3 with whatever was on disk, so a file
+// that had rotted since ingest had its good hash overwritten by the bad one and
+// the run reported success. A mission only has to gain one unrecorded file —
+// an append — to be rehashed, and a copy that was already fully checksummed was
+// skipped and never used as a reference. A recorded hash is the evidence that
+// catches corruption, so a disagreement with one is a conflict to investigate
+// with -verify, never something to write over.
+func recordedConflicts(vol string, fresh map[string]string, recorded map[string]map[string]string) []string {
+	var out []string
+	rels := make([]string, 0, len(fresh))
+	for rel := range fresh {
+		rels = append(rels, rel)
+	}
+	sort.Strings(rels)
+	vols := make([]string, 0, len(recorded))
+	for v := range recorded {
+		vols = append(vols, v)
+	}
+	sort.Strings(vols)
+	for _, rel := range rels {
+		for _, v := range vols {
+			want := recorded[v][rel]
+			if want == "" || want == fresh[rel] {
+				continue
+			}
+			if v == vol {
+				out = append(out, fmt.Sprintf("%s on %s no longer matches its checksums.b3", rel, vol))
+			} else {
+				out = append(out, fmt.Sprintf("%s on %s does not match the hash recorded on %s", rel, vol, v))
+			}
+		}
+	}
+	return out
+}
+
+// recordedHashes reads the checksums.b3 of every mounted copy of a mission,
+// keyed by drive name. A manifest that cannot be read is an error: what it
+// records is exactly what must not be written over.
+func recordedHashes(cfg Config, yearStr, slug string) (map[string]map[string]string, error) {
+	out := make(map[string]map[string]string)
+	for _, d := range cfg.Drives {
+		dir := filepath.Join(d.basePath(), d.Root, yearStr, slug)
+		if !dirExists(dir) {
+			continue
+		}
+		m, err := readChecksums(filepath.Join(dir, "checksums.b3"))
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", d.name(), err)
+		}
+		if len(m) > 0 {
+			out[d.name()] = m
+		}
+	}
+	return out, nil
 }

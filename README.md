@@ -180,7 +180,7 @@ qcp -checksum all -year all
 
 `-verify` re-hashes every file listed in `checksums.b3` and checks the result, naming the drive whose copy failed. `-verify all` does the same for all missions, printing one line per mission. Anything that could not be verified fails rather than passing quietly: a copy with no `checksums.b3`, one whose manifest cannot be read, and any file on disk the manifest does not record (run `-checksum` to record it).
 
-`-checksum` is for missions that predate the manifest or were copied by other means. It hashes all drives, cross-checks that every drive agrees on every file, and writes `checksums.b3` only if all drives agree.
+`-checksum` is for missions that predate the manifest or were copied by other means. It hashes all drives, cross-checks that every drive agrees on every file, and writes `checksums.b3` only if all drives agree. A hash already recorded is never overwritten: every fresh hash must also match what that drive's manifest — and the manifest of every other mounted copy — already says about the file, so an append is recorded while a file that has changed since it was recorded is reported as a conflict for `-verify`. A manifest that lists files missing from disk is not rewritten either, since that would drop the only record that they existed.
 
 ### Info
 

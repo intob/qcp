@@ -225,6 +225,40 @@ already counted. A match is refused with a note naming the drive it duplicates.
 Regression tests in `evict_test.go` for both shapes. Both fail with the check
 disabled.
 
+### `-checksum` overwrote recorded hashes without comparing them
+
+Both `-checksum` paths (`checksum.go:261` for a year, `checksum.go:431` for one
+mission) hash every file of any copy that is not fully checksummed. They then
+replace its `checksums.b3` with the result and never look at what the manifest
+already said. A mission only has to gain one unrecorded file, such as an
+append, to be rehashed. So a file that had rotted since ingest had its good
+hash overwritten by the bad one, the run printed ✓, and the evidence `-verify`
+and `-evict` depend on was gone. Confirmed with a manifest recording `a.mp4` as
+`original`, the file changed to `rotted`, and an unrecorded `b.mp4` beside it:
+the manifest came back with the rotted hash and `runChecksum` returned true.
+
+Two more ways it lost the record:
+
+- Copies that were already fully checksummed were left out of the run and
+  never consulted. A cold copy hashed on its own recorded whatever it held, even
+  when the hot copy's manifest said otherwise.
+- The rewrite listed only the files on disk now. Any entry for a file that had
+  gone missing was dropped, and with it the only sign the file was gone.
+  `missionFiles` counted these but both callers ignored the count.
+
+Fixed with `recordedConflicts` and `recordedHashes` (`checksum.go`). Every fresh
+hash is compared with the hash for that file in the drive's own manifest and in
+the manifest of every other mounted copy of the mission. Any disagreement is a
+conflict: the manifest is not written, the run fails, and the message points at
+`-verify`. A copy whose manifest lists missing files is not rewritten either.
+Hashes that agree are written back unchanged, so an ordinary append records
+the new files and keeps the old entries.
+
+Regression tests in `checksum_test.go`: the rotted file through both paths, a
+cold copy that disagrees with a fully checksummed hot copy, and a recorded file
+gone missing. Each must fail and leave the record alone, and all fail with the
+fix reverted. A fourth test checks that a plain append still succeeds.
+
 ### A file that failed verification stayed on the drive under its final name
 
 `-ingest` (`main.go:832`), `-sync` (`sync.go:398`), `-replicate`
