@@ -744,14 +744,15 @@ func main() {
 			select {} // interrupt handler will os.Exit after user responds
 		}
 
+		// A copy failure does not stop the files that did copy from being
+		// verified and recorded: they are on disk under their final names, and
+		// a re-run skips anything that exists, so stopping here left them
+		// never read back and in no manifest.
 		var copyFailed int
 		for _, r := range results {
 			if r != nil && r.err != nil {
 				copyFailed++
 			}
-		}
-		if copyFailed > 0 {
-			exit(10, "%d file(s) failed to copy", copyFailed)
 		}
 
 		fmt.Printf("\n  %s  %s\n\n", magenta("◇"), bold("Verifying"))
@@ -791,11 +792,13 @@ func main() {
 						got, err := hashFile(r.dst, verifyBars[r.dstRoot])
 						if err != nil {
 							fmt.Printf("\n%s verify: %v\n", red("ERROR"), err)
+							discardUnverified(r.dst)
 							verifyFailed.Add(1)
 							return
 						}
 						if got != r.srcHash {
 							fmt.Printf("\n%s %s\n", red("MISMATCH:"), r.dst)
+							discardUnverified(r.dst)
 							verifyFailed.Add(1)
 							return
 						}
@@ -819,15 +822,19 @@ func main() {
 			select {} // interrupt handler will os.Exit after user responds
 		}
 
-		if verifyFailed.Load() > 0 {
-			exit(11, "%d file(s) failed verification", verifyFailed.Load())
-		}
-
+		// Record what did verify before reporting what did not.
 		for dstRoot, lines := range newChecksums {
 			cPath := filepath.Join(dstRoot, "checksums.b3")
 			if err := addChecksums(cPath, lines); err != nil {
 				fmt.Printf("%s writing checksums: %v\n", red("ERROR"), err)
 			}
+		}
+
+		if copyFailed > 0 {
+			exit(10, "%d file(s) failed to copy", copyFailed)
+		}
+		if verifyFailed.Load() > 0 {
+			exit(11, "%d file(s) failed verification", verifyFailed.Load())
 		}
 
 		copied := fmtSize(uint64(total.Load()) / uint64(len(dstRoots)))

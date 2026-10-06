@@ -113,7 +113,7 @@ Scans all mounted cards, copies to every mounted drive — hot and cold alike �
 
 The ingest goes to every configured drive that is mounted, whatever its role and whatever its `year_from`/`year_to`. That is deliberate: a cold drive plugged in at ingest time gets a copy verified straight from the card, which is the best provenance a copy can have, and `-sync` later finds it already there. Unplug a drive before ingesting if it should not receive the footage.
 
-Every copy — here, and in `-sync`, `-replicate` and `-pull` — is written under a hidden `.qcp-part-` name and takes its real one only once the bytes are on the disk. A run killed mid-copy therefore leaves either nothing or a whole file at the destination, so "already present" stays a safe answer to "does this still need copying". The leftovers are invisible to every listing and are cleared by the next run that copies into that mission.
+Every copy — here, and in `-sync`, `-replicate` and `-pull` — is written under a hidden `.qcp-part-` name and takes its real one only once the bytes are on the disk. A run killed mid-copy therefore leaves either nothing or a whole file at the destination, so "already present" stays a safe answer to "does this still need copying". The leftovers are invisible to every listing and are cleared by the next run that copies into that mission. A copy that fails verification is deleted on the spot, so the same holds for it: the next run copies it again rather than taking it for done. Files that did copy are verified and recorded even when others failed. A drive-to-drive copy also checks the bytes it read against the source's own `checksums.b3`, so a source file that has rotted since it was recorded is refused rather than archived along with a fresh hash.
 
 Once a mission verifies, browse-tier proxies and stills are generated for it while the cards are still mounted. Pass `-proxy=false` to skip that. The ProRes edit tier is never generated here — ask for it explicitly with `qcp -proxy <n> -tier edit`.
 
@@ -178,7 +178,7 @@ qcp -checksum all                     # generate for every mission in current ye
 qcp -checksum all -year all
 ```
 
-`-verify` re-hashes every file listed in `checksums.b3` and checks the result. `-verify all` does the same for all missions, printing one line per mission.
+`-verify` re-hashes every file listed in `checksums.b3` and checks the result, naming the drive whose copy failed. `-verify all` does the same for all missions, printing one line per mission. Anything that could not be verified fails rather than passing quietly: a copy with no `checksums.b3`, one whose manifest cannot be read, and any file on disk the manifest does not record (run `-checksum` to record it).
 
 `-checksum` is for missions that predate the manifest or were copied by other means. It hashes all drives, cross-checks that every drive agrees on every file, and writes `checksums.b3` only if all drives agree.
 
@@ -197,9 +197,11 @@ qcp -check all                        # check every mission in current year
 qcp -check all -year all              # check the entire archive
 ```
 
-`-check` compares the mission's content — what a transfer would carry, so each drive's own `checksums.b3` is not one of the files compared. It also compares the `checksums.b3` files between drives and reports any file whose recorded hash differs (`≠`). This is the one thing `-verify` cannot catch: it holds each drive to its own manifest, so two copies that differ but are each self-consistent both pass. Comparing the stored manifests costs nothing beyond reading them.
+`-check` compares the mission's content — what a transfer would carry, so each drive's own `checksums.b3` is not one of the files compared — by name and by size, against every cold drive scoped for the year and every other hot drive that holds the mission (a hot drive without it is fine; hot drives are not expected to hold everything). It also compares the `checksums.b3` files between drives and reports any file whose recorded hash differs (`≠`). This is the one thing `-verify` cannot catch: it holds each drive to its own manifest, so two copies that differ but are each self-consistent both pass. Comparing the stored manifests costs nothing beyond reading them.
 
-`-list` shows each mission's size and a column per drive: `✓` where that drive's copy is fully covered by its `checksums.b3`, `·` where the mission is present but not (or only partly) checksummed, `−` where it is absent. Sizes come from the first drive holding the mission and exclude `checksums.b3` itself, so they match across drives. Getting them means walking each mission directory, so `-list` does real work now rather than only reading directory names. `-check` / `-check all` compare each mission against every cold drive scoped for that year and report missing or extra files. Exits 1 if any mission is incomplete.
+`-list` shows each mission's size and a column per drive: `✓` where that drive's copy is fully covered by its `checksums.b3`, `·` where the mission is present but not (or only partly) checksummed, `−` where it is absent. Sizes come from the first drive holding the mission and exclude `checksums.b3` itself, so they match across drives. Getting them means walking each mission directory, so `-list` does real work now rather than only reading directory names. `-check` / `-check all` report missing, extra and different-sized files on each copy. Exits 1 if any mission is incomplete.
+
+Transfers (`-sync`, `-replicate`, `-pull`, `-copy`) treat a destination file as already there only if it is the same size as the source. One under the same name at a different size is reported as a conflict and left alone — it may be the copy that is right — and the run fails once everything else is copied, so `-check` and `-verify` can settle which copy is wrong.
 
 ### Proxies
 

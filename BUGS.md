@@ -45,6 +45,138 @@ Left alone: `-addr :8080` still serves the whole LAN without authentication.
 That is its documented purpose (browsing from a phone), and what it exposes is
 proxies and flags, never footage.
 
+### `-pull` and `-copy` carried the source's `checksums.b3` as footage
+
+`resolveSource` (`pull.go`) listed the source mission with `findFiles`, which
+includes the mission's own `checksums.b3`. A whole-mission `-pull` or `-copy`
+therefore copied the manifest across like a clip. The destination's manifest
+became a byte copy of the source's, with every entry it held, including
+entries for files that were not on the source to copy, and the run then merged
+its own verified hashes on top. So the destination recorded files it never
+received, which its next `-verify` or `-check` would report as missing from
+disk. `-sync` and `-replicate` never did this, because they list content only.
+
+Fixed by listing the source with `contentFiles`, as the others do. The
+destination's manifest is now built from the hashes this run verified, plus
+whatever the destination already recorded. It also stops the manifest's size
+counting toward the plan and toward choosing the fullest source.
+
+Regression test in `transfer_test.go`: a source whose manifest also lists a
+`gone.mp4` that is not on disk. The manifest must not be among the files to
+copy, and after `-copy` the destination must record `a.mp4` and not
+`gone.mp4`. It fails with `findFiles` restored.
+
+### `-check` never compared a second hot copy
+
+`-check` picks a reference copy of each mission (the first hot drive holding
+it, otherwise a cold one) and compared it with the cold drives scoped for the
+year, and with nothing else. A second hot copy, T7 beside T9, was never
+compared with anything. A file missing from it, or a different file under the
+same name, went unreported until that copy was the one something read from:
+the fullest-source rule in `-pull`/`-copy` and `-sync`'s cross-check catch some
+of that, but neither is a report.
+
+Fixed with `checkTargets` (`check.go`), used by the single-mission and year
+paths. Every other hot drive that holds the mission is compared exactly as a
+cold drive is: missing and extra files, sizes, and manifest conflicts. A hot
+drive without the mission is not a gap, since hot drives are not expected to
+hold everything. One holding part of it is. The summary lines now say "other
+copies" rather than "cold drives", and point at `-copy` as well as `-sync`.
+
+Regression test in `transfer_test.go`: T9 and the archive hold `a.mp4` and
+`b.mp4` in mission 1, T7 only `a.mp4`. Both `-check` paths must fail and name T7
+and `b.mp4`. A second mission held by T9 and the archive but not T7 must not be
+reported, and `-check 2` must pass. With hot drives left out of
+`checkTargets`, both paths pass mission 1.
+
+### File sizes were never compared
+
+`-sync`, `-replicate`, `-pull` and `-copy` decided which files a destination
+already had by name alone. `-check` likewise compared only which names each
+drive held. A truncated file, a different file under the same name, or a short
+copy left by a tool other than qcp was taken for done: never copied, never
+reported, and `-check` called the mission complete. Confirmed on `-sync`,
+`-copy` and `-check` with a 5-byte cold `a.mp4` beside a 14-byte hot one: all
+three passed.
+
+Fixed with `planCopy` (`util.go`), which every transfer now uses. It splits the
+source's files into those the destination lacks and those it holds at a
+different size. A size mismatch is reported as a conflict and never
+overwritten, because the destination may be the copy that is right. The rest
+of the run goes ahead, and the command then fails, pointing at `-check` and
+`-verify`. `-check` lists size differences beside its hash conflicts (`≠`, with
+both sizes) in single-mission and year mode, and fails on them.
+
+Regression tests in `transfer_test.go`: `-sync` copies the missing file, leaves
+the wrong-size one untouched and fails; `-copy` fails the same way; `-check`
+fails in both modes. All three fail with the size comparison in `planCopy`
+switched off. A unit test covers `planCopy` itself.
+
+### `-verify` named the mission instead of the drive, and passed what it had not checked
+
+`runVerify` printed its FAIL line with `filepath.Base(dir)`, which is the mission
+directory, where the drive name belonged (`verify.go:122`). With a mission on
+two drives, a failure did not say which copy was bad, and that is the one thing
+the user needs next. Its read-error line did not name the drive either.
+
+It also passed things it had not checked:
+
+- A copy with no `checksums.b3` got a warning and was skipped, and the mission
+  passed on the other copies alone.
+- Files on disk that the manifest did not record were never looked at, and the
+  run still said "all N files ok".
+- In year mode (`-verify all`), `verifySlug` printed a dim "—" for a mission with
+  no manifest anywhere and returned success, while `-verify 42` on the same
+  mission failed.
+
+Fixed with `planVerifyCopy` (`verify.go`), which both paths now share. For each
+copy it returns the recorded entries, the files on disk the manifest leaves
+out, and a reason when the copy cannot be verified at all (no manifest, an
+unreadable manifest, an unscannable directory). Failure lines carry the drive
+name. A copy that cannot be verified, or a file that is not recorded, now fails
+the mission with what and where, and points at `-checksum` where that is the
+remedy. The recorded files are still verified, so one bad copy does not hide
+the state of the others.
+
+Regression tests in `verify_test.go`: the drive is named on a mismatch, and an
+unrecorded file, a copy without a manifest, and a mission with no manifest
+under `-verify all` each fail. All four fail against the old `runVerify` and
+`verifySlug`. A fifth test checks that a good mission still passes both ways.
+
+### Read errors in `checksums.b3` looked like a shorter manifest
+
+Every reader of the manifest (`readChecksumFile`, and the two copies of the
+parsing loop in `verify.go`) ran a `bufio.Scanner` to the end and never checked
+`scanner.Err()`. A manifest that failed to open was also treated as absent. So
+an I/O error part-way through a manifest, which is what a failing drive
+produces, read exactly like a shorter manifest. `-verify` checked fewer files
+and passed. `-evict` qualified a cold copy against fewer entries. Worst, the
+merge after every transfer read what it could and wrote that back, dropping
+every entry past the failure for good.
+
+Fixed with `readChecksums` (`util.go`). A manifest that does not exist is
+empty, but one that exists and cannot be read in full is an error. Every caller
+that decides something or writes a manifest back now stops on that error:
+
+- `mergeChecksums`/`addChecksums` refuse to write.
+- `-verify` reports the copy as unverifiable.
+- `-checksum`'s recorded-hash check and `missionFiles` fail.
+- `-evict` refuses that copy.
+- A transfer fails every file copied from a source whose manifest cannot be read.
+- The ingest's already-copied check counts it as a collision.
+- `-organise` neither carries nor rewrites that manifest.
+- The catalog keeps its previous entry.
+
+`readChecksumFile` remains for display and for derived data such as `-list`,
+`-status` and the proxy planner, and now prints a warning instead of staying
+silent.
+
+Regression test in `verify_test.go`, using a directory in place of
+`checksums.b3`, which opens but fails its first read. `readChecksums` and
+`mergeChecksums` must return an error, `planVerifyCopy` must report the copy as
+unverifiable, and a transfer from such a source must be refused. A missing
+manifest must still read as empty without error.
+
 ### Every run left a `caffeinate` running for good
 
 `keepAwake` (`util.go`) started `caffeinate -mi` to keep the Mac and the drives
@@ -71,6 +203,63 @@ ones included and regardless of `year_from`/`year_to`, where the README said hot
 drives only. That behaviour is intended, since a cold drive plugged in at
 ingest gets a copy verified straight from the card, so the README and `-help`
 now say so instead.
+
+### A file that failed verification stayed on the drive under its final name
+
+`-ingest` (`main.go:832`), `-sync` (`sync.go:398`), `-replicate`
+(`replicate.go:385`) and `-pull`/`-copy` (`pull.go:344`) reported a
+verification failure and then exited, leaving the bad copy at its destination
+name. Every one of those commands decides what still needs copying by whether
+the destination name exists. So a re-run skipped the bad file as already
+copied, it was never verified again, and the next `-checksum` recorded its hash
+as the good one. On `-ingest` the card is formatted once the run looks
+finished, so the bad copy became the only copy.
+
+The copy phase had the same hole one step earlier. When any file failed to
+copy, all four exited before the verify phase. Every file that *had* copied was
+then on disk under its final name, never read back and in no manifest, and
+re-runs skipped those files too.
+
+Fixed in all four places. A file that fails verification is removed at once by
+`discardUnverified` (`copy.go`). Only files this run wrote ever reach it, and
+the source still has the good copy. A copy failure no longer skips the verify
+phase. The hashes of everything that did verify are written to `checksums.b3`
+before the command reports what failed and exits non-zero.
+
+Regression tests in `transfer_test.go`. They run the command in a child process
+(`subprocess_test.go`), because these failures end in `os.Exit`. The first
+gives `-sync` an unreadable source file and asserts that the file which did
+copy is verified and recorded. The second test, under the next entry, asserts
+that a rejected copy is removed. Both fail with the fix reverted. The ingest
+change is the same few lines but has no test, because the ingest flow lives
+inside `main()` and needs mounted cards.
+
+### Drive-to-drive copies never checked the source against its own manifest
+
+`-sync`, `-replicate`, `-pull` and `-copy` verified the destination against the
+hash taken while reading the source, which proves only that the copy is
+faithful. A source file that had rotted since it was recorded was copied
+faithfully too, and the destination's manifest then recorded the damage as the
+good hash. For hot-to-cold copies `-evict`'s manifest cross-check would later
+catch the disagreement. Nothing caught it for cold-to-cold (`-replicate`) or
+into a hot drive (`-pull`, `-copy`), so the damage spread with a clean
+manifest. Confirmed on `-sync`, `-copy` and `-replicate`: a source whose
+`checksums.b3` records different content was copied, recorded and reported as
+success.
+
+Fixed by comparing the bytes as read with the source's manifest. `sourceSums`
+reads each job's source `checksums.b3` once, and `sourceMismatch` (`copy.go`)
+checks every copied file before it is verified. A mismatch fails the file,
+removes the copy, and points at `-verify` on the source. A file the source
+manifest does not mention has nothing to be checked against and goes through
+as before. The hash was already computed during the copy, so the check costs
+nothing.
+
+Regression tests in `transfer_test.go`, one each for `-sync`, `-copy` and
+`-replicate`: a rotted source file must not reach the destination or its
+manifest, the file beside it must be recorded, and the run must exit non-zero.
+All three fail with the fix reverted. `-pull` shares `runTransfer` with
+`-copy`.
 
 ### `checksums.b3` was written in place
 

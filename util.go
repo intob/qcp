@@ -171,7 +171,10 @@ func missionFiles(dir string) ([]fileEntry, int64, int, error) {
 	}
 
 	var ghosts int
-	manifest := readChecksumFile(filepath.Join(dir, "checksums.b3"))
+	manifest, err := readChecksums(filepath.Join(dir, "checksums.b3"))
+	if err != nil {
+		return nil, 0, 0, err
+	}
 	rels := make([]string, 0, len(manifest))
 	for rel := range manifest {
 		rels = append(rels, rel)
@@ -185,6 +188,42 @@ func missionFiles(dir string) ([]fileEntry, int64, int, error) {
 		ghosts++
 	}
 	return files, total, ghosts, nil
+}
+
+// sizeConflict is a file that is on both sides of a copy under the same name
+// but not at the same size.
+type sizeConflict struct {
+	rel           string
+	want, present int64
+}
+
+func (c sizeConflict) String() string {
+	return fmt.Sprintf("%s is %d bytes here but %d at the source", c.rel, c.present, c.want)
+}
+
+// planCopy splits a source's files into those the destination is missing and
+// those it holds at a different size.
+//
+// Every transfer used to decide "already there" by name alone, so a truncated
+// file, a different file under the same name, or a short copy left by a tool
+// other than qcp was taken for done and never copied or reported. A size
+// mismatch is never overwritten here: the destination may be the copy that is
+// right, so it is reported for -check and -verify to settle.
+func planCopy(src []fileEntry, dst []fileEntry) (missing []fileEntry, conflicts []sizeConflict) {
+	have := make(map[string]int64, len(dst))
+	for _, f := range dst {
+		have[f.rel] = f.size
+	}
+	for _, f := range src {
+		size, ok := have[f.rel]
+		switch {
+		case !ok:
+			missing = append(missing, f)
+		case size != f.size:
+			conflicts = append(conflicts, sizeConflict{f.rel, f.size, size})
+		}
+	}
+	return missing, conflicts
 }
 
 func missionManifestsMatch(a, b []fileEntry) bool {
@@ -220,8 +259,15 @@ func findMissionSlug(drives []DriveConfig, yearStr string, num int) (string, err
 	return "", fmt.Errorf("no mission %s found on any mounted drive", prefix)
 }
 
-func mergeChecksums(path string, newLines []string) []string {
-	existing := readChecksumFile(path)
+// mergeChecksums returns the checksums.b3 at path with newLines merged in. A
+// manifest that exists but cannot be read is an error, not an empty one:
+// merging into what could be read and writing that back would drop every entry
+// past the failure.
+func mergeChecksums(path string, newLines []string) ([]string, error) {
+	existing, err := readChecksums(path)
+	if err != nil {
+		return nil, err
+	}
 	for _, line := range newLines {
 		parts := strings.SplitN(line, "  ", 2)
 		if len(parts) == 2 {
@@ -240,14 +286,26 @@ func mergeChecksums(path string, newLines []string) []string {
 	for rel, hash := range existing {
 		merged = append(merged, fmt.Sprintf("%s  %s", hash, rel))
 	}
-	return merged
+	return merged, nil
 }
 
-func readChecksumFile(path string) map[string]string {
+// readChecksums reads a checksums.b3 into rel → hash. A manifest that does not
+// exist is empty, not an error. One that exists but cannot be read in full —
+// it cannot be opened, or a read fails part-way — is an error, along with
+// whatever was read before the failure.
+//
+// Every reader used to stop at the first failed read and carry on with what it
+// had, so an I/O error part-way through a manifest looked exactly like a
+// shorter manifest: -verify checked fewer files and passed, and anything that
+// rewrote the manifest dropped the entries it never saw.
+func readChecksums(path string) (map[string]string, error) {
 	out := make(map[string]string)
 	f, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return out, nil
+	}
 	if err != nil {
-		return out
+		return out, err
 	}
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
@@ -257,6 +315,21 @@ func readChecksumFile(path string) map[string]string {
 			out[parts[1]] = parts[0]
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		return out, fmt.Errorf("reading %s: %w", path, err)
+	}
+	return out, nil
+}
+
+// readChecksumFile is readChecksums for callers that only display what a
+// manifest says, or that derive something that is cheap to rebuild: a read
+// error is reported and whatever was read is used. Anything that decides what
+// is safe, or writes a manifest back, uses readChecksums and stops instead.
+func readChecksumFile(path string) map[string]string {
+	out, err := readChecksums(path)
+	if err != nil {
+		fmt.Printf("%s %v\n", yellow("warning:"), err)
+	}
 	return out
 }
 
@@ -264,8 +337,8 @@ func readChecksumFile(path string) map[string]string {
 // an entry in its checksums.b3. Returns false if checksums.b3 is absent or
 // doesn't cover all files (e.g. from a partial previous run or new ingest).
 func isFullyChecksummed(dir string) bool {
-	manifest := readChecksumFile(filepath.Join(dir, "checksums.b3"))
-	if len(manifest) == 0 {
+	manifest, err := readChecksums(filepath.Join(dir, "checksums.b3"))
+	if err != nil || len(manifest) == 0 {
 		return false
 	}
 	files, err := contentFiles(dir)
@@ -322,7 +395,11 @@ func writeChecksums(path string, lines []string) error {
 
 // addChecksums merges lines into the checksums.b3 at path — see mergeChecksums.
 func addChecksums(path string, lines []string) error {
-	return writeChecksums(path, mergeChecksums(path, lines))
+	merged, err := mergeChecksums(path, lines)
+	if err != nil {
+		return err
+	}
+	return writeChecksums(path, merged)
 }
 
 func dirExists(path string) bool {

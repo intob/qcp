@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -95,6 +96,55 @@ func job(src, dst string, bar *barTracker) *result {
 	}
 
 	return &result{n: n, srcHash: hex.EncodeToString(h.Sum(nil))}
+}
+
+// discardUnverified removes a copy that failed verification, or whose source no
+// longer matched its manifest. Every command decides what still needs copying
+// by whether the destination name exists, so a bad file left under its final
+// name was skipped by every re-run, and the next -checksum recorded its hash as
+// the good one. Only ever called on a file this run wrote; the source still
+// holds the good copy, so a re-run copies it again.
+func discardUnverified(dst string) {
+	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+		fmt.Printf("\n%s could not remove %s: %v — delete it before re-running\n", red("ERROR"), dst, err)
+	}
+}
+
+// sourceManifest is a job's source checksums.b3, or why it could not be read.
+type sourceManifest struct {
+	sums map[string]string
+	err  error
+}
+
+// sourceSums reads the checksums.b3 of every job's source directory, keyed by
+// the destination directory the job writes to, for sourceMismatch.
+func sourceSums[J any](jobs []J, dirs func(J) (src, dst string)) map[string]sourceManifest {
+	out := make(map[string]sourceManifest, len(jobs))
+	for _, j := range jobs {
+		src, dst := dirs(j)
+		if _, ok := out[dst]; !ok {
+			sums, err := readChecksums(filepath.Join(src, "checksums.b3"))
+			out[dst] = sourceManifest{sums, err}
+		}
+	}
+	return out
+}
+
+// sourceMismatch reports whether the bytes a drive-to-drive copy read from its
+// source disagree with the source's own checksums.b3. Verifying the destination
+// against the bytes that were read only proves the copy is faithful; a source
+// that has rotted since it was recorded was copied faithfully too, and the
+// destination's manifest then recorded the damage as the good hash. A file the
+// source manifest does not mention has nothing to be checked against.
+//
+// A source manifest that exists but cannot be read fails every file copied from
+// it: the drive is failing a read, and nothing it holds can be vouched for.
+func sourceMismatch(sm sourceManifest, r *result) bool {
+	if sm.err != nil {
+		return true
+	}
+	want := sm.sums[r.rel]
+	return want != "" && want != r.srcHash
 }
 
 // partMarker is in the name of every file qcp is still writing — a copy in

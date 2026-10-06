@@ -225,7 +225,11 @@ func qualifyBackups(cfg Config, yearStr, slug string, num int, targets []evictTa
 	// not compare" refuses here.
 	hotManifests := make([]map[string]string, 0, len(targets))
 	for _, t := range targets {
-		m := readChecksumFile(filepath.Join(t.dir, "checksums.b3"))
+		m, err := readChecksums(filepath.Join(t.dir, "checksums.b3"))
+		if err != nil {
+			notes = append(notes, fmt.Sprintf("%s: %v", bold(t.vol), err))
+			continue
+		}
 		if len(m) == 0 {
 			notes = append(notes, fmt.Sprintf("%s has no checksums.b3 — run %s first",
 				bold(t.vol), bold(fmt.Sprintf("-checksum %03d", num))))
@@ -247,7 +251,11 @@ func qualifyBackups(cfg Config, yearStr, slug string, num int, targets []evictTa
 		if !dirExists(dir) {
 			continue
 		}
-		manifest := readChecksumFile(filepath.Join(dir, "checksums.b3"))
+		manifest, err := readChecksums(filepath.Join(dir, "checksums.b3"))
+		if err != nil {
+			notes = append(notes, fmt.Sprintf("%s: %v", bold(d.name()), err))
+			continue
+		}
 		if len(manifest) == 0 {
 			notes = append(notes, fmt.Sprintf("%s has no checksums.b3 — run %s first",
 				bold(d.name()), bold(fmt.Sprintf("-checksum %03d", num))))

@@ -171,12 +171,11 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 		}
 	}
 
-	var totalMissing, totalExtra, scanErrors, coldChecked, coldGhostCount, totalConflicts int
-	for _, cold := range coldDrives {
-		if cold.name() == refColdVol {
-			continue // this drive is the reference, skip
+	var totalMissing, totalExtra, scanErrors, coldChecked, coldGhostCount, totalConflicts, totalSized int
+	for _, cold := range checkTargets(hotDrives, coldDrives, refVol, yearStr, slug) {
+		if cold.Role == "cold" {
+			coldChecked++
 		}
-		coldChecked++
 		coldDir := filepath.Join(cold.basePath(), cold.Root, yearStr, slug)
 		if !dirExists(coldDir) {
 			header()
@@ -220,9 +219,16 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 				extra = append(extra, f.rel)
 			}
 		}
-		if len(missing) > 0 || len(extra) > 0 || len(coldGhosts) > 0 || len(conflicts) > 0 {
+		// A file on both drives at different sizes is not the same file, and
+		// presence alone used to read as complete.
+		_, sized := planCopy(refFiles, coldFiles)
+		if len(missing) > 0 || len(extra) > 0 || len(coldGhosts) > 0 || len(conflicts) > 0 || len(sized) > 0 {
 			header()
 			fmt.Printf("  %s\n", yellow(cold.name()))
+			for _, c := range sized {
+				fmt.Printf("    %s %s  %s\n", red("≠"), c.rel,
+					dim(fmt.Sprintf("%s %d bytes · %s %d bytes", refVol, c.want, cold.name(), c.present)))
+			}
 			for _, f := range coldGhosts {
 				fmt.Printf("    %s %s\n", yellow("!"), f)
 			}
@@ -240,6 +246,7 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 			totalExtra += len(extra)
 			coldGhostCount += len(coldGhosts)
 			totalConflicts += len(conflicts)
+			totalSized += len(sized)
 		}
 	}
 
@@ -248,23 +255,22 @@ func runCheckMission(cfg Config, missionNum int, year int, yearExplicit bool) bo
 			yellow("!"), bold(slug), refVol)
 		return false
 	}
-	if totalMissing == 0 && totalExtra == 0 && scanErrors == 0 && len(ghosts) == 0 && coldGhostCount == 0 && totalConflicts == 0 {
-		fmt.Printf("%s %s complete on all cold drives\n", green("✓"), bold(slug))
+	if totalMissing == 0 && totalExtra == 0 && scanErrors == 0 && len(ghosts) == 0 && coldGhostCount == 0 && totalConflicts == 0 && totalSized == 0 {
+		fmt.Printf("%s %s complete on every copy\n", green("✓"), bold(slug))
 		return true
 	}
 	fmt.Println()
 	if totalMissing > 0 {
-		fmt.Printf("  %s files missing from cold drives", red(strconv.Itoa(totalMissing)))
+		fmt.Printf("  %s file(s) missing from other copies", red(strconv.Itoa(totalMissing)))
 		if totalExtra > 0 {
-			fmt.Printf("  ·  %s extra files on cold drives", dim(strconv.Itoa(totalExtra)))
+			fmt.Printf("  ·  %s extra file(s) on other copies", dim(strconv.Itoa(totalExtra)))
 		}
 		fmt.Println()
 	} else if totalExtra > 0 {
-		fmt.Printf("  %s extra files on cold drives\n", dim(strconv.Itoa(totalExtra)))
+		fmt.Printf("  %s extra file(s) on other copies\n", dim(strconv.Itoa(totalExtra)))
 	}
-	if totalConflicts > 0 {
-		fmt.Printf("  %s file(s) recorded with different hashes on different drives\n",
-			red(strconv.Itoa(totalConflicts)))
+	if totalConflicts > 0 || totalSized > 0 {
+		fmt.Printf("  %s file(s) differ between drives\n", red(strconv.Itoa(totalConflicts+totalSized)))
 		fmt.Printf("%s\n", dim(fmt.Sprintf("  run -verify %03d to find which copy is wrong", missionNum)))
 	}
 	return false
@@ -370,6 +376,7 @@ func runCheck(cfg Config, year int) bool {
 		extra     []string // extra on cold relative to reference
 		ghosts    []string // in cold's checksums.b3 but absent from cold's disk
 		conflicts []hashConflict
+		sized     []sizeConflict // on both, at different sizes
 	}
 	type missionReport struct {
 		slug   string
@@ -405,11 +412,10 @@ func runCheck(cfg Config, year int) bool {
 
 		var gaps []gap
 		var coldChecked int
-		for _, cold := range coldDrives {
-			if cold.name() == rm.coldVol {
-				continue // this drive is the reference, skip
+		for _, cold := range checkTargets(hotDrives, coldDrives, rm.vol, yearStr, slug) {
+			if cold.Role == "cold" {
+				coldChecked++
 			}
-			coldChecked++
 			coldDir := filepath.Join(cold.basePath(), cold.Root, yearStr, slug)
 			if !dirExists(coldDir) {
 				gaps = append(gaps, gap{
@@ -457,11 +463,12 @@ func runCheck(cfg Config, year int) bool {
 					extra = append(extra, f.rel)
 				}
 			}
-			if len(missing) > 0 || len(extra) > 0 || len(coldGhosts) > 0 || len(conflicts) > 0 {
-				gaps = append(gaps, gap{cold.name(), missing, extra, coldGhosts, conflicts})
+			_, sized := planCopy(refFiles, coldFiles)
+			if len(missing) > 0 || len(extra) > 0 || len(coldGhosts) > 0 || len(conflicts) > 0 || len(sized) > 0 {
+				gaps = append(gaps, gap{cold.name(), missing, extra, coldGhosts, conflicts, sized})
 				totalMissing += len(missing)
 				totalExtra += len(extra)
-				totalConflicts += len(conflicts)
+				totalConflicts += len(conflicts) + len(sized)
 			}
 		}
 
@@ -503,6 +510,10 @@ func runCheck(cfg Config, year int) bool {
 				fmt.Printf("      %s %s  %s\n", red("≠"), c.rel,
 					dim(fmt.Sprintf("%s %s · %s %s", r.refVol, shortHash(c.refHash), g.vol, shortHash(c.otherHash))))
 			}
+			for _, c := range g.sized {
+				fmt.Printf("      %s %s  %s\n", red("≠"), c.rel,
+					dim(fmt.Sprintf("%s %d bytes · %s %d bytes", r.refVol, c.want, g.vol, c.present)))
+			}
 			for _, f := range g.missing {
 				fmt.Printf("      %s %s\n", red("−"), f)
 			}
@@ -514,17 +525,41 @@ func runCheck(cfg Config, year int) bool {
 
 	fmt.Println()
 	if totalMissing > 0 {
-		fmt.Printf("  %s files missing from cold drives", red(strconv.Itoa(totalMissing)))
+		fmt.Printf("  %s file(s) missing from other copies", red(strconv.Itoa(totalMissing)))
 		if totalExtra > 0 {
-			fmt.Printf("  ·  %s extra files on cold drives", dim(strconv.Itoa(totalExtra)))
+			fmt.Printf("  ·  %s extra file(s) on other copies", dim(strconv.Itoa(totalExtra)))
 		}
 		fmt.Println()
-		fmt.Print(dim("  run -sync to copy missing files to cold drives\n"))
+		fmt.Print(dim("  run -sync (cold) or -copy (hot) to fill in missing files\n"))
 	}
 	if totalConflicts > 0 {
-		fmt.Printf("  %s file(s) recorded with different hashes on different drives\n",
+		fmt.Printf("  %s file(s) differ between drives, by recorded hash or by size\n",
 			red(strconv.Itoa(totalConflicts)))
 		fmt.Print(dim("  run -verify on the affected missions to find which copy is wrong\n"))
 	}
 	return false
+}
+
+// checkTargets lists the copies a mission's reference copy is compared with:
+// every other hot drive that holds the mission, then every cold drive scoped
+// for the year.
+//
+// Only the cold drives used to be compared, so a second hot copy — T7 beside
+// T9 — was never compared with anything: a file missing from it, or a
+// different file under the same name, went unreported until it was the copy
+// something was read from. A hot drive is not expected to hold every mission,
+// so one without the mission is not a gap; one that holds part of it is.
+func checkTargets(hot, cold []DriveConfig, refVol, yearStr, slug string) []DriveConfig {
+	var out []DriveConfig
+	for _, h := range hot {
+		if h.name() != refVol && dirExists(filepath.Join(h.basePath(), h.Root, yearStr, slug)) {
+			out = append(out, h)
+		}
+	}
+	for _, c := range cold {
+		if c.name() != refVol {
+			out = append(out, c)
+		}
+	}
+	return out
 }

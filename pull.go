@@ -130,28 +130,29 @@ func runTransfer(cfg Config, spec transferSpec, missions []int, year int, sub st
 				continue // this drive is the source for this mission
 			}
 			dir := filepath.Join(base, d.Root, yearStr, s.slug)
-			existing := make(map[string]bool)
+			var found []fileEntry
 			if dirExists(dir) {
-				found, scanErr := findFiles(dir)
+				var scanErr error
+				found, scanErr = findFiles(dir)
 				if scanErr != nil {
 					fmt.Printf("%s scanning %s on %s: %v\n", red("ERROR"), s.slug, bold(vol), scanErr)
 					unresolved++
 					continue
 				}
-				for _, f := range found {
-					existing[f.rel] = true
-				}
 			}
-			var missing []fileEntry
+			missing, conflicts := planCopy(s.files, found)
+			for _, c := range conflicts {
+				fmt.Printf("%s %s on %s: %s %s\n", red("CONFLICT"), s.slug, bold(vol), c, dim("— left alone; run -check and -verify"))
+			}
+			unresolved += len(conflicts)
 			var size int64
-			for _, f := range s.files {
-				if existing[f.rel] {
-					already[vol] += f.size
-					continue
-				}
-				missing = append(missing, f)
+			for _, f := range missing {
 				size += f.size
 			}
+			for _, f := range s.files {
+				already[vol] += f.size
+			}
+			already[vol] -= size
 			toCopy[vol] += size
 			if len(missing) > 0 {
 				jobs = append(jobs, transferJob{s.slug, s.srcDir, s.srcVol, s.srcBase, dir, vol, missing, size})
@@ -289,15 +290,15 @@ func runTransfer(cfg Config, spec transferSpec, missions []int, year int, sub st
 		select {} // interrupt handler will os.Exit once the user responds
 	}
 
+	// Files that did copy are verified and recorded even if others failed:
+	// they are on disk under their final names and a re-run skips them.
 	var copyFailed int
 	for _, r := range results {
 		if r.err != nil {
 			copyFailed++
 		}
 	}
-	if copyFailed > 0 {
-		exit(1, "%d file(s) failed to copy", copyFailed)
-	}
+	srcSums := sourceSums(jobs, func(j transferJob) (string, string) { return j.srcDir, j.dstDir })
 
 	// verify — one bar per drive
 	fmt.Printf("\n%s\n\n", dim("verifying..."))
@@ -339,9 +340,17 @@ func runTransfer(cfg Config, spec transferSpec, missions []int, year int, sub st
 					if ctx.Err() != nil {
 						return
 					}
+					if sourceMismatch(srcSums[r.dstRoot], r) {
+						fmt.Printf("\n%s %s %s\n", red("FAIL:"), r.dst,
+							dim("— the source no longer matches its checksums.b3; run -verify on it"))
+						discardUnverified(r.dst)
+						verifyFailed.Add(1)
+						return
+					}
 					got, err := hashFile(r.dst, bar)
 					if err != nil || got != r.srcHash {
 						fmt.Printf("\n%s %s\n", red("FAIL:"), r.dst)
+						discardUnverified(r.dst)
 						verifyFailed.Add(1)
 						return
 					}
@@ -364,16 +373,15 @@ func runTransfer(cfg Config, spec transferSpec, missions []int, year int, sub st
 		select {} // interrupt handler will os.Exit once the user responds
 	}
 
-	if verifyFailed.Load() > 0 {
-		exit(1, "%d file(s) failed verification", verifyFailed.Load())
-	}
-
 	// merge into each mission's checksums.b3
 	for dstRoot, lines := range newHashes {
 		cPath := filepath.Join(dstRoot, "checksums.b3")
 		if err := addChecksums(cPath, lines); err != nil {
 			fmt.Printf("%s writing checksums: %v\n", red("ERROR"), err)
 		}
+	}
+	if copyFailed > 0 || verifyFailed.Load() > 0 {
+		exit(1, "%d file(s) failed to copy, %d failed verification", copyFailed, verifyFailed.Load())
 	}
 
 	pulled := make(map[string]bool)
@@ -405,7 +413,13 @@ func resolveSource(cfg Config, role, yearStr string, num int, sub string) (trans
 	}
 
 	// prefer the drive with the most files, so a partially-synced drive is
-	// never silently used as the source
+	// never silently used as the source.
+	//
+	// The mission's content is what is listed, not everything in the directory:
+	// findFiles took the source's checksums.b3 along as if it were footage, so a
+	// destination's manifest was a byte copy of the source's — every entry it
+	// held, including any for files that were not there to copy — rather than
+	// the hashes this run verified. -sync and -replicate never carried it.
 	var srcDir, srcVol, srcBase string
 	var files []fileEntry
 	for _, d := range cfg.Drives {
@@ -417,7 +431,7 @@ func resolveSource(cfg Config, role, yearStr string, num int, sub string) (trans
 		if !dirExists(dir) {
 			continue
 		}
-		found, err := findFiles(dir)
+		found, err := contentFiles(dir)
 		if err != nil {
 			continue
 		}

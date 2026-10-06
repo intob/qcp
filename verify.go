@@ -1,13 +1,11 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -49,41 +47,31 @@ func runVerify(cfg Config, missionNum int, year int) bool {
 		return false
 	}
 
-	type entry struct{ hash, rel string }
 	type dirJob struct {
 		dirEntry
-		entries   []entry
+		verifyCopy
 		totalSize int64
 	}
 
 	var jobs []dirJob
+	var unverifiable int
 	for _, de := range dirs {
-		cPath := filepath.Join(de.dir, "checksums.b3")
-		var entries []entry
-		var totalSize int64
-		f, err := os.Open(cPath)
-		if err != nil {
-			fmt.Printf("%s cannot open %s: %v\n", yellow("warning:"), cPath, err)
+		vc := planVerifyCopy(de.dir, missionNum)
+		if vc.problem != "" {
+			fmt.Printf("%s %s: %s\n", red("ERROR"), bold(de.vol), vc.problem)
+			unverifiable++
 			continue
 		}
-		scanner := bufio.NewScanner(f)
-		for scanner.Scan() {
-			parts := strings.SplitN(scanner.Text(), "  ", 2)
-			if len(parts) == 2 {
-				if parts[1] == "checksums.b3" {
-					continue // a manifest cannot describe itself; see mergeChecksums
-				}
-				entries = append(entries, entry{parts[0], parts[1]})
-				if info, err := os.Stat(filepath.Join(de.dir, parts[1])); err == nil {
-					totalSize += info.Size()
-				}
+		var totalSize int64
+		for _, e := range vc.entries {
+			if info, err := os.Stat(filepath.Join(de.dir, e.rel)); err == nil {
+				totalSize += info.Size()
 			}
 		}
-		f.Close()
-		jobs = append(jobs, dirJob{de, entries, totalSize})
+		jobs = append(jobs, dirJob{de, vc, totalSize})
 	}
 	if len(jobs) == 0 {
-		fmt.Printf("%s no checksums.b3 found for mission %03d\n", red("ERROR"), missionNum)
+		fmt.Printf("%s no copy of mission %03d could be verified\n", red("ERROR"), missionNum)
 		return false
 	}
 
@@ -109,16 +97,16 @@ func runVerify(cfg Config, missionNum int, year int) bool {
 		jobPools = append(jobPools, wp)
 		submitters = append(submitters, func() {
 			for _, e := range job.entries {
-				e, dir, b := e, job.dir, bar
+				e, dir, vol, b := e, job.dir, job.vol, bar
 				wp.run(func() {
 					got, err := hashFile(filepath.Join(dir, e.rel), b)
 					if err != nil {
-						fmt.Printf("\n%s %v\n", red("ERROR:"), err)
+						fmt.Printf("\n%s [%s] %v\n", red("ERROR:"), vol, err)
 						failed.Add(1)
 						return
 					}
 					if got != e.hash {
-						fmt.Printf("\n%s [%s]: %s\n", red("FAIL"), filepath.Base(dir), e.rel)
+						fmt.Printf("\n%s [%s] %s\n", red("FAIL"), vol, e.rel)
 						failed.Add(1)
 					}
 				})
@@ -134,8 +122,24 @@ func runVerify(cfg Config, missionNum int, year int) bool {
 	}
 	p.Wait()
 
+	var unrecorded int
+	for _, j := range jobs {
+		if n := len(j.unrecorded); n > 0 {
+			fmt.Printf("\n%s %d file(s) on %s are not in checksums.b3 and were not verified, first: %s\n",
+				yellow("!"), n, bold(j.vol), j.unrecorded[0])
+			unrecorded += n
+		}
+	}
+	if unrecorded > 0 {
+		fmt.Printf("%s\n", dim(fmt.Sprintf("  run -checksum %03d to record them", missionNum)))
+	}
+
 	if n := failed.Load(); n > 0 {
 		fmt.Printf("\n%s %d file(s) failed\n", red("ERROR"), n)
+		return false
+	}
+	if unverifiable > 0 || unrecorded > 0 {
+		fmt.Printf("\n%s recorded files ok, but not every copy or file could be verified\n", red("✗"))
 		return false
 	}
 	total := 0
@@ -144,6 +148,54 @@ func runVerify(cfg Config, missionNum int, year int) bool {
 	}
 	fmt.Printf("\n%s all %d files ok across %d drive(s)\n", green("✓"), total, len(jobs))
 	return true
+}
+
+// verifyEntry is one file a manifest records.
+type verifyEntry struct{ hash, rel string }
+
+// verifyCopy is what one copy of a mission is verified against: the files its
+// checksums.b3 records, the files on disk it does not, and — when the copy
+// cannot be verified at all — why.
+type verifyCopy struct {
+	entries    []verifyEntry
+	unrecorded []string
+	problem    string
+}
+
+// planVerifyCopy reads one copy's manifest and lists what it leaves out.
+//
+// -verify used to skip a copy with no checksums.b3 with a warning, pass a
+// mission whose files were not all recorded with "all N files ok", and in
+// year mode pass a mission it could not verify at all. Each of those is a copy
+// or file nothing has vouched for, so each is now a failure, named.
+func planVerifyCopy(dir string, num int) verifyCopy {
+	var vc verifyCopy
+	manifest, err := readChecksums(filepath.Join(dir, "checksums.b3"))
+	if err != nil {
+		vc.problem = fmt.Sprintf("checksums.b3 could not be read: %v", err)
+		return vc
+	}
+	delete(manifest, "checksums.b3") // a manifest cannot describe itself; see mergeChecksums
+	if len(manifest) == 0 {
+		vc.problem = fmt.Sprintf("no checksums.b3 — run -checksum %03d", num)
+		return vc
+	}
+	for rel, hash := range manifest {
+		vc.entries = append(vc.entries, verifyEntry{hash, rel})
+	}
+	sort.Slice(vc.entries, func(i, j int) bool { return vc.entries[i].rel < vc.entries[j].rel })
+	files, err := contentFiles(dir)
+	if err != nil {
+		vc.problem = fmt.Sprintf("could not be scanned: %v", err)
+		return vc
+	}
+	for _, f := range files {
+		if _, ok := manifest[f.rel]; !ok {
+			vc.unrecorded = append(vc.unrecorded, f.rel)
+		}
+	}
+	sort.Strings(vc.unrecorded)
+	return vc
 }
 
 func runVerifyAll(cfg Config) bool {
@@ -211,14 +263,15 @@ func runVerifyYear(cfg Config, year int) bool {
 // It is the batch-mode counterpart to runVerify: no progress bars, one line of
 // output per mission, continues on failure rather than calling exit.
 func verifySlug(cfg Config, slug, yearStr string, volInfos map[string]driveInfo) bool {
-	type entry struct{ hash, rel string }
 	type driveJob struct {
-		vol     string
-		dir     string
-		entries []entry
+		vol string
+		dir string
+		verifyCopy
 	}
 
+	num, _ := parseMissionNum(slug)
 	var jobs []driveJob
+	var problems []string
 	for _, d := range cfg.Drives {
 		base := d.basePath()
 		if !dirExists(base) {
@@ -228,27 +281,15 @@ func verifySlug(cfg Config, slug, yearStr string, volInfos map[string]driveInfo)
 		if !dirExists(dir) {
 			continue
 		}
-		f, err := os.Open(filepath.Join(dir, "checksums.b3"))
-		if err != nil {
+		vc := planVerifyCopy(dir, num)
+		if vc.problem != "" {
+			problems = append(problems, fmt.Sprintf("[%s] %s", d.name(), vc.problem))
 			continue
 		}
-		var entries []entry
-		scanner := bufio.NewScanner(f)
-		for scanner.Scan() {
-			parts := strings.SplitN(scanner.Text(), "  ", 2)
-			if len(parts) == 2 && parts[1] != "checksums.b3" {
-				entries = append(entries, entry{parts[0], parts[1]})
-			}
+		for _, rel := range vc.unrecorded {
+			problems = append(problems, fmt.Sprintf("[%s] %s not in checksums.b3", d.name(), rel))
 		}
-		f.Close()
-		if len(entries) > 0 {
-			jobs = append(jobs, driveJob{d.name(), dir, entries})
-		}
-	}
-
-	if len(jobs) == 0 {
-		fmt.Printf("  %s %s\n", dim("—"), dim(slug+" (no checksums.b3)"))
-		return true
+		jobs = append(jobs, driveJob{d.name(), dir, vc})
 	}
 
 	type failure struct {
@@ -287,7 +328,7 @@ func verifySlug(cfg Config, slug, yearStr string, volInfos map[string]driveInfo)
 		wp.wait()
 	}
 
-	if len(failures) > 0 {
+	if len(failures) > 0 || len(problems) > 0 {
 		fmt.Printf("  %s %s\n", red("✗"), bold(slug))
 		sort.Slice(failures, func(i, j int) bool {
 			if failures[i].vol != failures[j].vol {
@@ -301,6 +342,9 @@ func verifySlug(cfg Config, slug, yearStr string, volInfos map[string]driveInfo)
 			} else {
 				fmt.Printf("      %s [%s] %s\n", red("FAIL"), f.vol, f.rel)
 			}
+		}
+		for _, p := range problems {
+			fmt.Printf("      %s %s\n", yellow("!"), p)
 		}
 		return false
 	}

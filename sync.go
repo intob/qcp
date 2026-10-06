@@ -157,6 +157,7 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 		size    int64
 	}
 	var jobs []syncJob
+	var sizeConflicts int
 	for _, dst := range archives {
 		for _, slug := range slugs {
 			ms := missionSources[slug]
@@ -174,15 +175,14 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 					fmt.Printf("%s scanning %s on %s: %v\n", red("ERROR"), slug, bold(dst.name()), err)
 					continue
 				}
-				dstSet := make(map[string]bool, len(dstFiles))
-				for _, f := range dstFiles {
-					dstSet[f.rel] = true
+				var conflicts []sizeConflict
+				missing, conflicts = planCopy(ms.files, dstFiles)
+				for _, c := range conflicts {
+					fmt.Printf("%s %s on %s: %s\n", red("CONFLICT"), slug, bold(dst.name()), c)
 				}
-				for _, f := range ms.files {
-					if !dstSet[f.rel] {
-						missing = append(missing, f)
-						missingSize += f.size
-					}
+				sizeConflicts += len(conflicts)
+				for _, f := range missing {
+					missingSize += f.size
 				}
 			}
 			if len(missing) > 0 {
@@ -202,6 +202,10 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 	}
 
 	if len(jobs) == 0 {
+		if sizeConflicts > 0 {
+			fmt.Printf("%s %d file(s) differ in size from the hot copy — run -check and -verify\n", red("ERROR"), sizeConflicts)
+			return false
+		}
 		fmt.Println(dim("all drives are in sync"))
 		return !hasGhosts
 	}
@@ -346,15 +350,15 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 		select {} // interrupt handler will os.Exit after user responds
 	}
 
+	// Files that did copy are verified and recorded even if others failed:
+	// they are on disk under their final names and a re-run skips them.
 	var copyFailed int
 	for _, r := range results {
 		if r != nil && r.err != nil {
 			copyFailed++
 		}
 	}
-	if copyFailed > 0 {
-		exit(1, "%d file(s) failed to copy", copyFailed)
-	}
+	srcSums := sourceSums(jobs, func(j syncJob) (string, string) { return j.srcDir, j.dstDir })
 
 	// Phase 2: verify — one bar per archive
 	fmt.Printf("\n%s\n\n", dim("verifying..."))
@@ -394,9 +398,17 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 					if ctx.Err() != nil {
 						return
 					}
+					if sourceMismatch(srcSums[r.dstRoot], r) {
+						fmt.Printf("\n%s %s %s\n", red("FAIL:"), r.dst,
+							dim("— the source no longer matches its checksums.b3; run -verify on it"))
+						discardUnverified(r.dst)
+						verifyFailed.Add(1)
+						return
+					}
 					got, err := hashFile(r.dst, verifyBars[dstDirToVol[r.dstRoot]])
 					if err != nil || got != r.srcHash {
 						fmt.Printf("\n%s %s\n", red("FAIL:"), r.dst)
+						discardUnverified(r.dst)
 						verifyFailed.Add(1)
 						return
 					}
@@ -420,19 +432,22 @@ func runSync(cfg Config, year int, skipConf bool) bool {
 		select {} // interrupt handler will os.Exit after user responds
 	}
 
-	if verifyFailed.Load() > 0 {
-		exit(1, "%d file(s) failed verification", verifyFailed.Load())
-	}
-
 	for dstRoot, lines := range checksums {
 		cPath := filepath.Join(dstRoot, "checksums.b3")
 		if err := addChecksums(cPath, lines); err != nil {
 			fmt.Printf("%s writing checksums: %v\n", red("ERROR"), err)
 		}
 	}
+	if copyFailed > 0 || verifyFailed.Load() > 0 {
+		exit(1, "%d file(s) failed to copy, %d failed verification", copyFailed, verifyFailed.Load())
+	}
 
 	perArchive := fmtSize(uint64(total.Load()) / uint64(len(archiveSize)))
 	fmt.Printf("\n%s %s synced to %d archive(s)\n", green("✓"), perArchive, len(archiveSize))
+	if sizeConflicts > 0 {
+		fmt.Printf("%s %d file(s) differ in size from the hot copy and were left alone — run -check and -verify\n", red("ERROR"), sizeConflicts)
+		return false
+	}
 	return !hasGhosts
 }
 
