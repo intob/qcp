@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/vbauerster/mpb/v8"
 )
@@ -212,6 +213,7 @@ func runChecksumYear(cfg Config, year int) bool {
 	var totalFailed atomic.Int64
 	for i, j := range jobs {
 		labelVal.Store(fmt.Sprintf("[%d/%d]", i+1, len(jobs)))
+		began := time.Now()
 
 		var mu sync.Mutex
 		var failed atomic.Int64
@@ -287,6 +289,8 @@ func runChecksumYear(cfg Config, year int) bool {
 			cPath := filepath.Join(md.dir, "checksums.b3")
 			if err := writeChecksums(cPath, lines); err != nil {
 				fmt.Printf("\n%s writing %s: %v\n", red("ERROR"), cPath, err)
+			} else {
+				stampChecksummed(md.vol, md.dir, len(lines), began)
 			}
 		}
 	}
@@ -391,6 +395,7 @@ func runChecksum(cfg Config, missionNum int, year int) bool {
 	fmt.Println()
 
 	// hash all files on all drives in parallel, per-drive concurrency
+	began := time.Now()
 	p := mpb.New(mpb.WithWidth(64))
 	var mu sync.Mutex
 	var failed atomic.Int64
@@ -479,6 +484,7 @@ func runChecksum(cfg Config, missionNum int, year int) bool {
 			fmt.Printf("%s writing %s: %v\n", red("ERROR"), cPath, err)
 		} else {
 			fmt.Printf("%s wrote %s (%d files)\n", green("✓"), cPath, len(lines))
+			stampChecksummed(d.vol, d.dir, len(lines), began)
 		}
 	}
 	return true

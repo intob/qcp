@@ -44,18 +44,36 @@ func manifestDigest(dir string) (string, error) {
 	return hashFile(filepath.Join(dir, "checksums.b3"), nil)
 }
 
-// lastVerified returns when the copy at dir was last verified in full, or the
-// zero time if it never was, or its manifest has changed since.
-func lastVerified(dir string) time.Time {
+func readStamp(dir string) (verifiedStamp, bool) {
 	raw, err := os.ReadFile(filepath.Join(dir, verifiedFileName))
 	if err != nil {
-		return time.Time{}
+		return verifiedStamp{}, false
 	}
 	var s verifiedStamp
 	if json.Unmarshal(raw, &s) != nil || s.Version != 1 {
+		return verifiedStamp{}, false
+	}
+	return s, true
+}
+
+// lastVerified returns when the copy at dir was last verified in full, or the
+// zero time if it never was, or its manifest has changed since.
+func lastVerified(dir string) time.Time {
+	s, ok := readStamp(dir)
+	if !ok {
 		return time.Time{}
 	}
 	if d, err := manifestDigest(dir); err != nil || d != s.Manifest {
+		return time.Time{}
+	}
+	return s.Verified
+}
+
+// verifiedAgainst is lastVerified for a caller that has already hashed the
+// manifest it is relying on, and needs the stamp to be for exactly that one.
+func verifiedAgainst(dir, digest string) time.Time {
+	s, ok := readStamp(dir)
+	if !ok || digest == "" || s.Manifest != digest {
 		return time.Time{}
 	}
 	return s.Verified
@@ -83,6 +101,19 @@ func stampVerified(vol, dir, digest string, files int, began time.Time) {
 	if err != nil {
 		fmt.Printf("%s recording the verification on %s: %v\n", yellow("warning:"), vol, err)
 	}
+}
+
+// stampChecksummed stamps a copy -checksum has just hashed in full and written
+// the manifest of. Every file it holds was read, and the hashes agreed with
+// every other mounted copy and with everything already recorded, which is all
+// -verify would have established; the stamp is for the manifest as written.
+func stampChecksummed(vol, dir string, files int, began time.Time) {
+	digest, err := manifestDigest(dir)
+	if err != nil {
+		fmt.Printf("%s recording the verification on %s: %v\n", yellow("warning:"), vol, err)
+		return
+	}
+	stampVerified(vol, dir, digest, files, began)
 }
 
 // verifiedSummary is how recently the missions on one drive were verified.

@@ -209,3 +209,115 @@ func mustJSON(t *testing.T, v any) string {
 	}
 	return string(b)
 }
+
+// -checksum reads every file of each copy it hashes, and writes the manifest
+// only when they agree with every other copy and every recorded hash, which is
+// a full verification. Those copies are stamped; one it skipped as already
+// checksummed was not read and is not; and nothing is stamped on a conflict.
+func TestChecksumStampsTheCopiesItHashed(t *testing.T) {
+	for _, mode := range []string{"mission", "year"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			a, b, done := t.TempDir(), t.TempDir(), t.TempDir()
+			cfg := Config{Drives: []DriveConfig{
+				{Volume: "A", Path: a, Role: "hot"},
+				{Volume: "B", Path: b, Role: "cold"},
+				{Volume: "DONE", Path: done, Role: "cold"},
+			}}
+			mission := func(drive string) string { return filepath.Join(drive, "2026", "001_A") }
+			for _, d := range []string{a, b, done} {
+				writeFile(t, filepath.Join(mission(d), "CARD", "clip.mp4"), "clip")
+			}
+			writeFile(t, filepath.Join(mission(done), "checksums.b3"), b3("clip")+"  CARD/clip.mp4\n")
+
+			run := func() bool {
+				if mode == "mission" {
+					return runChecksum(cfg, 1, 2026)
+				}
+				return runChecksumYear(cfg, 2026)
+			}
+			var ok bool
+			captureStdout(t, func() { ok = run() })
+			if !ok {
+				t.Fatal("checksum failed")
+			}
+			for _, d := range []string{a, b} {
+				if lastVerified(mission(d)).IsZero() {
+					t.Errorf("%s was hashed in full but not stamped", d)
+				}
+			}
+			if got := lastVerified(mission(done)); !got.IsZero() {
+				t.Errorf("a copy skipped as already checksummed was stamped %v", got)
+			}
+		})
+	}
+
+	t.Run("conflict", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		a, b := t.TempDir(), t.TempDir()
+		cfg := Config{Drives: []DriveConfig{{Volume: "A", Path: a, Role: "hot"}, {Volume: "B", Path: b, Role: "cold"}}}
+		writeFile(t, filepath.Join(a, "2026", "001_A", "clip.mp4"), "clip")
+		writeFile(t, filepath.Join(b, "2026", "001_A", "clip.mp4"), "clip, differently")
+		captureStdout(t, func() { runChecksum(cfg, 1, 2026) })
+		for _, d := range []string{a, b} {
+			if raw, err := os.ReadFile(filepath.Join(d, "2026", "001_A", verifiedFileName)); err == nil {
+				t.Errorf("stamped despite a conflict: %s", raw)
+			}
+		}
+	})
+}
+
+// -evict relies on a cold copy verified within the last week instead of
+// re-reading it, but only for a stamp of the very manifest the copy qualified
+// with. Here the cold file has rotted since it was stamped, so a re-read would
+// fail: a trusted stamp passes without reading, and an old stamp or one for a
+// different manifest is read and fails.
+func TestEvictTrustsARecentStampOnlyForTheSameManifest(t *testing.T) {
+	now := time.Now()
+	for _, c := range []struct {
+		name    string
+		at      time.Time
+		digest  func(real string) string
+		trusted bool
+	}{
+		{"recent", now.Add(-48 * time.Hour), func(d string) string { return d }, true},
+		{"too old", now.Add(-evictTrustsVerifiedFor - time.Hour), func(d string) string { return d }, false},
+		{"other manifest", now.Add(-time.Hour), func(string) string { return b3("some other manifest") }, false},
+		{"from the future", now.Add(time.Hour), func(d string) string { return d }, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			root := t.TempDir()
+			hot, cold := filepath.Join(root, "hot"), filepath.Join(root, "cold")
+			cfg := Config{Drives: []DriveConfig{{Volume: "HOT", Path: hot, Role: "hot"}, {Volume: "COLD", Path: cold, Role: "cold"}}}
+			for _, d := range []string{hot, cold} {
+				writeMissionFile(t, d, "2026", "001_A", "a.mp4", "clip")
+				writeMissionFile(t, d, "2026", "001_A", "checksums.b3", b3("clip")+"  a.mp4\n")
+			}
+			coldDir := filepath.Join(cold, "2026", "001_A")
+			digest, _ := manifestDigest(coldDir)
+			stampVerified("COLD", coldDir, c.digest(digest), 1, c.at)
+			writeMissionFile(t, cold, "2026", "001_A", "a.mp4", "rot!") // same size, rotted since
+
+			hotDir := filepath.Join(hot, "2026", "001_A")
+			files, _, _, err := missionFiles(hotDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			backups, problems := qualifyBackups(cfg, "2026", "001_A", 1, []evictTarget{{"HOT", hotDir, files, 4}}, 1)
+			if len(problems) > 0 {
+				t.Fatal(problems)
+			}
+
+			var ok bool
+			out := captureStdout(t, func() { ok = verifyBackups([]evictPlan{{num: 1, slug: "001_A", backups: backups}}) })
+
+			if ok != c.trusted {
+				t.Errorf("verifyBackups = %v, want %v (trusted the stamp: %v)\n%s", ok, c.trusted, c.trusted, out)
+			}
+			if c.trusted && !strings.Contains(out, "not re-read") {
+				t.Errorf("did not say the copy was not re-read:\n%s", out)
+			}
+		})
+	}
+}

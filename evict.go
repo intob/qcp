@@ -361,12 +361,50 @@ func printEvictPlan(plans []evictPlan, minCopies int, quick bool) {
 	if quick {
 		fmt.Printf("  %s\n", yellow("-quick: trusting checksums.b3 on the cold drives without re-reading them"))
 	} else {
-		fmt.Printf("  %s\n", dim(fmt.Sprintf("every file will be re-read and hashed on %d cold copy/copies first", minCopies)))
+		now := time.Now()
+		var trusted, reread int
+		for _, p := range plans {
+			for _, b := range p.backups {
+				if _, ok := recentlyVerified(b, now); ok {
+					trusted++
+				} else {
+					reread++
+				}
+			}
+		}
+		window := fmtDays(evictTrustsVerifiedFor)
+		switch {
+		case trusted == 0:
+			fmt.Printf("  %s\n", dim(fmt.Sprintf("every file will be re-read and hashed on %d cold copy/copies first", minCopies)))
+		case reread == 0:
+			fmt.Printf("  %s\n", dim("every cold copy was verified in full within "+window+", so none is re-read"))
+		default:
+			fmt.Printf("  %s\n", dim(fmt.Sprintf("%d cold copy/copies verified within %s are not re-read; every file on the other %d is re-read and hashed first",
+				trusted, window, reread)))
+		}
 	}
 	fmt.Printf("  %s\n\n", dim("the hot copies are deleted only if that passes"))
 }
 
-// verifyBackups re-hashes every cold copy the plans rely on. That is a full
+// evictTrustsVerifiedFor is how recent a cold copy's verified stamp must be for
+// -evict to rely on it instead of re-reading every file. The stamp has to be
+// for the very manifest qualifyBackups checked the hot files against, so all
+// it stands in for is the re-read; a file would have to rot inside the window
+// to slip through, which is the risk -verify oldest exists to keep small.
+const evictTrustsVerifiedFor = 7 * 24 * time.Hour
+
+// recentlyVerified reports when a cold copy was verified, if that was within
+// evictTrustsVerifiedFor and against the manifest it qualified with.
+func recentlyVerified(b evictBackup, now time.Time) (time.Time, bool) {
+	t := verifiedAgainst(b.dir, b.digest)
+	if t.IsZero() || t.After(now) || now.Sub(t) >= evictTrustsVerifiedFor {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+// verifyBackups re-hashes every cold copy the plans rely on, except one
+// verified in full within evictTrustsVerifiedFor. The re-read is a full
 // verification of each copy, so one that passes — and holds nothing its
 // manifest leaves out — is stamped as -verify would stamp it, whether or not
 // the eviction then goes ahead.
@@ -379,8 +417,16 @@ func verifyBackups(plans []evictPlan) bool {
 	sizeByVol := make(map[string]int64)
 	baseByVol := make(map[string]string)
 	var volOrder []string
+	now := time.Now()
+	var trusted int
 	for _, p := range plans {
 		for _, b := range p.backups {
+			if t, ok := recentlyVerified(b, now); ok {
+				fmt.Printf("  %s %s on %s %s\n", green("✓"), p.slug, bold(b.vol),
+					dim("verified "+lastSeen(t)+", within "+fmtDays(evictTrustsVerifiedFor)+" — not re-read"))
+				trusted++
+				continue
+			}
 			jobs = append(jobs, job{b, p.slug})
 			if _, seen := baseByVol[b.vol]; !seen {
 				baseByVol[b.vol] = b.base
@@ -388,6 +434,13 @@ func verifyBackups(plans []evictPlan) bool {
 			}
 			sizeByVol[b.vol] += b.size
 		}
+	}
+	if trusted > 0 {
+		fmt.Println()
+	}
+	if len(jobs) == 0 {
+		fmt.Printf("%s every cold copy was verified within %s\n", green("✓"), fmtDays(evictTrustsVerifiedFor))
+		return true
 	}
 
 	fmt.Printf("%s\n\n", dim("verifying cold copies..."))
@@ -474,6 +527,15 @@ func verifyBackups(plans []evictPlan) bool {
 	}
 	fmt.Printf("\n%s cold copies verified\n", green("✓"))
 	return true
+}
+
+// fmtDays renders a whole number of days, for messages.
+func fmtDays(d time.Duration) string {
+	n := int(d / (24 * time.Hour))
+	if n == 1 {
+		return "1 day"
+	}
+	return fmt.Sprintf("%d days", n)
 }
 
 // unrecordedOn lists the files on a cold copy that its manifest does not
