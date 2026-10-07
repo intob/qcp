@@ -64,6 +64,13 @@ func job(src, dst string, bar *barTracker) *result {
 	if err != nil {
 		return &result{err: err}
 	}
+	// Verification reads the copy back; keep the bytes written here out of
+	// memory so that read has to come from the drive. See keepOutOfCache.
+	if err := keepOutOfCache(wr); err != nil {
+		wr.Close()
+		os.Remove(tmp)
+		return &result{err: err}
+	}
 
 	h := blake3.New(32, nil)
 	var w io.Writer = wr

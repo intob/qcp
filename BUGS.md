@@ -32,6 +32,43 @@ confirmed as intended and is documented instead.
 
 ## Fixed
 
+### A copy was verified from memory, not from the drive it was written to
+
+Found on 2026-10-07 from `-check 40`, which reported `Untitled/923_0470.MXF`
+recorded as `c57eb11e` on T7 and `6bd29dc4` on ARCHIVE_01. Same size on both,
+same sidecar hash, same file list: one clip, two contents. `c57eb11e` was
+computed while the ingest read the card on 13 Jul and recorded on T7 after the
+read-back of T7's copy matched it. T7's copy hashed to `6bd29dc4` when read on
+2026-10-07, and so did ARCHIVE_01's, copied from T7 by `-sync` an hour after the
+ingest, and T9's, pulled on 20 Aug. Two independent reads agreed on `c57eb11e`
+at ingest, so the bytes handed to T7 were right and what T7 holds is not: every
+surviving copy descends from a damaged one.
+
+The read-back could not see that. `job` (`copy.go`) wrote through the page
+cache, and the verify phase read the file back moments later. With 32GB of RAM
+the whole 11.7GB clip was still in memory, so the read-back compared memory
+with memory and never reached the drive. Confirmed with `mincore`: a 1GiB file
+just written and synced is 100% resident, and so a read of it is served from
+RAM. Damage on the way to the drive, or on it, went unseen until something next
+read the file from disk — here `-sync`, which before `sourceMismatch` copied it
+faithfully and recorded the damage as the good hash.
+
+Fixed with `keepOutOfCache` (`nocache_darwin.go`), which sets `F_NOCACHE` on
+every copy `job` writes, so none of it is left in memory and the read-back has
+to come from the drive. Writing that way cost nothing measurable on T9 (831MB/s
+with and without). The read-back itself still goes through the cache: a read
+with `F_NOCACHE` gets no read-ahead and ran at about 50MB/s against 770MB/s on
+T9, and one such read of a healthy 5GB file stalled the drive with no I/O for
+six minutes. A page that came from a read is a copy of what is on the disk, so
+with no written pages left behind a normal read sees the drive's bytes.
+
+Regression test in `nocache_darwin_test.go`: after `job`, none of the copy is
+resident. With the fix removed, 100% is.
+
+Resolved by hand: the archive's copy is taken as the clip, and 040 was deleted
+from T9, whose copy also had three clips truncated by an interrupted pull on
+20 Aug. It is to be deleted from T7 when T7 is next mounted.
+
 ### An unflagged clip came back flagged when another drive was mounted
 
 Found on 2026-10-06, after the fourth read, while looking for what to improve.
