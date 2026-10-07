@@ -433,6 +433,12 @@ func (mm *manifestMoves) flush() bool {
 		ok = false
 	}
 	for dir := range mm.changed {
+		// A verified stamp covers the manifest it was verified against, which
+		// this rewrites, so it no longer counts; left behind it would also keep
+		// an emptied mission's directory from being removed.
+		if err := os.Remove(filepath.Join(dir, verifiedFileName)); err != nil && !os.IsNotExist(err) {
+			fmt.Printf("%s %v\n", yellow("warning:"), err)
+		}
 		path := filepath.Join(dir, "checksums.b3")
 		m := mm.manifests[dir]
 		var err error

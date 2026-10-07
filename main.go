@@ -56,6 +56,8 @@ func usage() {
 
 	section("VERIFY")
 	row("-verify", "n|list|all", "re-verify mission(s) across all mounted drives")
+	row("-verify", "oldest", "re-verify the copies that have gone longest unchecked, every year")
+	row("  -for", "duration", "time budget for -verify oldest (default: 1h)")
 	row("-checksum", "n|list|all", "generate checksums.b3 for mission(s) (or all in year)")
 
 	section("ORGANISE")
@@ -194,7 +196,8 @@ func main() {
 	skipConf := flag.Bool("y", false, "skip confirmation")
 	missionFlag := flag.String("ingest", "", "mission name or number")
 	yearFlag := flag.String("year", "", `year to operate on (default: current year, "all" for all years)`)
-	verifyMissionStr := flag.String("verify", "", `re-verify mission(s) across all mounted drives (e.g. "42", "42,44", "42-48", "all")`)
+	verifyMissionStr := flag.String("verify", "", `re-verify mission(s) across all mounted drives (e.g. "42", "42,44", "42-48", "all", "oldest")`)
+	verifyFor := flag.Duration("for", 0, "-verify oldest: how long to keep verifying (default 1h)")
 	checksumMissionStr := flag.String("checksum", "", `generate checksums.b3 for mission(s) (e.g. "42", "42,44", "42-48", "all")`)
 	pullMissionStr := flag.String("pull", "", `pull mission(s) from cold storage to hot drives (e.g. "42", "42,44", "42-48")`)
 	copyMissionStr := flag.String("copy", "", `copy mission(s) from one hot drive to the others (e.g. "42", "42,44", "42-48")`)
@@ -260,6 +263,13 @@ func main() {
 	if *evictCopies < 1 {
 		exit(1, "-copies must be at least 1")
 	}
+	verifyOldest := *verifyMissionStr == "oldest"
+	if *verifyFor != 0 && !verifyOldest {
+		exit(1, "-for only applies to -verify oldest")
+	}
+	if *verifyFor < 0 {
+		exit(1, "-for must be a positive duration, e.g. 2h or 90m")
+	}
 	var evictDrives []string
 	for _, name := range strings.Split(*evictFrom, ",") {
 		if name = strings.TrimSpace(name); name != "" {
@@ -299,7 +309,7 @@ func main() {
 	// Whatever the command, and however it ends, the mounted drives are
 	// re-catalogued for the year it worked on as qcp finishes — see catalog.go.
 	catalogYears := []int{year}
-	if yearAll {
+	if yearAll || (verifyOldest && *yearFlag == "") {
 		catalogYears = nil
 	}
 	onExit(func() { refreshCatalog(cfg, catalogYears) })
@@ -490,6 +500,20 @@ func main() {
 	}
 
 	switch {
+	case verifyOldest:
+		// Scrubbing is archive-wide unless a year is asked for.
+		var years []int
+		if *yearFlag != "" && !yearAll {
+			years = []int{year}
+		}
+		budget := *verifyFor
+		if budget == 0 {
+			budget = time.Hour
+		}
+		if !runVerifyOldest(cfg, years, budget) {
+			quit(1)
+		}
+		return
 	case *verifyMissionStr == "all":
 		var ok bool
 		if yearAll {

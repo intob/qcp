@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/vbauerster/mpb/v8"
 )
@@ -84,8 +85,13 @@ func runVerify(cfg Config, missionNum int, year int) bool {
 	}
 	fmt.Println()
 
+	began := time.Now()
 	p := mpb.New(mpb.WithWidth(64))
 	var failed atomic.Int64
+	failedOn := make(map[string]*atomic.Int64, len(jobs)) // per drive, to stamp the copies that passed
+	for _, job := range jobs {
+		failedOn[job.vol] = new(atomic.Int64)
+	}
 	var trackers []*barTracker
 	var jobPools []*pool
 
@@ -103,11 +109,13 @@ func runVerify(cfg Config, missionNum int, year int) bool {
 					if err != nil {
 						fmt.Printf("\n%s [%s] %v\n", red("ERROR:"), vol, err)
 						failed.Add(1)
+						failedOn[vol].Add(1)
 						return
 					}
 					if got != e.hash {
 						fmt.Printf("\n%s [%s] %s\n", red("FAIL"), vol, e.rel)
 						failed.Add(1)
+						failedOn[vol].Add(1)
 					}
 				})
 			}
@@ -132,6 +140,14 @@ func runVerify(cfg Config, missionNum int, year int) bool {
 	}
 	if unrecorded > 0 {
 		fmt.Printf("%s\n", dim(fmt.Sprintf("  run -checksum %03d to record them", missionNum)))
+	}
+
+	// Each copy that passed in full is stamped, even when another copy failed:
+	// the stamp is about that copy alone.
+	for _, j := range jobs {
+		if failedOn[j.vol].Load() == 0 && len(j.unrecorded) == 0 {
+			recordVerified(j.vol, j.dir, j.verifyCopy, began)
+		}
 	}
 
 	if n := failed.Load(); n > 0 {
@@ -160,6 +176,7 @@ type verifyCopy struct {
 	entries    []verifyEntry
 	unrecorded []string
 	problem    string
+	digest     string // of checksums.b3 as read here, for the verified stamp
 }
 
 // planVerifyCopy reads one copy's manifest and lists what it leaves out.
@@ -180,6 +197,10 @@ func planVerifyCopy(dir string, num int) verifyCopy {
 		vc.problem = fmt.Sprintf("no checksums.b3 — run -checksum %03d", num)
 		return vc
 	}
+	// Taken before any file is read, so a manifest rewritten while this copy
+	// is being verified leaves a stamp that no longer matches, never one that
+	// vouches for files nobody read.
+	vc.digest, _ = manifestDigest(dir)
 	for rel, hash := range manifest {
 		vc.entries = append(vc.entries, verifyEntry{hash, rel})
 	}
@@ -263,6 +284,11 @@ func runVerifyYear(cfg Config, year int) bool {
 // It is the batch-mode counterpart to runVerify: no progress bars, one line of
 // output per mission, continues on failure rather than calling exit.
 func verifySlug(cfg Config, slug, yearStr string, volInfos map[string]driveInfo) bool {
+	return verifySlugOn(cfg.Drives, slug, yearStr, volInfos, slug)
+}
+
+// verifySlugOn is verifySlug limited to the given drives, reported as label.
+func verifySlugOn(drives []DriveConfig, slug, yearStr string, volInfos map[string]driveInfo, label string) bool {
 	type driveJob struct {
 		vol string
 		dir string
@@ -272,7 +298,7 @@ func verifySlug(cfg Config, slug, yearStr string, volInfos map[string]driveInfo)
 	num, _ := parseMissionNum(slug)
 	var jobs []driveJob
 	var problems []string
-	for _, d := range cfg.Drives {
+	for _, d := range drives {
 		base := d.basePath()
 		if !dirExists(base) {
 			continue
@@ -300,6 +326,7 @@ func verifySlug(cfg Config, slug, yearStr string, volInfos map[string]driveInfo)
 	var mu sync.Mutex
 	var failures []failure
 
+	began := time.Now()
 	var drivePools []*pool
 	var submitters []func()
 	for _, job := range jobs {
@@ -328,8 +355,18 @@ func verifySlug(cfg Config, slug, yearStr string, volInfos map[string]driveInfo)
 		wp.wait()
 	}
 
+	failedOn := make(map[string]bool)
+	for _, f := range failures {
+		failedOn[f.vol] = true
+	}
+	for _, j := range jobs {
+		if !failedOn[j.vol] && len(j.unrecorded) == 0 {
+			recordVerified(j.vol, j.dir, j.verifyCopy, began)
+		}
+	}
+
 	if len(failures) > 0 || len(problems) > 0 {
-		fmt.Printf("  %s %s\n", red("✗"), bold(slug))
+		fmt.Printf("  %s %s\n", red("✗"), bold(label))
 		sort.Slice(failures, func(i, j int) bool {
 			if failures[i].vol != failures[j].vol {
 				return failures[i].vol < failures[j].vol
@@ -353,6 +390,6 @@ func verifySlug(cfg Config, slug, yearStr string, volInfos map[string]driveInfo)
 	for _, j := range jobs {
 		total += len(j.entries)
 	}
-	fmt.Printf("  %s %s\n", green("✓"), dim(fmt.Sprintf("%s (%d files, %d drive(s))", slug, total, len(jobs))))
+	fmt.Printf("  %s %s\n", green("✓"), dim(fmt.Sprintf("%s (%d files, %d drive(s))", label, total, len(jobs))))
 	return true
 }

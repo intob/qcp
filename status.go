@@ -11,6 +11,14 @@ import (
 	"syscall"
 )
 
+// verifiedNote renders a drive's verification summary for the DRIVES table.
+func verifiedNote(summary string) string {
+	if summary == "" {
+		return ""
+	}
+	return "  " + dim("· "+summary)
+}
+
 func runStatus(cfg Config, year int) {
 	yearStr := strconv.Itoa(year)
 	const barWidth = 28
@@ -33,10 +41,12 @@ func runStatus(cfg Config, year int) {
 		}
 		if !dirExists(base) {
 			state := "not mounted"
+			var verified string
 			if cy, ok := readCatalog(d.name()).Years[yearStr]; ok {
 				state += " · seen " + lastSeen(cy.Scanned)
+				verified = cy.verified().String()
 			}
-			fmt.Printf("  %s  %-*s  %s\n", name, barWidth, state, tags)
+			fmt.Printf("  %s  %-*s  %s%s\n", name, barWidth, state, tags, verifiedNote(verified))
 			continue
 		}
 		var stat syscall.Statfs_t
@@ -48,10 +58,10 @@ func runStatus(cfg Config, year int) {
 		avail := stat.Bavail * uint64(stat.Bsize)
 		used := total - avail
 		bar := driveSpaceBar(used, total, barWidth)
-		fmt.Printf("  %s  %s  %s / %s  %s\n",
+		fmt.Printf("  %s  %s  %s / %s  %s%s\n",
 			name, bar,
 			dim(fmtSize(used)), dim(fmtSize(total)),
-			tags)
+			tags, verifiedNote(yearVerified(filepath.Join(base, d.Root, yearStr)).String()))
 	}
 
 	// cards section

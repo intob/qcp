@@ -51,7 +51,8 @@ type catalogYear struct {
 type catalogMission struct {
 	Files       map[string]int64 `json:"files"` // content rel → size, as contentFiles lists it
 	Size        int64            `json:"size"`
-	Checksummed bool             `json:"checksummed"` // checksums.b3 covered every file
+	Checksummed bool             `json:"checksummed"`       // checksums.b3 covered every file
+	Verified    time.Time        `json:"verified,omitzero"` // last full -verify of this copy, if it still counts
 }
 
 func catalogPath(drive string) (string, error) {
@@ -131,7 +132,11 @@ func scanCatalogYear(yearDir string) (catalogYear, error) {
 		if err != nil {
 			return cy, fmt.Errorf("%s: %w", slug, err)
 		}
-		m := catalogMission{Files: make(map[string]int64, len(files)), Checksummed: len(manifest) > 0 && len(files) > 0}
+		m := catalogMission{
+			Files:       make(map[string]int64, len(files)),
+			Checksummed: len(manifest) > 0 && len(files) > 0,
+			Verified:    lastVerified(dir),
+		}
 		for _, f := range files {
 			m.Files[f.rel] = f.size
 			m.Size += f.size
@@ -232,6 +237,7 @@ func (cy catalogYear) scan(slug string) (missionScan, bool) {
 
 // lastSeen renders when a drive was last catalogued, for messages.
 func lastSeen(t time.Time) string {
+	t = t.Local() // verified stamps are kept in UTC
 	if t.Year() == time.Now().Year() {
 		return t.Format("2 Jan")
 	}
@@ -276,7 +282,7 @@ func runCatalog(cfg Config) {
 				size += m.Size
 			}
 			fmt.Printf("  %s  %3d mission(s), up to %03d  %s\n", k, len(cy.Missions), cy.maxMission(),
-				dim(fmtSize(uint64(size))+" · seen "+lastSeen(cy.Scanned)))
+				dim(fmtSize(uint64(size))+" · seen "+lastSeen(cy.Scanned)+" · "+cy.verified().String()))
 		}
 	}
 }

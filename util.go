@@ -71,6 +71,7 @@ var metadataFiles = map[string]bool{
 	proxyManifestName: true,
 	proxyMetaName:     true,
 	flagsFileName:     true,
+	verifiedFileName:  true,
 }
 
 // isJunk reports whether a file or directory name should be treated as junk.

@@ -174,6 +174,9 @@ qcp -verify 42-48                     # an inclusive range
 qcp -verify 42 -year 2025
 qcp -verify all                       # verify every mission in current year
 qcp -verify all -year all             # verify the entire archive
+qcp -verify oldest                    # re-verify the longest-unchecked copies, for up to an hour
+qcp -verify oldest -for 3h            # ...for up to three hours
+qcp -verify oldest -year 2024         # ...only within one year
 
 qcp -checksum 42                      # generate checksums.b3 for a mission
 qcp -checksum 42-48                   # several missions
@@ -183,6 +186,10 @@ qcp -checksum all -year all
 ```
 
 `-verify` re-hashes every file listed in `checksums.b3` and checks the result, naming the drive whose copy failed. `-verify all` does the same for all missions, printing one line per mission. Anything that could not be verified fails rather than passing quietly: a copy with no `checksums.b3`, one whose manifest cannot be read, and any file on disk the manifest does not record (run `-checksum` to record it).
+
+Every copy that passes in full — each recorded file read back and matched, nothing on disk left unrecorded — is stamped with the date in a `.qcp-verified.json` dotfile beside its `checksums.b3`. The stamp is about that copy on that drive, so a mission on two drives can pass on one and fail on the other. Like the flags file it is invisible to the manifest walk, so it is never checksummed or synced. It also records a hash of the `checksums.b3` it verified, and stops counting as soon as the manifest changes: after an append, a `-sync` that filled a gap, or an `-organise` that moved files in or out, the copy reads as never verified until it is verified again.
+
+`-verify oldest` is for working through a large archive a few hours at a time. It lists every checksummed copy on the mounted drives, in every year unless `-year` is given, and verifies them one copy at a time: copies never verified first, then the longest unchecked. It stops starting new copies once the `-for` budget is spent (an hour by default), finishes the one in progress, and says what is next. Each copy is stamped as it passes, so stopping early or pressing Ctrl-C loses nothing already done. Mount the archive drive and leave it running; the next run picks up where this one left off. `-status` shows, for each drive, how many of the year's missions have been verified and when the longest-unchecked of them was, and `-catalog` shows the same for every year on every drive, from the catalog for the drives that are not mounted.
 
 `-checksum` is for missions that predate the manifest or were copied by other means. It hashes all drives, cross-checks that every drive agrees on every file, and writes `checksums.b3` only if all drives agree. A hash already recorded is never overwritten: every fresh hash must also match what that drive's manifest — and the manifest of every other mounted copy — already says about the file, so an append is recorded while a file that has changed since it was recorded is reported as a conflict for `-verify`. A manifest that lists files missing from disk is not rewritten either, since that would drop the only record that they existed.
 
@@ -511,8 +518,8 @@ qcp -replicate
 # check all missions are complete on cold drives
 qcp -check all
 
-# periodic integrity check across the whole archive
-qcp -verify all -year all
+# periodic integrity check across the whole archive, a few hours at a time
+qcp -verify oldest -for 3h
 
 # backfill proxies for an older year, then rebuild the browsable index
 qcp -proxy all -year 2025
