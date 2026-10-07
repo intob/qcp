@@ -38,6 +38,7 @@ type driveCatalog struct {
 	Version int                    `json:"version"`
 	Drive   string                 `json:"drive"`
 	Years   map[string]catalogYear `json:"years"` // keyed by year, as on the drive
+	Space   driveSpace             `json:"space,omitzero"`
 }
 
 // catalogYear is one year directory as it was when Scanned. A drive that was
@@ -181,6 +182,10 @@ func refreshCatalog(cfg Config, years []int) {
 		}
 
 		changed := false
+		if sp, err := readDriveSpace(base); err == nil {
+			c.Space = sp
+			changed = true
+		}
 		for _, y := range scan {
 			cy, err := scanCatalogYear(filepath.Join(root, strconv.Itoa(y)))
 			if err != nil {
@@ -260,6 +265,9 @@ func runCatalog(cfg Config) {
 		state := dim("not mounted")
 		if dirExists(d.basePath()) {
 			state = green("mounted")
+		}
+		if sp := c.Space; sp.Total > 0 {
+			state += "  " + dim(fmt.Sprintf("%s free of %s · seen %s", fmtSize(sp.Avail), fmtSize(sp.Total), lastSeen(sp.Seen)))
 		}
 		fmt.Printf("%s  %s\n", bold(fmt.Sprintf("%-*s", width, d.name())), state)
 		if len(c.Years) == 0 {

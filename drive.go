@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 type driveInfo struct {
@@ -224,6 +225,28 @@ func isExternalMedia(volPath string) bool {
 		}
 	}
 	return false
+}
+
+// driveSpace is a drive's capacity and free space as of Seen. The catalog
+// keeps the last reading, so -status can show a drive that is not mounted.
+type driveSpace struct {
+	Total uint64    `json:"total"`
+	Avail uint64    `json:"avail"`
+	Seen  time.Time `json:"seen"`
+}
+
+func (s driveSpace) used() uint64 { return s.Total - s.Avail }
+
+func readDriveSpace(path string) (driveSpace, error) {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return driveSpace{}, err
+	}
+	return driveSpace{
+		Total: stat.Blocks * uint64(stat.Bsize),
+		Avail: stat.Bavail * uint64(stat.Bsize),
+		Seen:  time.Now(),
+	}, nil
 }
 
 func availableBytes(path string) uint64 {

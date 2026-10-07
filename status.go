@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 )
 
 // verifiedNote renders a drive's verification summary for the DRIVES table.
@@ -40,27 +39,40 @@ func runStatus(cfg Config, year int) {
 			tags += "  no-pull"
 		}
 		if !dirExists(base) {
-			state := "not mounted"
+			// Not mounted: the catalog's last reading, dimmed and dated, since
+			// it is a memory of the drive rather than a reading of it.
+			c := readCatalog(d.name())
 			var verified string
-			if cy, ok := readCatalog(d.name()).Years[yearStr]; ok {
-				state += " · seen " + lastSeen(cy.Scanned)
+			seen := c.Space.Seen
+			if cy, ok := c.Years[yearStr]; ok {
 				verified = cy.verified().String()
+				if seen.IsZero() {
+					seen = cy.Scanned
+				}
+			}
+			state := "not mounted"
+			if !seen.IsZero() {
+				state += " · seen " + lastSeen(seen)
+			}
+			if sp := c.Space; sp.Total > 0 {
+				fmt.Printf("  %s  %s  %s  %s%s\n", name,
+					dim(driveSpaceBar(sp.used(), sp.Total, barWidth)),
+					dim(fmt.Sprintf("%s / %s · %s", fmtSize(sp.used()), fmtSize(sp.Total), state)),
+					tags, verifiedNote(verified))
+				continue
 			}
 			fmt.Printf("  %s  %-*s  %s%s\n", name, barWidth, state, tags, verifiedNote(verified))
 			continue
 		}
-		var stat syscall.Statfs_t
-		if err := syscall.Statfs(base, &stat); err != nil {
+		sp, err := readDriveSpace(base)
+		if err != nil {
 			fmt.Printf("  %s  %-*s  %s\n", name, barWidth, "?", tags)
 			continue
 		}
-		total := stat.Blocks * uint64(stat.Bsize)
-		avail := stat.Bavail * uint64(stat.Bsize)
-		used := total - avail
-		bar := driveSpaceBar(used, total, barWidth)
+		bar := driveSpaceBar(sp.used(), sp.Total, barWidth)
 		fmt.Printf("  %s  %s  %s / %s  %s%s\n",
 			name, bar,
-			dim(fmtSize(used)), dim(fmtSize(total)),
+			dim(fmtSize(sp.used())), dim(fmtSize(sp.Total)),
 			tags, verifiedNote(yearVerified(filepath.Join(base, d.Root, yearStr)).String()))
 	}
 

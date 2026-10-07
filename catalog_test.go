@@ -213,3 +213,34 @@ func TestMissionNotFoundNamesTheDriveItIsOn(t *testing.T) {
 		t.Errorf("err for a mission nowhere = %v", err)
 	}
 }
+
+// The catalog keeps each drive's space as last seen, so -status can show how
+// full the archive in the drawer is.
+func TestStatusShowsAnUnmountedDrivesSpaceFromTheCatalog(t *testing.T) {
+	cfg, _, archive := catalogFixture(t)
+	cfg.Drives = append(cfg.Drives, DriveConfig{Volume: "NEVER", Path: filepath.Join(t.TempDir(), "absent"), Role: "cold"})
+	seeArchive(t, cfg, archive, "001_A")
+
+	sp := readCatalog("ARCHIVE").Space
+	if sp.Total == 0 || sp.Avail > sp.Total || time.Since(sp.Seen) > time.Minute {
+		t.Fatalf("space as catalogued = %+v", sp)
+	}
+
+	out := captureStdout(t, func() { runStatus(cfg, 2026) })
+	var archiveLine, neverLine string
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.Contains(line, "ARCHIVE") && archiveLine == "":
+			archiveLine = line
+		case strings.Contains(line, "NEVER") && neverLine == "":
+			neverLine = line
+		}
+	}
+	want := fmtSize(sp.used()) + " / " + fmtSize(sp.Total) + " · not mounted · seen " + lastSeen(sp.Seen)
+	if !strings.Contains(archiveLine, want) {
+		t.Errorf("archive line = %q, want it to contain %q", archiveLine, want)
+	}
+	if !strings.Contains(neverLine, "not mounted") || strings.Contains(neverLine, "/") {
+		t.Errorf("a drive never catalogued should show no space: %q", neverLine)
+	}
+}
