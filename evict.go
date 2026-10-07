@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/vbauerster/mpb/v8"
 )
@@ -28,6 +29,7 @@ type evictBackup struct {
 	manifest map[string]string // rel → hash; the authority on what must be there
 	sizes    map[string]int64  // rel → size on disk, for progress only
 	size     int64
+	digest   string // of checksums.b3 as read here, for the verified stamp
 }
 
 // evictPlan is one mission's eviction: the hot copies to remove, the cold
@@ -256,6 +258,9 @@ func qualifyBackups(cfg Config, yearStr, slug string, num int, targets []evictTa
 				bold(d.name()), bold(same)))
 			continue
 		}
+		// Taken before the manifest is read, so a stamp can never vouch for a
+		// manifest other than the one these files were checked against.
+		digest, _ := manifestDigest(dir)
 		manifest, err := readChecksums(filepath.Join(dir, "checksums.b3"))
 		if err != nil {
 			notes = append(notes, fmt.Sprintf("%s: %v", bold(d.name()), err))
@@ -310,7 +315,7 @@ func qualifyBackups(cfg Config, yearStr, slug string, num int, targets []evictTa
 		for rel := range manifest {
 			size += sizes[rel] // absent files contribute 0 and fail on read
 		}
-		backups = append(backups, evictBackup{d.name(), dir, base, manifest, sizes, size})
+		backups = append(backups, evictBackup{d.name(), dir, base, manifest, sizes, size, digest})
 	}
 
 	if len(backups) < minCopies {
@@ -361,7 +366,10 @@ func printEvictPlan(plans []evictPlan, minCopies int, quick bool) {
 	fmt.Printf("  %s\n\n", dim("the hot copies are deleted only if that passes"))
 }
 
-// verifyBackups re-hashes every cold copy the plans rely on.
+// verifyBackups re-hashes every cold copy the plans rely on. That is a full
+// verification of each copy, so one that passes — and holds nothing its
+// manifest leaves out — is stamped as -verify would stamp it, whether or not
+// the eviction then goes ahead.
 func verifyBackups(plans []evictPlan) bool {
 	type job struct {
 		backup evictBackup
@@ -401,7 +409,12 @@ func verifyBackups(plans []evictPlan) bool {
 		jobsByVol[j.backup.vol] = append(jobsByVol[j.backup.vol], j)
 	}
 
+	began := time.Now()
 	var failed atomic.Int64
+	failedIn := make(map[string]*atomic.Int64, len(jobs)) // per cold copy, keyed by its directory
+	for _, j := range jobs {
+		failedIn[j.backup.dir] = new(atomic.Int64)
+	}
 	var pools []*pool
 	var submitters []func()
 	for vol, volJobs := range jobsByVol {
@@ -421,16 +434,19 @@ func verifyBackups(plans []evictPlan) bool {
 				for _, rel := range rels {
 					want := j.backup.manifest[rel]
 					path := filepath.Join(j.backup.dir, rel)
+					copyFailed := failedIn[j.backup.dir]
 					wp.run(func() {
 						got, err := hashFile(path, bar)
 						if err != nil {
 							fmt.Printf("\n%s %s: %v\n", red("ERROR"), path, err)
 							failed.Add(1)
+							copyFailed.Add(1)
 							return
 						}
 						if got != want {
 							fmt.Printf("\n%s %s\n", red("FAIL:"), path)
 							failed.Add(1)
+							copyFailed.Add(1)
 						}
 					})
 				}
@@ -446,12 +462,32 @@ func verifyBackups(plans []evictPlan) bool {
 	}
 	p.Wait()
 
+	for _, j := range jobs {
+		if failedIn[j.backup.dir].Load() == 0 && len(unrecordedOn(j.backup)) == 0 {
+			stampVerified(j.backup.vol, j.backup.dir, j.backup.digest, len(j.backup.manifest), began)
+		}
+	}
+
 	if n := failed.Load(); n > 0 {
 		fmt.Printf("\n%s %d file(s) failed on the cold copies\n", red("ERROR"), n)
 		return false
 	}
 	fmt.Printf("\n%s cold copies verified\n", green("✓"))
 	return true
+}
+
+// unrecordedOn lists the files on a cold copy that its manifest does not
+// record. -evict only needs the hot files covered, so a cold copy can qualify
+// with extras of its own; it has then not been verified in full, and is not
+// stamped.
+func unrecordedOn(b evictBackup) []string {
+	var out []string
+	for rel := range b.sizes {
+		if b.manifest[rel] == "" && !metadataFiles[rel] {
+			out = append(out, rel)
+		}
+	}
+	return out
 }
 
 // sameDirAs names the hot copy about to be deleted, or the cold copy already

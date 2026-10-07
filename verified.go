@@ -65,11 +65,17 @@ func lastVerified(dir string) time.Time {
 // back and matched, and nothing on disk left unrecorded. A drive that refuses
 // the write is reported, never failed: the verification itself stands.
 func recordVerified(vol, dir string, vc verifyCopy, began time.Time) {
-	if vc.digest == "" {
+	stampVerified(vol, dir, vc.digest, len(vc.entries), began)
+}
+
+// stampVerified writes the stamp for a copy whose manifest hashed to digest
+// before any of its files were read.
+func stampVerified(vol, dir, digest string, files int, began time.Time) {
+	if digest == "" {
 		return
 	}
 	data, err := json.MarshalIndent(verifiedStamp{
-		Version: 1, Verified: began.UTC(), Files: len(vc.entries), Manifest: vc.digest,
+		Version: 1, Verified: began.UTC(), Files: files, Manifest: digest,
 	}, "", "  ")
 	if err == nil {
 		err = writeFileAtomic(filepath.Join(dir, verifiedFileName), append(data, '\n'), 0644)

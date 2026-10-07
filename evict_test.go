@@ -212,3 +212,54 @@ func TestQualifyBackupsCountsOneFolderOnce(t *testing.T) {
 		t.Errorf("one cold folder counted as %d copies", len(backups))
 	}
 }
+
+// -evict re-reads every file of the cold copies it relies on, which is a full
+// verification, so a cold copy that passes is stamped as -verify would stamp
+// it. One with files its manifest leaves out has not been verified in full,
+// and one that fails is not stamped; neither is the hot copy, which is not read.
+func TestEvictStampsTheColdCopiesItVerifies(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	cfg := Config{Drives: []DriveConfig{{Volume: "HOT", Path: filepath.Join(root, "hot"), Role: "hot"}}}
+	manifest := b3("clip") + "  a.mp4\n"
+	writeMissionFile(t, filepath.Join(root, "hot"), "2026", "001_A", "a.mp4", "clip")
+	writeMissionFile(t, filepath.Join(root, "hot"), "2026", "001_A", "checksums.b3", manifest)
+	for _, c := range []struct{ name, content, extra string }{
+		{"GOOD", "clip", ""},
+		{"EXTRA", "clip", "unrecorded.mp4"},
+		{"ROTTED", "clip but rotted", ""},
+	} {
+		drive := filepath.Join(root, c.name)
+		writeMissionFile(t, drive, "2026", "001_A", "a.mp4", c.content)
+		writeMissionFile(t, drive, "2026", "001_A", "checksums.b3", manifest)
+		if c.extra != "" {
+			writeMissionFile(t, drive, "2026", "001_A", c.extra, "not in the manifest")
+		}
+		cfg.Drives = append(cfg.Drives, DriveConfig{Volume: c.name, Path: drive, Role: "cold"})
+	}
+	hotDir := filepath.Join(root, "hot", "2026", "001_A")
+	files, _, _, err := missionFiles(hotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backups, problems := qualifyBackups(cfg, "2026", "001_A", 1, []evictTarget{{"HOT", hotDir, files, 4}}, 3)
+	if len(problems) > 0 {
+		t.Fatal(problems)
+	}
+
+	var ok bool
+	captureStdout(t, func() { ok = verifyBackups([]evictPlan{{num: 1, slug: "001_A", backups: backups}}) })
+
+	if ok {
+		t.Error("a rotted cold copy passed")
+	}
+	dir := func(name string) string { return filepath.Join(root, name, "2026", "001_A") }
+	if lastVerified(dir("GOOD")).IsZero() {
+		t.Error("the cold copy that passed was not stamped")
+	}
+	for _, name := range []string{"EXTRA", "ROTTED", "hot"} {
+		if got := lastVerified(dir(name)); !got.IsZero() {
+			t.Errorf("%s was stamped %v", name, got)
+		}
+	}
+}
