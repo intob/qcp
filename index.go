@@ -298,7 +298,7 @@ func runIndex(cfg Config, out string) bool {
 					mu.Lock()
 					failed++
 					mu.Unlock()
-					fmt.Printf("\n%s %s: %v\n", red("ERROR"), s.src, err)
+					barPrintf(p, "%s %s: %v\n", red("ERROR"), s.src, err)
 				}
 				bar.incr(int(s.size))
 			})

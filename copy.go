@@ -2,11 +2,11 @@ package main
 
 import (
 	"encoding/hex"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 
+	"github.com/vbauerster/mpb/v8"
 	"lukechampine.com/blake3"
 )
 
@@ -119,9 +119,9 @@ func job(src, dst string, bar *barTracker) *result {
 // name was skipped by every re-run, and the next -checksum recorded its hash as
 // the good one. Only ever called on a file this run wrote; the source still
 // holds the good copy, so a re-run copies it again.
-func discardUnverified(dst string) {
+func discardUnverified(p *mpb.Progress, dst string) {
 	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
-		fmt.Printf("\n%s could not remove %s: %v — delete it before re-running\n", red("ERROR"), dst, err)
+		barPrintf(p, "%s could not remove %s: %v — delete it before re-running\n", red("ERROR"), dst, err)
 	}
 }
 

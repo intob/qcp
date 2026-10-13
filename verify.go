@@ -107,13 +107,13 @@ func runVerify(cfg Config, missionNum int, year int) bool {
 				wp.run(func() {
 					got, err := hashFile(filepath.Join(dir, e.rel), b)
 					if err != nil {
-						fmt.Printf("\n%s [%s] %v\n", red("ERROR:"), vol, err)
+						barPrintf(p, "%s [%s] %v\n", red("ERROR:"), vol, err)
 						failed.Add(1)
 						failedOn[vol].Add(1)
 						return
 					}
 					if got != e.hash {
-						fmt.Printf("\n%s [%s] %s\n", red("FAIL"), vol, e.rel)
+						barPrintf(p, "%s [%s] %s\n", red("FAIL"), vol, e.rel)
 						failed.Add(1)
 						failedOn[vol].Add(1)
 					}

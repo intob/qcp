@@ -491,13 +491,13 @@ func verifyBackups(plans []evictPlan) bool {
 					wp.run(func() {
 						got, err := hashFile(path, bar)
 						if err != nil {
-							fmt.Printf("\n%s %s: %v\n", red("ERROR"), path, err)
+							barPrintf(p, "%s %s: %v\n", red("ERROR"), path, err)
 							failed.Add(1)
 							copyFailed.Add(1)
 							return
 						}
 						if got != want {
-							fmt.Printf("\n%s %s\n", red("FAIL:"), path)
+							barPrintf(p, "%s %s\n", red("FAIL:"), path)
 							failed.Add(1)
 							copyFailed.Add(1)
 						}

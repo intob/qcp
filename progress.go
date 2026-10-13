@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"os"
 	"sync"
 	"time"
 
@@ -76,6 +77,28 @@ func (t *barTracker) finish() {
 	if rem := t.total - t.bar.Current(); rem > 0 {
 		t.bar.IncrBy(int(rem))
 	}
+}
+
+// barPrintf prints a line above p's running bars. A plain Printf while mpb is
+// drawing lands on the bar's own line and the next redraw paints over its end,
+// so an error arrived cut short. mpb only draws on a terminal, though, and
+// holds what is written to it until a redraw that never comes, so anywhere
+// else — a pipe, a log file — the line goes straight to stdout, as it does
+// once p has finished.
+func barPrintf(p *mpb.Progress, format string, args ...any) {
+	if stdoutIsTerminal() {
+		if _, err := fmt.Fprintf(p, format, args...); err == nil {
+			return
+		}
+	}
+	fmt.Printf(format, args...)
+}
+
+// stdoutIsTerminal is asked on every call rather than once, as colorEnabled
+// is, because tests swap os.Stdout for a pipe.
+var stdoutIsTerminal = func() bool {
+	fi, err := os.Stdout.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }
 
 type progressWriter struct {

@@ -821,7 +821,7 @@ func main() {
 						results = append(results, r)
 						resultsMu.Unlock()
 						if r.err != nil {
-							fmt.Printf("\n%s copy: %v\n", red("ERROR"), r.err)
+							barPrintf(p1, "%s copy: %v\n", red("ERROR"), r.err)
 							return
 						}
 						total.Add(r.n)
@@ -888,14 +888,14 @@ func main() {
 						}
 						got, err := hashFile(r.dst, verifyBars[r.dstRoot])
 						if err != nil {
-							fmt.Printf("\n%s verify: %v\n", red("ERROR"), err)
-							discardUnverified(r.dst)
+							barPrintf(p2, "%s verify: %v\n", red("ERROR"), err)
+							discardUnverified(p2, r.dst)
 							verifyFailed.Add(1)
 							return
 						}
 						if got != r.srcHash {
-							fmt.Printf("\n%s %s\n", red("MISMATCH:"), r.dst)
-							discardUnverified(r.dst)
+							barPrintf(p2, "%s %s\n", red("MISMATCH:"), r.dst)
+							discardUnverified(p2, r.dst)
 							verifyFailed.Add(1)
 							return
 						}

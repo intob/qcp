@@ -306,7 +306,7 @@ func runReplicate(cfg Config, year int, skipConf bool) bool {
 					results = append(results, r)
 					resultsMu.Unlock()
 					if r.err != nil {
-						fmt.Printf("\n%s %v\n", red("ERROR:"), r.err)
+						barPrintf(p1, "%s %v\n", red("ERROR:"), r.err)
 					} else {
 						total.Add(r.n)
 					}
@@ -374,16 +374,16 @@ func runReplicate(cfg Config, year int, skipConf bool) bool {
 						return
 					}
 					if sourceMismatch(srcSums[r.dstRoot], r) {
-						fmt.Printf("\n%s %s %s\n", red("FAIL:"), r.dst,
+						barPrintf(p2, "%s %s %s\n", red("FAIL:"), r.dst,
 							dim("— the source no longer matches its checksums.b3; run -verify on it"))
-						discardUnverified(r.dst)
+						discardUnverified(p2, r.dst)
 						verifyFailed.Add(1)
 						return
 					}
 					got, err := hashFile(r.dst, verifyBars[dstDirToVol[r.dstRoot]])
 					if err != nil || got != r.srcHash {
-						fmt.Printf("\n%s %s\n", red("FAIL:"), r.dst)
-						discardUnverified(r.dst)
+						barPrintf(p2, "%s %s\n", red("FAIL:"), r.dst)
+						discardUnverified(p2, r.dst)
 						verifyFailed.Add(1)
 						return
 					}

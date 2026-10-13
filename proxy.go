@@ -1292,7 +1292,7 @@ func generatePlans(plans []missionPlan, tiers proxyTiers, lutDir string) bool {
 						if ctx.Err() != nil {
 							return // interrupted, not a real failure
 						}
-						fmt.Printf("\n%s %s: %v\n", red("ERROR"), w.job.rel, err)
+						barPrintf(pr, "%s %s: %v\n", red("ERROR"), w.job.rel, err)
 						failures.Add(1)
 						// Nothing is recorded for a clip that failed. generateClip
 						// stamps the new SrcHash and Transform onto the entry
@@ -1309,7 +1309,7 @@ func generatePlans(plans []missionPlan, tiers proxyTiers, lutDir string) bool {
 					// states is only read here, never written, so the map
 					// itself needs no lock; planState serialises the mission.
 					if err := states[w.plan].record(meta, written); err != nil {
-						fmt.Printf("\n%s writing %s: %v\n", red("ERROR"), proxyManifestName, err)
+						barPrintf(pr, "%s writing %s: %v\n", red("ERROR"), proxyManifestName, err)
 						manifestFail.Add(1)
 					}
 				})

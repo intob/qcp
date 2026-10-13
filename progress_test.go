@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -127,4 +129,46 @@ func TestOneShortBarDoesNotStrandTheOthers(t *testing.T) {
 		bad.stop()
 		p.Wait()
 	})
+}
+
+// An error raised while a bar is drawing must reach the screen whole. A plain
+// Printf landed on the bar's own line and the next redraw painted over its end.
+// After the bars are done the line still has to come out, on stdout.
+func TestBarPrintfKeepsTheWholeLine(t *testing.T) {
+	orig := stdoutIsTerminal
+	stdoutIsTerminal = func() bool { return true }
+	defer func() { stdoutIsTerminal = orig }()
+
+	var buf bytes.Buffer
+	p := mpb.New(mpb.WithOutput(&buf), mpb.WithAutoRefresh(), mpb.WithWidth(64))
+	bar := addBar(p, "proxy", 10)
+	line := "ERROR Untitled/923_0544.MXF: lut: rename a.cube.tmp a.cube: no such file or directory"
+	barPrintf(p, "%s\n", line)
+	bar.bar.IncrBy(10)
+	waitsWithin(t, "wait", p.Wait)
+	if !strings.Contains(buf.String(), line+"\n") {
+		t.Errorf("line did not survive the redraw:\n%q", buf.String())
+	}
+
+	out := captureStdout(t, func() { barPrintf(p, "%s\n", "after") })
+	if out != "after\n" {
+		t.Errorf("after Wait: got %q on stdout", out)
+	}
+}
+
+// Off a terminal mpb draws nothing and never flushes what was written to it, so
+// a line sent through it was lost — an error missing from a piped log.
+func TestBarPrintfOffATerminalGoesToStdout(t *testing.T) {
+	orig := stdoutIsTerminal
+	stdoutIsTerminal = func() bool { return false }
+	defer func() { stdoutIsTerminal = orig }()
+
+	p := mpb.New(mpb.WithOutput(io.Discard))
+	bar := addBar(p, "proxy", 10)
+	out := captureStdout(t, func() { barPrintf(p, "%s\n", "ERROR x") })
+	bar.bar.IncrBy(10)
+	waitsWithin(t, "wait", p.Wait)
+	if out != "ERROR x\n" {
+		t.Errorf("got %q on stdout", out)
+	}
 }

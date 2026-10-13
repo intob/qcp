@@ -230,7 +230,7 @@ func runChecksumYear(cfg Config, year int) bool {
 					dp.run(func() {
 						hash, err := hashFile(filepath.Join(md.dir, f.rel), bars[md.vol])
 						if err != nil {
-							fmt.Printf("\n%s %s: %v\n", red(fmt.Sprintf("ERROR [%s]", md.vol)), f.rel, err)
+							barPrintf(p, "%s %s: %v\n", red(fmt.Sprintf("ERROR [%s]", md.vol)), f.rel, err)
 							failed.Add(1)
 							return
 						}
@@ -248,7 +248,7 @@ func runChecksumYear(cfg Config, year int) bool {
 
 		if failed.Load() > 0 {
 			totalFailed.Add(failed.Load())
-			fmt.Printf("\n%s %s: %d error(s)\n", dim("skipping"), j.slug, failed.Load())
+			barPrintf(p, "%s %s: %d error(s)\n", dim("skipping"), j.slug, failed.Load())
 			continue
 		}
 
@@ -256,7 +256,7 @@ func runChecksumYear(cfg Config, year int) bool {
 		var conflicts int
 		for _, md := range j.drives {
 			for _, c := range recordedConflicts(md.vol, md.hashes, j.recorded) {
-				fmt.Printf("\n%s %s\n", red("CONFLICT"), c)
+				barPrintf(p, "%s %s\n", red("CONFLICT"), c)
 				conflicts++
 			}
 		}
@@ -266,14 +266,14 @@ func runChecksumYear(cfg Config, year int) bool {
 			ref := j.drives[0].hashes[f.rel]
 			for _, md := range j.drives[1:] {
 				if md.hashes[f.rel] != ref {
-					fmt.Printf("\n%s [%s vs %s]: %s\n", red("CONFLICT"), j.drives[0].vol, md.vol, f.rel)
+					barPrintf(p, "%s [%s vs %s]: %s\n", red("CONFLICT"), j.drives[0].vol, md.vol, f.rel)
 					conflicts++
 				}
 			}
 		}
 		if conflicts > 0 {
 			totalFailed.Add(int64(conflicts))
-			fmt.Printf("\n%s %s: %d conflict(s)\n", dim("skipping"), j.slug, conflicts)
+			barPrintf(p, "%s %s: %d conflict(s)\n", dim("skipping"), j.slug, conflicts)
 			continue
 		}
 
@@ -288,7 +288,7 @@ func runChecksumYear(cfg Config, year int) bool {
 			}
 			cPath := filepath.Join(md.dir, "checksums.b3")
 			if err := writeChecksums(cPath, lines); err != nil {
-				fmt.Printf("\n%s writing %s: %v\n", red("ERROR"), cPath, err)
+				barPrintf(p, "%s writing %s: %v\n", red("ERROR"), cPath, err)
 			} else {
 				stampChecksummed(md.vol, md.dir, len(lines), began)
 			}
@@ -415,7 +415,7 @@ func runChecksum(cfg Config, missionNum int, year int) bool {
 				dp.run(func() {
 					hash, err := hashFile(filepath.Join(d.dir, f.rel), bar)
 					if err != nil {
-						fmt.Printf("\n%s %v\n", red(fmt.Sprintf("ERROR [%s]:", d.vol)), err)
+						barPrintf(p, "%s %v\n", red(fmt.Sprintf("ERROR [%s]:", d.vol)), err)
 						failed.Add(1)
 						return
 					}
