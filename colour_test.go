@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -354,6 +355,41 @@ func TestLookEditedInPlaceIsPickedUp(t *testing.T) {
 	}
 	if cubeAfter == cubeBefore {
 		t.Error("both versions share one cached path")
+	}
+}
+
+// The proxy pool runs several clips at once, so the first clips to need a new
+// cube all find it missing and write it together. Every one of them must come
+// away with the cube: a shared temporary name let the first rename carry the
+// file off from under the rest, failing their clips with ENOENT.
+func TestEnsureLUTConcurrentWriters(t *testing.T) {
+	dir := t.TempDir()
+	const n = 16
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = ensureLUT(dir, transformSGamut3Cine)
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("writer %d: %v", i, err)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != transformSGamut3Cine.LUT {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("want only %s, found %v", transformSGamut3Cine.LUT, names)
 	}
 }
 

@@ -316,11 +316,26 @@ func ensureLUT(dir string, t colourTransform) (string, error) {
 	} else {
 		data = buildCube(t.ID, t.Mat)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
+	// Each writer gets its own temporary: the proxy pool runs clips in
+	// parallel, and the first few to need a new cube all write it at once. A
+	// shared name let the first rename take the file from under the others.
+	// They all write the same bytes, so whichever rename lands last is fine.
+	f, err := os.CreateTemp(dir, t.LUT+".*.tmp")
+	if err != nil {
 		return "", err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	tmp := f.Name()
+	_, err = f.Write(data)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(tmp, 0644)
+	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
 		os.Remove(tmp)
 		return "", err
 	}
